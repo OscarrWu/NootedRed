@@ -96,7 +96,7 @@ void NRed::hwLateInit()
     this->devRevision = (this->readReg32(NBIO_BASE_2 + RCC_DEV0_EPF0_STRAP0) & RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_MASK)
                         >> RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_SHIFT;
 
-    if (this->attributes.isRenoir()) {
+    if (this->attributes.isRenoir() && !this->attributes.isPhoenix()) {
         if (!this->attributes.isGreenSardine() && this->devRevision == 0 && this->pciRevision >= 0x80
             && this->pciRevision <= 0x84)
         {
@@ -168,6 +168,11 @@ void NRed::processPatcher()
             this->attributes.setRenoir();
             this->attributes.setGreenSardine();
             this->enumRevision = 0xA1;
+        } break;
+        case 0x15BF: {  // Phoenix (Radeon 780M, RDNA3)
+            this->attributes.setPhoenix();
+            this->attributes.setRenoir();   // 仿 Renoir 路径（NootedRed 最成熟分支）
+            this->enumRevision = 0xA1;      // 待真机确认实际值
         } break;
         default: PANIC("NRed", "Unknown device ID: 0x%X", this->deviceID);
     }
