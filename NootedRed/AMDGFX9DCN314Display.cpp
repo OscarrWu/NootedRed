@@ -12,7 +12,7 @@
 #include <Headers/kern_util.hpp>
 #include <PenguinWizardry/RuntimeMC.hpp>
 #include <PenguinWizardry/RuntimeVFT.hpp>
-#include <Regs/DCN2.hpp>
+#include <Regs/DCN314.hpp>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSMetaClass.h>
 
