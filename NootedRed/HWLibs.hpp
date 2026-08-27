@@ -113,6 +113,7 @@ private:
     static SInt32 vbiossmcSetMinDeepSleepDcfclk(void* ctx, UInt32 requestedKhz);
     static void   vbiossmcSetDisplayIdleOptimizations(void* ctx, UInt32 idleInfo);
     static void   vbiossmcSetDisplayCount(void* ctx, UInt32 count);
+public:
     static SInt32 vbiossmcSetDispclkCached(UInt32 requestedKhz);
     static SInt32 vbiossmcSetDppclkCached(UInt32 requestedKhz);
 };
