@@ -31,6 +31,7 @@ class X5000HWLibs
     ObjectField<bool>                                            smuSwInitialisedFieldBase;
     ObjectField<void*>                                           smuInternalSWInitField;
     ObjectField<void*>                                           smuFullscreenEventField;
+    void*                                                        smuCtxCache{nullptr};
     ObjectField<void*>                                           smuGetUCodeConstsField;
     ObjectField<void*>                                           smuInternalHWInitField;
     ObjectField<void*>                                           smuNotifyEventField;
@@ -102,4 +103,16 @@ private:
     static bool       getDcn21FwConstants(void* ctx, DMCUFirmwareInfo* fwData);
     static bool       sdma412StartEngine(void* ctx);
     static CAILResult wrapSdmaInitFunctionPointerList(void* ctx, UInt32 major, UInt32 minor, UInt32 patch);
+
+    // VBIOSSMC send primitive and display clock wrappers (DCN 3.1.4)
+    static UInt32 vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz);
+    static SInt32 vbiossmcSetDispclk(void* ctx, UInt32 requestedKhz);
+    static SInt32 vbiossmcSetDppclk(void* ctx, UInt32 requestedKhz);
+    static SInt32 vbiossmcSetDprefclk(void* ctx, UInt32 requestedKhz);
+    static SInt32 vbiossmcSetHardMinDcfclk(void* ctx, UInt32 requestedKhz);
+    static SInt32 vbiossmcSetMinDeepSleepDcfclk(void* ctx, UInt32 requestedKhz);
+    static void   vbiossmcSetDisplayIdleOptimizations(void* ctx, UInt32 idleInfo);
+    static void   vbiossmcSetDisplayCount(void* ctx, UInt32 count);
+    static SInt32 vbiossmcSetDispclkCached(UInt32 requestedKhz);
+    static SInt32 vbiossmcSetDppclkCached(UInt32 requestedKhz);
 };

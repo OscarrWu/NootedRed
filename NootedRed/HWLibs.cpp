@@ -29,6 +29,7 @@
 #include <PenguinWizardry/PatcherPlus.hpp>
 #include <Regs/SDMA0.hpp>
 #include <Regs/SMU.hpp>
+#include <Regs/VBIOSSMC.hpp>
 #include <kern/assert.h>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSBoolean.h>
@@ -1012,6 +1013,7 @@ CAILResult X5000HWLibs::smuPowerUpConfigCommon(void* const ctx)
 CAILResult X5000HWLibs::smuInternalSwInit(void* const ctx, void*, AMDSMUSWInitOutput*)
 {
     singleton().smuSwInitialisedFieldBase(ctx) = true;
+    singleton().smuCtxCache = ctx;
     return kCAILResultOK;
 }
 
@@ -1069,9 +1071,124 @@ CAILResult X5000HWLibs::smu12PowerUpConfig(void* const ctx)
 
 CAILResult X5000HWLibs::smu12InternalHwInit(void* const ctx)
 {
+    singleton().smuCtxCache = ctx;
     if (const auto res = smu12WaitForFwLoaded(ctx); res != kCAILResultOK) { return res; }
 
     return smu12PowerUpConfig(ctx);
+}
+
+// VBIOSSMC: kHz → MHz (向上取整，对齐 Linux khz_to_mhz_ceil)
+static inline UInt32 khzToMhzCeil(UInt32 khz) { return (khz + 999U) / 1000U; }
+
+UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
+{
+    if (ctx == nullptr) {
+        SYSLOG("HWLibs", "VBIOSSMC send with null ctx (msg 0x%x)", msgId);
+        return VBIOSSMC_Result_Failed;
+    }
+
+    auto& hw = singleton();
+
+    // 1) Wait for SMU idle (C2PMSG_91 != BUSY)
+    UInt32 res = VBIOSSMC_Status_BUSY;
+    for (UInt32 tries = 0; tries < 200000; tries += 1) {
+        res = hw.smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_91, 0, kCAILHWBlockMP1, 0);
+        if (res != VBIOSSMC_Status_BUSY) break;
+        IODelay(10);
+    }
+    if (res == VBIOSSMC_Status_BUSY) {
+        SYSLOG("HWLibs", "VBIOSSMC busy timeout before send (msg 0x%x)", msgId);
+        return VBIOSSMC_Result_Failed;
+    }
+
+    // 2) Clear response register
+    hw.smuCgsWriteRegister(ctx, MP1_SMN_C2PMSG_91, 0, VBIOSSMC_Status_BUSY, kCAILHWBlockMP1, 0);
+
+    // 3) Write parameter (MHz)
+    hw.smuCgsWriteRegister(ctx, MP1_SMN_C2PMSG_83, 0, paramMHz, kCAILHWBlockMP1, 0);
+
+    // 4) Write message ID (trigger)
+    hw.smuCgsWriteRegister(ctx, MP1_SMN_C2PMSG_67, 0, msgId, kCAILHWBlockMP1, 0);
+
+    // 5) Wait for completion
+    res = VBIOSSMC_Status_BUSY;
+    for (UInt32 tries = 0; tries < 200000; tries += 1) {
+        res = hw.smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_91, 0, kCAILHWBlockMP1, 0);
+        if (res != VBIOSSMC_Status_BUSY) break;
+        IODelay(10);
+    }
+
+    // 6) Handle failure
+    if (res == VBIOSSMC_Result_Failed) {
+        hw.smuCgsWriteRegister(ctx, MP1_SMN_C2PMSG_91, 0, VBIOSSMC_Result_OK, kCAILHWBlockMP1, 0);
+        SYSLOG("HWLibs", "VBIOSSMC msg 0x%x param %u failed", msgId, paramMHz);
+        return VBIOSSMC_Result_Failed;
+    }
+    if (res == VBIOSSMC_Status_BUSY) {
+        SYSLOG("HWLibs", "VBIOSSMC timeout after send (msg 0x%x)", msgId);
+        return VBIOSSMC_Result_Failed;
+    }
+
+    // 7) Return actual frequency (MHz) written back by SMU
+    return hw.smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_83, 0, kCAILHWBlockMP1, 0);
+}
+
+SInt32 X5000HWLibs::vbiossmcSetDispclk(void* ctx, UInt32 requestedKhz)
+{
+    UInt32 mhz = vbiossmcSendMsg(ctx, VBIOSSMC_MSG_SetDispclkFreq, khzToMhzCeil(requestedKhz));
+    return (mhz == VBIOSSMC_Result_Failed) ? -1 : static_cast<SInt32>(mhz * 1000U);
+}
+
+SInt32 X5000HWLibs::vbiossmcSetDppclk(void* ctx, UInt32 requestedKhz)
+{
+    UInt32 mhz = vbiossmcSendMsg(ctx, VBIOSSMC_MSG_SetDppclkFreq, khzToMhzCeil(requestedKhz));
+    return (mhz == VBIOSSMC_Result_Failed) ? -1 : static_cast<SInt32>(mhz * 1000U);
+}
+
+SInt32 X5000HWLibs::vbiossmcSetDprefclk(void* ctx, UInt32 requestedKhz)
+{
+    UInt32 mhz = vbiossmcSendMsg(ctx, VBIOSSMC_MSG_SetDprefclkFreq, khzToMhzCeil(requestedKhz));
+    return (mhz == VBIOSSMC_Result_Failed) ? -1 : static_cast<SInt32>(mhz * 1000U);
+}
+
+SInt32 X5000HWLibs::vbiossmcSetHardMinDcfclk(void* ctx, UInt32 requestedKhz)
+{
+    UInt32 mhz = vbiossmcSendMsg(ctx, VBIOSSMC_MSG_SetHardMinDcfclkByFreq, khzToMhzCeil(requestedKhz));
+    return (mhz == VBIOSSMC_Result_Failed) ? -1 : static_cast<SInt32>(mhz * 1000U);
+}
+
+SInt32 X5000HWLibs::vbiossmcSetMinDeepSleepDcfclk(void* ctx, UInt32 requestedKhz)
+{
+    UInt32 mhz = vbiossmcSendMsg(ctx, VBIOSSMC_MSG_SetMinDeepSleepDcfclk, khzToMhzCeil(requestedKhz));
+    return (mhz == VBIOSSMC_Result_Failed) ? -1 : static_cast<SInt32>(mhz * 1000U);
+}
+
+void X5000HWLibs::vbiossmcSetDisplayIdleOptimizations(void* ctx, UInt32 idleInfo)
+{
+    vbiossmcSendMsg(ctx, VBIOSSMC_MSG_SetDisplayIdleOptimizations, idleInfo);
+}
+
+void X5000HWLibs::vbiossmcSetDisplayCount(void* ctx, UInt32 count)
+{
+    vbiossmcSendMsg(ctx, VBIOSSMC_MSG_SetDisplayCount, count);
+}
+
+SInt32 X5000HWLibs::vbiossmcSetDispclkCached(UInt32 requestedKhz)
+{
+    void* ctx = singleton().smuCtxCache;
+    if (ctx == nullptr || !smu12IsFwLoaded(ctx)) {
+        return static_cast<SInt32>(requestedKhz);
+    }
+    return vbiossmcSetDispclk(ctx, requestedKhz);
+}
+
+SInt32 X5000HWLibs::vbiossmcSetDppclkCached(UInt32 requestedKhz)
+{
+    void* ctx = singleton().smuCtxCache;
+    if (ctx == nullptr || !smu12IsFwLoaded(ctx)) {
+        return static_cast<SInt32>(requestedKhz);
+    }
+    return vbiossmcSetDppclk(ctx, requestedKhz);
 }
 
 CAILResult X5000HWLibs::smuInternalHwExit(void*) { return kCAILResultOK; }
