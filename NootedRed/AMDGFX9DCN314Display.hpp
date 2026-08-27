@@ -87,6 +87,15 @@ class AMDRadeonX5000_AMDGFX9DCN314Display : public AMDRadeonX5000_AMDGFX9DCNDisp
 
     static AMDFlipOption getFlipOption(AMDRadeonX5000_AMDHWDisplay*);
 
+    // ---- update_odm / resync_fifo 调用点覆写 (方案: audit-odm-resync-wiring.md) ----
+    // init 覆写: 走完基类 init (含 initDCNRegOffs) 之后、首次 flip 之前补 update_odm_direct，
+    //   每次显示初始化只执行一次（守卫: sOdmApplied）
+    static bool init(AMDRadeonX5000_AMDHWDisplay* self, void* hwInterface, void* fbParams);
+
+    // setCurrentDisplayOffset 覆写 (macOS ≤ 10.14 同步提交路径): 基类写地址并等待
+    //   isFlipPending 完成之后（HW 已取走 flip）补 resync_fifo_dccg_dio_direct（守卫: sResyncApplied）
+    static void setCurrentDisplayOffset(AMDRadeonX5000_AMDHWDisplay* self, UInt32 fbIndex, UInt64 value);
+
     // ---- update_odm / resync_fifo 寄存器级直译 (设计: updateodm-resync-directreg-design.md) ----
     // update_odm_direct: 展平 dcn314_update_odm -> set_odm_combine / set_odm_bypass + set_out_rate_control
     //   regs        : HW 寄存器访问器 (self->getHWRegisters())

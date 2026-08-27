@@ -117,6 +117,17 @@ static void dcn314_calc_pix_rate_divider(struct pixel_rate_divider *out,
     out->div_factor2 = k2_div;
 }
 
+// -----------------------------------------------------------------------------
+// update_odm / resync_fifo 调用点 (方案: audit-odm-resync-wiring.md)
+//   - init()                     : 基类 init（含 initDCNRegOffs）完成后、首次 flip 前 → update_odm_direct
+//   - setCurrentDisplayOffset()  : HW 取走 flip 后（基类 isFlipPending 等待结束）→ resync_fifo_dccg_dio_direct
+//   守卫: 文件级静态标志，保证每次驱动生命周期只执行一次，绝不进入 per-frame flip 路径。
+// -----------------------------------------------------------------------------
+static bool (*superInit)(AMDRadeonX5000_AMDHWDisplay*, void*, void*)                   = nullptr;
+static void (*superSetCurrentDisplayOffset)(AMDRadeonX5000_AMDHWDisplay*, UInt32, UInt64) = nullptr;
+static bool sUpdateOdmApplied  = false;
+static bool sResyncFifoApplied = false;
+
 PWDefineRuntimeMC(AMDRadeonX5000_AMDGFX9DCN314Display, Constructor)
 
 AMDRadeonX5000_AMDGFX9DCNDisplay::VFT AMDRadeonX5000_AMDGFX9DCN314Display::vft;
@@ -139,6 +150,17 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::resolve(const char* const kext)
 
     // 覆写 getFlipOption：dcn314 返回 DCN3（基类硬编码 DCN2）
     constants.vftGetFlipOption(vft.inner()) = getFlipOption;
+
+    // 覆写 init：基类 init（含 initDCNRegOffs）之后补 update_odm_direct（先保存基类实现作 super 调用）
+    superInit = constants.vftInit(vft.inner());
+    constants.vftInit(vft.inner()) = init;
+
+    // 覆写 setCurrentDisplayOffset（仅 < macOS 13，与基类 populateVFT 的守卫一致）：
+    // HW 取走 flip 后补 resync_fifo_dccg_dio_direct（先保存基类实现作 super 调用）
+    if (currentKernelVersion() < MACOS_13) {
+        superSetCurrentDisplayOffset = constants.vftSetCurrentDisplayOffset(vft.inner());
+        constants.vftSetCurrentDisplayOffset(vft.inner()) = setCurrentDisplayOffset;
+    }
 
     PenguinWizardry::RuntimeMCManager::singleton().registerMC(gRTMetaClass, kext,
                                                               AMDRadeonX5000_AMDGFX9DCNDisplay::gRTMetaClass);
@@ -212,6 +234,50 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::updateDisplayClocks(AMDRadeonX5000_AMD
 // dcn314 的 DCN3 翻转选项（基类硬编码 DCN2，已审查确认）
 AMDFlipOption AMDRadeonX5000_AMDGFX9DCN314Display::getFlipOption(AMDRadeonX5000_AMDHWDisplay*)
 { return AMDFlipOption::DCN3; }
+
+// init 覆写：先走基类 init（super chain：原版 init → isDCN → initDCNRegOffs 经 vft slot 0 分发到本类），
+// 完成后（initDCNRegOffs 之后、首次 flip 之前）为全部 OTG 初始化 ODM bypass 拓扑。
+// 守卫: sUpdateOdmApplied 保证只执行一次（模式变更入口，勿随每帧 flip 重复）。
+bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* const _self, void* const hwInterface,
+                                               void* const fbParams)
+{
+    if (!superInit(_self, hwInterface, fbParams)) { return false; }
+
+    const auto self = static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self);
+    if (!sUpdateOdmApplied) {
+        sUpdateOdmApplied = true;
+        auto* const regs = self->getHWRegisters();
+        if (regs != nullptr) {
+            // 初始拓扑：全部 OTG 单管直通（bypass），不拼接（OPPC 拼接由后续模式设置决定）
+            const UInt32 oppInst[1] = {0};
+            for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
+                update_odm_direct(*regs, i, oppInst, 1, 0);
+            }
+            DBGLOG("GFX9DCN314Display", "init: update_odm_direct (bypass) applied for %u OTG(s)",
+                   MAX_SUPPORTED_DISPLAYS_RV);
+        }
+    }
+    return true;
+}
+
+// setCurrentDisplayOffset 覆写（macOS ≤ 10.14 同步提交路径）：基类写地址并等待 isFlipPending
+// 完成（HW 已取走 flip）之后补 resync_fifo_dccg_dio_direct（DENTIST WDIVIDER = RDIVIDER）。
+// 守卫: sResyncFifoApplied 保证只执行一次（模式变更应用后，勿随每帧 flip 重复）。
+void AMDRadeonX5000_AMDGFX9DCN314Display::setCurrentDisplayOffset(AMDRadeonX5000_AMDHWDisplay* const _self,
+                                                                  const UInt32 fbIndex, const UInt64 value)
+{
+    superSetCurrentDisplayOffset(_self, fbIndex, value);
+
+    const auto self = static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self);
+    if (!sResyncFifoApplied) {
+        sResyncFifoApplied = true;
+        auto* const regs = self->getHWRegisters();
+        if (regs != nullptr) {
+            resync_fifo_dccg_dio_direct(*regs);
+            DBGLOG("GFX9DCN314Display", "setCurrentDisplayOffset: resync_fifo_dccg_dio_direct applied");
+        }
+    }
+}
 
 // =============================================================================
 // update_odm / resync_fifo 寄存器级直译
