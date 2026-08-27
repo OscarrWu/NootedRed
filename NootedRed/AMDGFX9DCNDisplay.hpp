@@ -96,7 +96,7 @@ protected:
 
     PWDeclareAbstractRuntimeMCWithExpansion(AMDRadeonX5000_AMDGFX9DCNDisplay, Expansion)
 
-    using VFT = RuntimeVFT<1>;
+    using VFT = RuntimeVFT<2>;
 
     static void populateVFT(VFT& vft);
 

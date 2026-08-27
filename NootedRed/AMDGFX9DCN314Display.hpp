@@ -62,6 +62,16 @@ struct dcn314_k1k2_inputs {
     UInt32                  odm_combine_factor;
 };
 
+// DCN 3.1.4 显示时钟请求 (VBIOSSMC 下发)：单位 kHz
+// 移植自 Linux dcn314_smu_set_dispclk / dcn314_clk_mgr_helper 的时钟请求结构
+struct dcn314_display_clock_req {
+    UInt32 dispclk_khz;              // 目标显示时钟
+    UInt32 dppclk_khz;               // 目标 DPP 时钟
+    UInt32 hard_min_dcfclk_khz;      // pstate 启用时的 hard min DCF 时钟
+    UInt32 min_deep_sleep_dcfclk_khz; // pstate 启用时的 deep sleep DCF 时钟
+    bool   pstate_enabled;           // 是否启用 pstate (下发 hard min / deep sleep dcfclk)
+};
+
 class AMDRadeonX5000_AMDGFX9DCN314Display : public AMDRadeonX5000_AMDGFX9DCNDisplay
 {
     static VFT vft;
@@ -70,7 +80,29 @@ class AMDRadeonX5000_AMDGFX9DCN314Display : public AMDRadeonX5000_AMDGFX9DCNDisp
 
     static void initDCNRegOffs(AMDRadeonX5000_AMDGFX9DCN314Display* self);
 
+    // DCN 3.1.4 显示时钟下发 (VBIOSSMC)：挂 VFT 时钟更新槽 (方案 A)
+    // req 字段：dispclk_khz / dppclk_khz / hard_min_dcfclk_khz / min_deep_sleep_dcfclk_khz / pstate_enabled
+    static void updateDisplayClocks(AMDRadeonX5000_AMDGFX9DCN314Display* self,
+                                    const struct dcn314_display_clock_req* req);
+
     static AMDFlipOption getFlipOption(AMDRadeonX5000_AMDHWDisplay*);
+
+    // ---- update_odm / resync_fifo 寄存器级直译 (设计: updateodm-resync-directreg-design.md) ----
+    // update_odm_direct: 展平 dcn314_update_odm -> set_odm_combine / set_odm_bypass + set_out_rate_control
+    //   regs        : HW 寄存器访问器 (self->getHWRegisters())
+    //   otg_inst    : 本 OTG/ODM 实例号
+    //   opp_inst[]  : 参与拼接的 OPP 实例号数组 (长度 = opp_cnt)
+    //   opp_cnt     : OPP 数量 (1 = bypass, 2/4 = combine)
+    //   slice_width : 单段 (每 OPP) 像素宽
+    static void update_odm_direct(AMDRadeonX5000_AMDHWRegisters& regs,
+                                  UInt32                          otg_inst,
+                                  const UInt32                    opp_inst[],
+                                  UInt32                          opp_cnt,
+                                  UInt32                          slice_width);
+
+    // resync_fifo_dccg_dio_direct: 展平 dcn314_dccg.c trigger_dio_fifo_resync
+    //   仅动 DENTIST_DISPCLK_CNTL: 读 RDIVIDER -> 写 WDIVIDER
+    static void resync_fifo_dccg_dio_direct(AMDRadeonX5000_AMDHWRegisters& regs);
 
 public:
     PWDeclareRuntimeMC(AMDRadeonX5000_AMDGFX9DCN314Display, Constructor)
