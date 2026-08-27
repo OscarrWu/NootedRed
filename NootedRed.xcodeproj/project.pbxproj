@@ -22,6 +22,7 @@
 		40424DB32E6DCD2F004F3BB6 /* HWAlignManager.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40424DB22E6DCD2F004F3BB6 /* HWAlignManager.hpp */; };
 		405430992E6DF75B000AEB46 /* AMDGFX9DCN1Display.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 405430982E6DF75B000AEB46 /* AMDGFX9DCN1Display.cpp */; };
 		4054309B2E6DF772000AEB46 /* AMDGFX9DCN2Display.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4054309A2E6DF772000AEB46 /* AMDGFX9DCN2Display.cpp */; };
+		a8b8559ca8f7adf68a7277db /* AMDGFX9DCN314Display.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2d16afca5fd1ac3fbc04ae0b /* AMDGFX9DCN314Display.cpp */; };
 		405460892CDBDF6A007865E5 /* AGDP.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 405460882CDBDF58007865E5 /* AGDP.hpp */; };
 		4054608C2CDBDF8C007865E5 /* AGDP.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4054608B2CDBDF89007865E5 /* AGDP.cpp */; };
 		4059A1112E6DEB1200F20858 /* DriverInjector.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 4059A1102E6DEB1200F20858 /* DriverInjector.hpp */; };
@@ -92,6 +93,7 @@
 		40F39FDE2CDD60A4007AE975 /* Backlight.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 40F39FDD2CDD60A3007AE975 /* Backlight.cpp */; };
 		40F43C6A302BC94700A7DDE9 /* BiosParser.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 40F43C69302BC94700A7DDE9 /* BiosParser.cpp */; };
 		40F46B1B2E6DF50A00B0E9CE /* AMDGFX9DCN2Display.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40F46B1A2E6DF50A00B0E9CE /* AMDGFX9DCN2Display.hpp */; };
+		b47d1d77cc014b3d80c2067e /* AMDGFX9DCN314Display.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 5ca30260f13a0a93610d98e5 /* AMDGFX9DCN314Display.hpp */; };
 		40F46B1D2E6DF54E00B0E9CE /* AMDGFX9DCN1Display.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40F46B1C2E6DF54E00B0E9CE /* AMDGFX9DCN1Display.hpp */; };
 		40FC5FD529BF995000367F9D /* X6000FB.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 40FC5FD329BF995000367F9D /* X6000FB.cpp */; };
 		40FC5FD629BF995000367F9D /* X6000FB.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40FC5FD429BF995000367F9D /* X6000FB.hpp */; };
@@ -184,6 +186,7 @@
 		40424DB22E6DCD2F004F3BB6 /* HWAlignManager.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = HWAlignManager.hpp; sourceTree = "<group>"; };
 		405430982E6DF75B000AEB46 /* AMDGFX9DCN1Display.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AMDGFX9DCN1Display.cpp; sourceTree = "<group>"; };
 		4054309A2E6DF772000AEB46 /* AMDGFX9DCN2Display.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AMDGFX9DCN2Display.cpp; sourceTree = "<group>"; };
+		2d16afca5fd1ac3fbc04ae0b /* AMDGFX9DCN314Display.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AMDGFX9DCN314Display.cpp; sourceTree = "<group>"; };
 		405460882CDBDF58007865E5 /* AGDP.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AGDP.hpp; sourceTree = "<group>"; };
 		4054608B2CDBDF89007865E5 /* AGDP.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AGDP.cpp; sourceTree = "<group>"; };
 		4059A1102E6DEB1200F20858 /* DriverInjector.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = DriverInjector.hpp; sourceTree = "<group>"; };
@@ -254,6 +257,7 @@
 		40F39FDD2CDD60A3007AE975 /* Backlight.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Backlight.cpp; sourceTree = "<group>"; };
 		40F43C69302BC94700A7DDE9 /* BiosParser.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = BiosParser.cpp; sourceTree = "<group>"; };
 		40F46B1A2E6DF50A00B0E9CE /* AMDGFX9DCN2Display.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AMDGFX9DCN2Display.hpp; sourceTree = "<group>"; };
+		5ca30260f13a0a93610d98e5 /* AMDGFX9DCN314Display.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AMDGFX9DCN314Display.hpp; sourceTree = "<group>"; };
 		40F46B1C2E6DF54E00B0E9CE /* AMDGFX9DCN1Display.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AMDGFX9DCN1Display.hpp; sourceTree = "<group>"; };
 		40FC5FCE29BF942900367F9D /* ATOMBIOS.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ATOMBIOS.hpp; sourceTree = "<group>"; };
 		40FC5FD329BF995000367F9D /* X6000FB.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = X6000FB.cpp; sourceTree = "<group>"; };
@@ -638,6 +642,7 @@
 				40B037E12E951D2B0060EAD4 /* Attributes.hpp in Headers */,
 				4068C6792E78A72300E57DE7 /* IsFunction.hpp in Headers */,
 				40F46B1B2E6DF50A00B0E9CE /* AMDGFX9DCN2Display.hpp in Headers */,
+				b47d1d77cc014b3d80c2067e /* AMDGFX9DCN314Display.hpp in Headers */,
 				409127612CE2EDC6004DBDB5 /* DeviceType.hpp in Headers */,
 				408B3DDA2CDFA42E00CAE5D2 /* SDMA0.hpp in Headers */,
 				4091C1602E3EE453004577D5 /* RuntimeMC.hpp in Headers */,
@@ -767,6 +772,7 @@
 				4030EB382E3818E10070E610 /* AMDGFX9DCNDisplay.cpp in Sources */,
 				405430992E6DF75B000AEB46 /* AMDGFX9DCN1Display.cpp in Sources */,
 				4054309B2E6DF772000AEB46 /* AMDGFX9DCN2Display.cpp in Sources */,
+				a8b8559ca8f7adf68a7277db /* AMDGFX9DCN314Display.cpp in Sources */,
 				4059A1132E6DECA600F20858 /* DriverInjector.cpp in Sources */,
 				40FC5FD929BF995E00367F9D /* X5000.cpp in Sources */,
 				40AF79773030BCC00005EFAB /* AmdAtomPspDirectoryDummy.cpp in Sources */,

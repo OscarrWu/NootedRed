@@ -5,6 +5,7 @@
 
 #include <AMDGFX9DCN1Display.hpp>
 #include <AMDGFX9DCN2Display.hpp>
+#include <AMDGFX9DCN314Display.hpp>
 #include <AMDGFX9DCNDisplay.hpp>
 #include <GPUDriversAMD/Accel/HWDisplay.hpp>
 #include <GPUDriversAMD/Accel/HWEngine.hpp>
@@ -173,6 +174,7 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     AMDRadeonX5000_AMDGFX9DCNDisplay::registerMC(kextRadeonX5000.id, patcher, id, slide, size);
     AMDRadeonX5000_AMDGFX9DCN1Display::resolve(kextRadeonX5000.id);
     AMDRadeonX5000_AMDGFX9DCN2Display::resolve(kextRadeonX5000.id);
+    AMDRadeonX5000_AMDGFX9DCN314Display::resolve(kextRadeonX5000.id);
 
     PenguinWizardry::PatternRouteRequest requests[] = {
         {"__ZN32AMDRadeonX5000_AMDVega10Hardware17allocateHWEnginesEv", allocateHWEngines},
@@ -349,6 +351,9 @@ void X5000::initializeFamilyType(void* const self) { singleton().familyTypeField
 
 void* X5000::allocateAMDHWDisplay(void* const)
 {
+    if (NRed::singleton().getAttributes().isPhoenix()) {
+        return AMDRadeonX5000_AMDGFX9DCN314Display::gRTMetaClass.alloc();
+    }
     if (NRed::singleton().getAttributes().isRenoir()) {
         return AMDRadeonX5000_AMDGFX9DCN2Display::gRTMetaClass.alloc();
     }
