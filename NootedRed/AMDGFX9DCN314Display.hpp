@@ -22,6 +22,8 @@ class AMDRadeonX5000_AMDGFX9DCN314Display : public AMDRadeonX5000_AMDGFX9DCNDisp
 
     static void initDCNRegOffs(AMDRadeonX5000_AMDGFX9DCN314Display* self);
 
+    static AMDFlipOption getFlipOption(AMDRadeonX5000_AMDHWDisplay*);
+
 public:
     PWDeclareRuntimeMC(AMDRadeonX5000_AMDGFX9DCN314Display, Constructor)
 

@@ -35,6 +35,9 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::resolve(const char* const kext)
     PWPopulateRuntimeMCGetMetaClassVFTEntry();
     vft.getExpanded<decltype(initDCNRegOffs)>(0) = initDCNRegOffs;
 
+    // 覆写 getFlipOption：dcn314 返回 DCN3（基类硬编码 DCN2）
+    constants.vftGetFlipOption(vft.inner()) = getFlipOption;
+
     PenguinWizardry::RuntimeMCManager::singleton().registerMC(gRTMetaClass, kext,
                                                               AMDRadeonX5000_AMDGFX9DCNDisplay::gRTMetaClass);
 
@@ -76,3 +79,7 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::initDCNRegOffs(AMDRadeonX5000_AMDGFX9D
     expansion.regShiftsMasks.otgInterlaceEnable  = 1;
     expansion.regShiftsMasks.isValid             = true;
 }
+
+// dcn314 的 DCN3 翻转选项（基类硬编码 DCN2，已审查确认）
+AMDFlipOption AMDRadeonX5000_AMDGFX9DCN314Display::getFlipOption(AMDRadeonX5000_AMDHWDisplay*)
+{ return AMDFlipOption::DCN3; }
