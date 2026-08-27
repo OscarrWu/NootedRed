@@ -14,6 +14,54 @@
 #pragma once
 #include <AMDGFX9DCNDisplay.hpp>
 
+// -----------------------------------------------------------------------------
+// 纯策略函数依赖类型 (Pure-strategy function dependency types)
+// 移植自 Linux amdgpu dcn314 (signal_types.h, dccg.h, dc_hw_types.h, core_types.h)
+// -----------------------------------------------------------------------------
+
+enum signal_type {
+    SIGNAL_TYPE_NONE            = 0L,
+    SIGNAL_TYPE_DVI_SINGLE_LINK = (1 << 0),
+    SIGNAL_TYPE_DVI_DUAL_LINK   = (1 << 1),
+    SIGNAL_TYPE_HDMI_TYPE_A     = (1 << 2),
+    SIGNAL_TYPE_LVDS            = (1 << 3),
+    SIGNAL_TYPE_RGB             = (1 << 4),
+    SIGNAL_TYPE_DISPLAY_PORT    = (1 << 5),
+    SIGNAL_TYPE_DISPLAY_PORT_MST = (1 << 6),
+    SIGNAL_TYPE_EDP             = (1 << 7),
+    SIGNAL_TYPE_HDMI_FRL        = (1 << 8),
+    SIGNAL_TYPE_VIRTUAL         = (1 << 9),
+};
+
+enum dc_pixel_encoding {
+    PIXEL_ENCODING_UNDEFINED,
+    PIXEL_ENCODING_RGB,
+    PIXEL_ENCODING_YCBCR422,
+    PIXEL_ENCODING_YCBCR444,
+    PIXEL_ENCODING_YCBCR420,
+    PIXEL_ENCODING_COUNT
+};
+
+enum pixel_rate_div {
+    PIXEL_RATE_DIV_BY_1 = 0,
+    PIXEL_RATE_DIV_BY_2 = 1,
+    PIXEL_RATE_DIV_BY_4 = 3,
+    PIXEL_RATE_DIV_NA   = 0xF
+};
+
+struct pixel_rate_divider {
+    UInt32 div_factor1;
+    UInt32 div_factor2;
+};
+
+struct dcn314_k1k2_inputs {
+    enum signal_type        signal;
+    enum dc_pixel_encoding  pixel_encoding;
+    bool                    is_128b_132b_signal;
+    bool                    two_pix_per_container;
+    UInt32                  odm_combine_factor;
+};
+
 class AMDRadeonX5000_AMDGFX9DCN314Display : public AMDRadeonX5000_AMDGFX9DCNDisplay
 {
     static VFT vft;

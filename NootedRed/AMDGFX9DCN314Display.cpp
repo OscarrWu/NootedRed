@@ -16,6 +16,106 @@
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSMetaClass.h>
 
+// -----------------------------------------------------------------------------
+// 纯策略函数: dc_is_*_signal 纯 helper (移植自 Linux signal_types.h)
+// -----------------------------------------------------------------------------
+static inline bool dc_is_hdmi_tmds_signal(enum signal_type signal)
+{
+    return (signal == SIGNAL_TYPE_HDMI_TYPE_A);
+}
+
+static inline bool dc_is_hdmi_frl_signal(enum signal_type signal)
+{
+    return (signal == SIGNAL_TYPE_HDMI_FRL);
+}
+
+static inline bool dc_is_hdmi_signal(enum signal_type signal)
+{
+    return (dc_is_hdmi_tmds_signal(signal) || dc_is_hdmi_frl_signal(signal));
+}
+
+static inline bool dc_is_dp_signal(enum signal_type signal)
+{
+    return (signal == SIGNAL_TYPE_DISPLAY_PORT ||
+            signal == SIGNAL_TYPE_EDP ||
+            signal == SIGNAL_TYPE_DISPLAY_PORT_MST);
+}
+
+static inline bool dc_is_dvi_signal(enum signal_type signal)
+{
+    switch (signal) {
+    case SIGNAL_TYPE_DVI_SINGLE_LINK:
+    case SIGNAL_TYPE_DVI_DUAL_LINK:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool dc_is_virtual_signal(enum signal_type signal)
+{
+    return (signal == SIGNAL_TYPE_VIRTUAL);
+}
+
+// -----------------------------------------------------------------------------
+// 纯策略函数 1: dcn314_calc_k1_k2_values
+//   移植自 dcn314_calculate_dccg_k1_k2_values (dcn314_hwseq.c L329)
+//   去寄存器化: 所有 vtable/资源遍历输入由 dcn314_k1k2_inputs 预解析提供
+// -----------------------------------------------------------------------------
+static unsigned int dcn314_calc_k1_k2_values(const struct dcn314_k1k2_inputs *in,
+                                              unsigned int *k1_div,
+                                              unsigned int *k2_div)
+{
+    unsigned int odm_combine_factor = in->odm_combine_factor;
+    bool two_pix_per_container = in->two_pix_per_container;
+
+    *k1_div = PIXEL_RATE_DIV_NA;
+    *k2_div = PIXEL_RATE_DIV_NA;
+
+    if (dc_is_hdmi_frl_signal(in->signal) ||
+        in->is_128b_132b_signal) {
+        *k1_div = PIXEL_RATE_DIV_BY_1;
+        *k2_div = PIXEL_RATE_DIV_BY_1;
+    } else if (dc_is_hdmi_tmds_signal(in->signal) ||
+               dc_is_dvi_signal(in->signal)) {
+        *k1_div = PIXEL_RATE_DIV_BY_1;
+        if (in->pixel_encoding == PIXEL_ENCODING_YCBCR420)
+            *k2_div = PIXEL_RATE_DIV_BY_2;
+        else
+            *k2_div = PIXEL_RATE_DIV_BY_4;
+    } else if (dc_is_dp_signal(in->signal) ||
+               dc_is_virtual_signal(in->signal)) {
+        if (two_pix_per_container) {
+            *k1_div = PIXEL_RATE_DIV_BY_1;
+            *k2_div = PIXEL_RATE_DIV_BY_2;
+        } else {
+            *k1_div = PIXEL_RATE_DIV_BY_1;
+            *k2_div = PIXEL_RATE_DIV_BY_4;
+            if (odm_combine_factor == 2)
+                *k2_div = PIXEL_RATE_DIV_BY_2;
+        }
+    }
+
+    return odm_combine_factor;
+}
+
+// -----------------------------------------------------------------------------
+// 纯策略函数 2: dcn314_calc_pix_rate_divider
+//   移植自 dcn314_calculate_pix_rate_divider (dcn314_hwseq.c L366)
+//   去寄存器化: 资源查找由调用方完成, 直接接收已解析的 inputs
+// -----------------------------------------------------------------------------
+static void dcn314_calc_pix_rate_divider(struct pixel_rate_divider *out,
+                                          const struct dcn314_k1k2_inputs *in)
+{
+    unsigned int k1_div = PIXEL_RATE_DIV_NA;
+    unsigned int k2_div = PIXEL_RATE_DIV_NA;
+
+    dcn314_calc_k1_k2_values(in, &k1_div, &k2_div);
+
+    out->div_factor1 = k1_div;
+    out->div_factor2 = k2_div;
+}
+
 PWDefineRuntimeMC(AMDRadeonX5000_AMDGFX9DCN314Display, Constructor)
 
 AMDRadeonX5000_AMDGFX9DCNDisplay::VFT AMDRadeonX5000_AMDGFX9DCN314Display::vft;
