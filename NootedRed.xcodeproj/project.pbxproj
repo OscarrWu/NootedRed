@@ -19,6 +19,7 @@
 		4030EB3C2E3819080070E610 /* AMDGFX9DCNDisplay.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 4030EB3B2E3819080070E610 /* AMDGFX9DCNDisplay.hpp */; };
 		4035DA622CE3BBBB002707B3 /* DCN2.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 408B3DE32CDFA6F300CAE5D2 /* DCN2.hpp */; };
 		f9464b7b342ec2cfb49f6dd2 /* DCN314.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 96a2a868857c799edbe2ff9c /* DCN314.hpp */; };
+		4ef5cc20ba9f087c229317d5 /* VBIOSSMC.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 6231958eb16e9ef751da2c95 /* VBIOSSMC.hpp */; };
 		4039AD362E6CAB2300A693C7 /* TypeName.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 4039AD352E6CAB2300A693C7 /* TypeName.hpp */; };
 		40424DB32E6DCD2F004F3BB6 /* HWAlignManager.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40424DB22E6DCD2F004F3BB6 /* HWAlignManager.hpp */; };
 		405430992E6DF75B000AEB46 /* AMDGFX9DCN1Display.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 405430982E6DF75B000AEB46 /* AMDGFX9DCN1Display.cpp */; };
@@ -216,6 +217,7 @@
 		408B3DE12CDFA66C00CAE5D2 /* DCN1.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = DCN1.hpp; sourceTree = "<group>"; };
 		408B3DE32CDFA6F300CAE5D2 /* DCN2.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = DCN2.hpp; sourceTree = "<group>"; };
 		96a2a868857c799edbe2ff9c /* DCN314.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = DCN314.hpp; sourceTree = "<group>"; };
+		6231958eb16e9ef751da2c95 /* VBIOSSMC.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = VBIOSSMC.hpp; sourceTree = "<group>"; };
 		408B3DE42CDFA77100CAE5D2 /* SMUIO.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SMUIO.hpp; sourceTree = "<group>"; };
 		408B3DE62CDFA7A200CAE5D2 /* RavenPPSMC.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RavenPPSMC.hpp; sourceTree = "<group>"; };
 		408B3DE82CDFA80B00CAE5D2 /* RenoirPPSMC.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RenoirPPSMC.hpp; sourceTree = "<group>"; };
@@ -486,6 +488,7 @@
 				408B3DE12CDFA66C00CAE5D2 /* DCN1.hpp */,
 				408B3DE32CDFA6F300CAE5D2 /* DCN2.hpp */,
 				96a2a868857c799edbe2ff9c /* DCN314.hpp */,
+				6231958eb16e9ef751da2c95 /* VBIOSSMC.hpp */,
 				408B3DD72CDFA42300CAE5D2 /* GC.hpp */,
 				408B3DDD2CDFA46800CAE5D2 /* NBIO.hpp */,
 				409B6F972E8ABB320046F619 /* OSSSYS_4.hpp */,
@@ -671,6 +674,7 @@
 				408B3DD42CDFA3D200CAE5D2 /* GoldenSettings.hpp in Headers */,
 				4035DA622CE3BBBB002707B3 /* DCN2.hpp in Headers */,
 				f9464b7b342ec2cfb49f6dd2 /* DCN314.hpp in Headers */,
+				4ef5cc20ba9f087c229317d5 /* VBIOSSMC.hpp in Headers */,
 				408B3DF22CDFB98800CAE5D2 /* Result.hpp in Headers */,
 				408A33AD2EE0C63600DAC6FD /* DMCU.hpp in Headers */,
 				408A33AE2EE0C63600DAC6FD /* GC.hpp in Headers */,
