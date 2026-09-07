@@ -189,6 +189,9 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
 {
     if (kextRadeonX6000Framebuffer.loadIndex != id) { return; }
 
+    DBGLOG("X6000FB", "processKext: X6000Framebuffer matched, hwLateInit begin (id=%zu slide=0x%llX size=0x%zX)",
+           id, slide, size);
+
     NRed::singleton().hwLateInit();
 
     CAILAsicCapsEntry*                   orgAsicCapsTable       = nullptr;

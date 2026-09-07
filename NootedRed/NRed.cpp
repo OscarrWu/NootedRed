@@ -127,6 +127,7 @@ void NRed::hwLateInit()
     DBGLOG("NRed", "isRaven2 = %s", this->attributes.isRaven2() ? "true" : "false");
     DBGLOG("NRed", "isRenoir = %s", this->attributes.isRenoir() ? "true" : "false");
     DBGLOG("NRed", "isGreenSardine = %s", this->attributes.isGreenSardine() ? "true" : "false");
+    DBGLOG("NRed", "isPhoenix = %s", this->attributes.isPhoenix() ? "true" : "false");
     DBGLOG("NRed", "enumRevision = 0x%X", this->enumRevision);
 }
 
