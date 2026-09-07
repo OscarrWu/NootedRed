@@ -145,6 +145,8 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
 {
     if (kextRadeonX5000.loadIndex != id) { return; }
 
+    DBGLOG("X5000", "processKext: X5000 matched, begin (id=%zu slide=0x%llX size=0x%zX)", id, slide, size);
+
     NRed::singleton().hwLateInit();
 
     UInt32*           orgChannelTypes;
@@ -351,10 +353,14 @@ void X5000::initializeFamilyType(void* const self) { singleton().familyTypeField
 
 void* X5000::allocateAMDHWDisplay(void* const)
 {
-    if (NRed::singleton().getAttributes().isPhoenix()) {
+    const auto& attrs = NRed::singleton().getAttributes();
+    DBGLOG("X5000", "allocateAMDHWDisplay: isPhoenix=%s isRenoir=%s",
+           attrs.isPhoenix() ? "true" : "false", attrs.isRenoir() ? "true" : "false");
+    if (attrs.isPhoenix()) {
+        DBGLOG("X5000", "allocateAMDHWDisplay: returning DCN314Display");
         return AMDRadeonX5000_AMDGFX9DCN314Display::gRTMetaClass.alloc();
     }
-    if (NRed::singleton().getAttributes().isRenoir()) {
+    if (attrs.isRenoir()) {
         return AMDRadeonX5000_AMDGFX9DCN2Display::gRTMetaClass.alloc();
     }
     return AMDRadeonX5000_AMDGFX9DCN1Display::gRTMetaClass.alloc();
