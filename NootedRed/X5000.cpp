@@ -278,7 +278,7 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
             kStartHWEnginesPatched, kStartHWEnginesMask,     currentKernelVersion() >= MACOS_13 ? 2U : 1};
         PANIC_COND(!patch.apply(patcher, orgStartHWEngines, PAGE_SIZE), "X5000", "Failed to patch startHWEngines");
 
-        if (NRed::singleton().getAttributes().isRenoir()) {
+        if (NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix()) {
             UInt32 findBpp64 = Dcn1Bpp64SwModeMask, replBpp64 = Dcn2Bpp64SwModeMask;
             UInt32 findNonBpp64 = Dcn1NonBpp64SwModeMask, replNonBpp64 = Dcn2NonBpp64SwModeMask;
             const PenguinWizardry::MaskedLookupPatch patches[] = {
@@ -323,7 +323,8 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
 
     seCount = 1;
     shCount = 1;
-    if (NRed::singleton().getAttributes().isRenoir()) { hwMaxCUs = 8; }
+    if (NRed::singleton().getAttributes().isPhoenix()) { hwMaxCUs = 12; }
+    else if (NRed::singleton().getAttributes().isRenoir()) { hwMaxCUs = 8; }
     else if (NRed::singleton().getAttributes().isRaven2()) {
         hwMaxCUs = 3;
     }

@@ -643,7 +643,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
              this->orgGetIpFw},
             {"_psp_bootloader_is_sos_running_3_1", pspIsSosRunning, kPspBootloaderIsSosRunning31Pattern},
             {"_psp_security_feature_caps_set_3_1",
-             NRed::singleton().getAttributes().isRenoir() ? pspSecurityFeatureCapsSet12 : pspSecurityFeatureCapsSet10,
+             NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix() ? pspSecurityFeatureCapsSet12 : pspSecurityFeatureCapsSet10,
              currentKernelVersion() >= MACOS_13 ? kPspSecurityFeatureCapsSet31Pattern13 :
                                                   kPspSecurityFeatureCapsSet31Pattern},
         };
@@ -755,9 +755,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             orgCapsInitTable->extRevision =
                 static_cast<UInt64>(NRed::singleton().getEnumRevision()) + NRed::singleton().getDevRevision();
             orgCapsInitTable->pciRevision = NRed::singleton().getPciRevision();
-            orgCapsInitTable->ddiCaps     = NRed::singleton().getAttributes().isRenoirE() ? ddiCapsRenoirE :
+            orgCapsInitTable->ddiCaps     = NRed::singleton().getAttributes().isPhoenix() ? ddiCapsRaven :
+                                            NRed::singleton().getAttributes().isRenoirE() ? ddiCapsRenoirE :
                                             NRed::singleton().getAttributes().isRenoir()  ? ddiCapsRenoir :
-                                                                                            ddiCapsRaven;
+                                                                                           ddiCapsRaven;
             *orgCapsTable                 = {
                 .familyId = AMD_FAMILY_RAVEN,
                 .deviceId = NRed::singleton().getDeviceID(),
@@ -781,6 +782,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             orgDevCapTable->enumRevision = DEVICE_CAP_ENTRY_REV_DONT_CARE;
 
             orgDevCapTable->asicGoldenSettings->goldenSettings =
+                NRed::singleton().getAttributes().isPhoenix() ? goldenSettingsRaven :
                 NRed::singleton().getAttributes().isRaven2() ? goldenSettingsRaven2 :
                 NRed::singleton().getAttributes().isRenoir() ? goldenSettingsRenoir :
                                                                goldenSettingsRaven;

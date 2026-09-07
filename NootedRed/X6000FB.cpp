@@ -298,7 +298,7 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                    "Failed to route createRegisterAccess");
     }
 
-    if (NRed::singleton().getAttributes().isRenoir()) {
+    if (NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix()) {
         PenguinWizardry::PatternRouteRequest request{"_IH_4_0_IVRing_InitHardware", wrapIH40IVRingInitHardware,
                                                      this->orgIH40IVRingInitHardware, kIH40IVRingInitHardwarePattern,
                                                      kIH40IVRingInitHardwarePatternMask};
@@ -323,7 +323,7 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                                                    kPopulateDeviceInfoMask,     1};
     PANIC_COND(!patch.apply(patcher, slide, size), "X6000FB", "Failed to apply populateDeviceInfo patch");
 
-    if (NRed::singleton().getAttributes().isRenoir()) {
+    if (NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix()) {
         const PenguinWizardry::MaskedLookupPatch patch{&kextRadeonX6000Framebuffer, kInitializeDmcubServices1Original,
                                                        kInitializeDmcubServices1Patched, 1};
         PANIC_COND(!patch.apply(patcher, slide, size), "X6000FB",

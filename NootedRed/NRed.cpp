@@ -96,7 +96,11 @@ void NRed::hwLateInit()
     this->devRevision = (this->readReg32(NBIO_BASE_2 + RCC_DEV0_EPF0_STRAP0) & RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_MASK)
                         >> RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_SHIFT;
 
-    if (this->attributes.isRenoir() && !this->attributes.isPhoenix()) {
+    if (this->attributes.isPhoenix()) {
+        // Phoenix(RDNA3): Raven 系 devRevision 判断不适用，enumRevision 固定为真机确认值
+        this->enumRevision = 0xA1;  // TODO: 真机读 RCC_DEV0_EPF0_STRAP0 确认
+    }
+    else if (this->attributes.isRenoir() && !this->attributes.isPhoenix()) {
         if (!this->attributes.isGreenSardine() && this->devRevision == 0 && this->pciRevision >= 0x80
             && this->pciRevision <= 0x84)
         {
