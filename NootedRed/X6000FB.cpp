@@ -606,7 +606,8 @@ IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType,
         SYSLOG("X6000FB", "D3: messageAccelerator IRI (cmd=3) -> dummy success on Phoenix");
         return kIOReturnSuccess;
     }
-    return FunctionCast(wrapMessageAccelerator, singleton().orgMessageAccelerator)(self, reqType, arg2, arg3, arg4);
+    return FunctionCast(wrapMessageAccelerator,
+                        reinterpret_cast<mach_vm_address_t>(singleton().orgMessageAccelerator))(self, reqType, arg2, arg3, arg4);
 }
 
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
