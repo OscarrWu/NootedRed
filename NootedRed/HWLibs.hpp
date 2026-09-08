@@ -88,6 +88,12 @@ private:
     static CAILResult smu12WaitForFwLoaded(void* ctx);
     static CAILResult smu12PowerUpConfig(void* ctx);
     static CAILResult smu12InternalHwInit(void* ctx);
+    static bool       smu13IsFwLoaded(void* ctx);
+    static CAILResult smu13WaitForFwLoaded(void* ctx);
+    static CAILResult smu13PowerUpConfig(void* ctx);
+    static CAILResult smu13InternalHwInit(void* ctx);
+    static CAILResult smu13NotifyEvent(void* ctx, TTLEventInput* input);
+    static CAILResult smu13FullAsicReset(void* ctx, void* data);
     static CAILResult smuInternalHwExit(void* ctx);
     static CAILResult smuFullAsicReset(void* ctx, void* data);
     static CAILResult smu10NotifyEvent(void* ctx, TTLEventInput* input);

@@ -13,6 +13,7 @@
 #include <GPUDriversAMD/PSP.hpp>
 #include <GPUDriversAMD/RavenIPOffset.hpp>
 #include <GPUDriversAMD/RenoirPPSMC.hpp>
+#include <GPUDriversAMD/PhoenixPPSMC.hpp>
 #include <GPUDriversAMD/TTL/Event.hpp>
 #include <GPUDriversAMD/TTL/SWIP/DMCU.hpp>
 #include <GPUDriversAMD/TTL/SWIP/GC.hpp>
@@ -1079,6 +1080,97 @@ CAILResult X5000HWLibs::smu12InternalHwInit(void* const ctx)
     return smu12PowerUpConfig(ctx);
 }
 
+bool X5000HWLibs::smu13IsFwLoaded(void* const ctx)
+{
+    // SMU13 专用 flags 地址（Linux smnMP1_V13_0_4_FIRMWARE_FLAGS = 0x3010028）
+    return (singleton().smuCgsReadRegister(ctx, 0x3010028, 0, kCAILHWBlockMP1, MP1_PUBLIC)
+            & MP1_FIRMWARE_FLAGS_INTERRUPTS_ENABLED)
+           != 0;
+}
+
+CAILResult X5000HWLibs::smu13WaitForFwLoaded(void* const ctx)
+{
+    return singleton().smuCosWaitFor(ctx, smu13IsFwLoaded, ctx,
+                                     /*ctx->waitOnRegisterTimeout*/ PP_WAIT_ON_REGISTER_TIMEOUT_DEFAULT);
+}
+
+CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
+{
+    // PMFW 初始化序列（macOS 侧精简版，仿 Linux smu_v13_0）：唤起 BGM/IMU 客户端。
+    // 顺序不可跳（SetDriverDramAddr → TransferTableDram2Smu → EnableGfxImu）。
+    CAILResult res;
+
+    // a. SetDriverDramAddrHigh (0x0D), param=0
+    DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh);
+    if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0)) != kCAILResultOK
+        && res != kCAILResultUnsupported)
+    {
+        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, res);
+        return res;
+    }
+
+    // b. SetDriverDramAddrLow (0x0E), param=0
+    DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow);
+    if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, 0)) != kCAILResultOK
+        && res != kCAILResultUnsupported)
+    {
+        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, res);
+        return res;
+    }
+
+    // c. TransferTableDram2Smu (0x10), param=0
+    DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu);
+    if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, 0)) != kCAILResultOK
+        && res != kCAILResultUnsupported)
+    {
+        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, res);
+        return res;
+    }
+
+    // d. EnableGfxImu (0x16), param=1 (ENABLE_IMU_ARG_GFXOFF_ENABLE)
+    DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu);
+    if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, 1)) != kCAILResultOK
+        && res != kCAILResultUnsupported)
+    {
+        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, res);
+        return res;
+    }
+
+    return kCAILResultOK;
+}
+
+CAILResult X5000HWLibs::smu13InternalHwInit(void* const ctx)
+{
+    singleton().smuCtxCache = ctx;
+    CAILResult ret = smu13WaitForFwLoaded(ctx);
+    if (ret != kCAILResultOK) {
+        SYSLOG("HWLibs", "smu13: internal HW init done, ret=0x%X", ret);
+        return ret;
+    }
+
+    ret = smu13PowerUpConfig(ctx);
+    SYSLOG("HWLibs", "smu13: internal HW init done, ret=0x%X", ret);
+    return ret;
+}
+
+CAILResult X5000HWLibs::smu13NotifyEvent(void* const ctx, TTLEventInput* const input)
+{
+    if (input->arg >= SMU_EVENT_COUNT) {
+        SYSLOG("HWLibs", "Invalid input event to SMU notify event: %d", input->arg);
+        return kCAILResultInvalidParameters;
+    }
+
+    if (input->arg == SMU_EVENT_POWER_UP || input->arg == 4 || input->arg == 8 || input->arg == SMU_EVENT_REINITIALISE)
+    {
+        return smu13PowerUpConfig(ctx);
+    }
+
+    return kCAILResultOK;
+}
+
+CAILResult X5000HWLibs::smu13FullAsicReset(void* const ctx, void* data)
+{ return singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_GfxDeviceDriverReset, getMember<UInt32>(data, 4)); }
+
 // VBIOSSMC: kHz → MHz (向上取整，对齐 Linux khz_to_mhz_ceil)
 static inline UInt32 khzToMhzCeil(UInt32 khz) { return (khz + 999U) / 1000U; }
 
@@ -1260,6 +1352,11 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
             singleton().smuInternalHWInitField(ctx) = reinterpret_cast<void*>(smu12InternalHwInit);
             singleton().smuNotifyEventField(ctx)    = reinterpret_cast<void*>(smu12NotifyEvent);
         } break;
+        case 13: {
+            SYSLOG("HWLibs", "smu13: case 13 (SMU13 PMFW init) entered");
+            singleton().smuInternalHWInitField(ctx) = reinterpret_cast<void*>(smu13InternalHwInit);
+            singleton().smuNotifyEventField(ctx)    = reinterpret_cast<void*>(smu13NotifyEvent);
+        } break;
         default: return ret;
     }
 
@@ -1273,7 +1370,12 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     singleton().smuFullscreenEventField(ctx) = reinterpret_cast<void*>(smuFullScreenEvent);
     singleton().smuInternalSWExitField(ctx)  = reinterpret_cast<void*>(retOK);
     singleton().smuInternalHWExitField(ctx)  = reinterpret_cast<void*>(smuInternalHwExit);
-    singleton().smuFullAsicResetField(ctx)   = reinterpret_cast<void*>(smuFullAsicReset);
+    if (ipVersion.major == 13) {
+        singleton().smuFullAsicResetField(ctx) = reinterpret_cast<void*>(smu13FullAsicReset);
+    }
+    else {
+        singleton().smuFullAsicResetField(ctx) = reinterpret_cast<void*>(smuFullAsicReset);
+    }
 
     SYSLOG_COND(ADDPR(debugEnabled), "HWLibs", "Ignore error about unsupported SMU HW version.");
 
