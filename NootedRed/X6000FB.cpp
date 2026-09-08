@@ -231,10 +231,15 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     }
 
     if (currentKernelVersion() >= MACOS_13) {
-        this->orgMessageAccelerator = patcher.solveSymbol<decltype(this->orgMessageAccelerator)>(
-            id, "__ZNK34AMDRadeonX6000_AmdRadeonController18messageAcceleratorE25_eAMDAccelIOFBRequestTypePvS1_S1_",
-            slide, size);
-        PANIC_COND(this->orgMessageAccelerator == nullptr, "X6000FB", "Failed to resolve messageAccelerator");
+        // D3: hook messageAccelerator (was solveSymbol-only; now route to wrapMessageAccelerator)
+        KernelPatcher::RouteRequest maRequest{
+            "__ZNK34AMDRadeonX6000_AmdRadeonController18messageAcceleratorE25_eAMDAccelIOFBRequestTypePvS1_S1_",
+            wrapMessageAccelerator, this->orgMessageAccelerator};
+        if (!patcher.routeMultiple(id, &maRequest, 1, slide, size)) {
+            SYSLOG("X6000FB", "D3: failed to route messageAccelerator");
+        } else {
+            DBGLOG("X6000FB", "D3: routed messageAccelerator");
+        }
 
         KernelPatcher::RouteRequest request{"__ZN34AMDRadeonX6000_AmdRadeonController7powerUpEv", wrapControllerPowerUp,
                                             this->orgControllerPowerUp};
@@ -591,6 +596,17 @@ IOReturn X6000FB::getTriageHardwareDataRN(void*, const UInt32 fbIndex, void* con
     bufferPointer += realChars;
 
     return kIOReturnSuccess;
+}
+
+// D3: route messageAccelerator, dummy IRI send (reqType=3) on Phoenix so powerUp
+// continues into its success path (TTL RTS / m_ppInitialized / FB_Boot_PPInitialized)
+IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType, void* arg2, void* arg3, void* arg4)
+{
+    if (NRed::singleton().getAttributes().isPhoenix() && reqType == 3) {
+        SYSLOG("X6000FB", "D3: messageAccelerator IRI (cmd=3) -> dummy success on Phoenix");
+        return kIOReturnSuccess;
+    }
+    return FunctionCast(wrapMessageAccelerator, singleton().orgMessageAccelerator)(self, reqType, arg2, arg3, arg4);
 }
 
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)

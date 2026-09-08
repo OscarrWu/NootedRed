@@ -59,6 +59,7 @@ private:
     static IOReturn                         getTriageHardwareDataRN(void* self, UInt32 fbIndex, void* triageData);
     static void                             wrapDpReceiverPowerCtrl(void* link, bool powerOn);
     static UInt32                           wrapControllerPowerUp(void* self);
+    static IOReturn                         wrapMessageAccelerator(void* self, UInt32 reqType, void* arg2, void* arg3, void* arg4);
     static UInt32                           wrapHandleCriticalError(void* self, const char* fmt1, const char* fmt2, const char* fmt3);
     static void*                            wrapCreateObjectInfo(void* helper, UInt32 tableOffset);
     static AmdAtomVramInfo*                 wrapCreateVramInfo(AmdAtomFwHelper* biosHelper, UInt32 tableOffset);
