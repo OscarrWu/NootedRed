@@ -616,6 +616,8 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
     auto ret       = FunctionCast(wrapControllerPowerUp, singleton().orgControllerPowerUp)(self);
+    SYSLOG("X6000FB", "D3: controller::powerUp returned 0x%X (isPhoenix=%s)", ret,
+           NRed::singleton().getAttributes().isPhoenix() ? "true" : "false");
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
     return ret;
 }
