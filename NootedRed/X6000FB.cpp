@@ -240,6 +240,18 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                                             this->orgControllerPowerUp};
         PANIC_COND(!patcher.routeMultiple(id, &request, 1, slide, size), "X6000FB", "Failed to route powerUp");
 
+        // Probe P1: hook handleCriticalError to suppress PPLIB IRI panic on Phoenix (boot-arg gated)
+        if (checkKernelArgument("-NRedProbePPLIB")) {
+            KernelPatcher::RouteRequest ppRequest{
+                "__ZNK33AMDRadeonX6000_AmdPowerPlayHelper19handleCriticalErrorEPKcS1_S1_",
+                wrapHandleCriticalError, this->orgHandleCriticalError};
+            if (!patcher.routeMultiple(id, &ppRequest, 1, slide, size)) {
+                SYSLOG("X6000FB", "probe P1: failed to route handleCriticalError (symbol may differ on 13.6)");
+            } else {
+                DBGLOG("X6000FB", "probe P1: routed handleCriticalError");
+            }
+        }
+
         const PenguinWizardry::MaskedLookupPatch patches[] = {
             {&kextRadeonX6000Framebuffer, kControllerPowerUpOriginal, kControllerPowerUpOriginalMask,
              kControllerPowerUpReplace, kControllerPowerUpReplaceMask, 1},
@@ -589,6 +601,15 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto ret       = FunctionCast(wrapControllerPowerUp, singleton().orgControllerPowerUp)(self);
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
     return ret;
+}
+
+UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char* fmt2, const char* fmt3)
+{
+    if (NRed::singleton().getAttributes().isPhoenix()) {
+        SYSLOG("X6000FB", "probe P1: handleCriticalError suppressed (PPLIB IRI fail): '%s'", fmt1 ? fmt1 : "");
+        return 0;
+    }
+    return FunctionCast(wrapHandleCriticalError, singleton().orgHandleCriticalError)(self, fmt1, fmt2, fmt3);
 }
 
 void X6000FB::wrapDpReceiverPowerCtrl(void* const link, const bool powerOn)
