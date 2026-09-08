@@ -240,15 +240,15 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                                             this->orgControllerPowerUp};
         PANIC_COND(!patcher.routeMultiple(id, &request, 1, slide, size), "X6000FB", "Failed to route powerUp");
 
-        // Probe P1: hook handleCriticalError to suppress PPLIB IRI panic on Phoenix (boot-arg gated)
-        if (checkKernelArgument("-NRedProbePPLIB")) {
+        // Observe P2 + Probe P1: hook handleCriticalError (always log; suppress panic only with -NRedProbePPLIB on Phoenix)
+        {
             KernelPatcher::RouteRequest ppRequest{
                 "__ZNK33AMDRadeonX6000_AmdPowerPlayHelper19handleCriticalErrorEPKcS1_S1_",
                 wrapHandleCriticalError, this->orgHandleCriticalError};
             if (!patcher.routeMultiple(id, &ppRequest, 1, slide, size)) {
-                SYSLOG("X6000FB", "probe P1: failed to route handleCriticalError (symbol may differ on 13.6)");
+                SYSLOG("X6000FB", "observe P2: failed to route handleCriticalError (symbol may differ on 13.6)");
             } else {
-                DBGLOG("X6000FB", "probe P1: routed handleCriticalError");
+                DBGLOG("X6000FB", "observe P2: routed handleCriticalError");
             }
         }
 
@@ -605,10 +605,15 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 
 UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char* fmt2, const char* fmt3)
 {
-    if (NRed::singleton().getAttributes().isPhoenix()) {
-        SYSLOG("X6000FB", "probe P1: handleCriticalError suppressed (PPLIB IRI fail): '%s'", fmt1 ? fmt1 : "");
-        return 0;
+    // Observe P2: always log the error detail (SYSLOG = visible regardless of debug flag)
+    SYSLOG("X6000FB", "handleCriticalError: '%s' | '%s' | '%s'",
+           fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+
+    // Probe P1 behaviour (suppress panic) only under -NRedProbePPLIB on Phoenix
+    if (checkKernelArgument("-NRedProbePPLIB") && NRed::singleton().getAttributes().isPhoenix()) {
+        return 0;   // suppress panic, let powerUp continue (probe P1)
     }
+    // Default: call original (panic as usual, but failure detail already logged above)
     return FunctionCast(wrapHandleCriticalError, singleton().orgHandleCriticalError)(self, fmt1, fmt2, fmt3);
 }
 
