@@ -1,7 +1,7 @@
 // Phoenix (SMU 13.0.4) PPSMC message IDs
 // Source: linux smu_v13_0_4_ppsmc.h
 #pragma once
-#include <Base.h>
+#include <IOKit/IOTypes.h>
 
 namespace PhoenixPPSMC {
 constexpr UInt32 PPSMC_MSG_TestMessage               = 0x01;
