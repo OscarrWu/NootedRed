@@ -65,4 +65,16 @@ public:
 
     void   setProp32(const char* key, UInt32 value) const;    // TODO: Remove!
     UInt32 readReg32(UInt32 reg) const;                       // TODO: Remove!
+
+    /**
+     * Probe D1 v2: SMU13 上电序列每步结果的累积状态（旁路记录，不改变任何原有行为）。
+     * 编码：bit0-5 = 已执行步掩码；bit8-15 / 16-23 / 24-31 / 32-39 = step0..3 的返回码（CAILResult 低 8 位）。
+     * 由 HWLibs 的 smu13PowerUpConfig 累积，在 X6000FB 的 wrapHandleCriticalError（真崩溃出口）读出并注入 panic 消息。
+     */
+    UInt64 getSmu13ProbeState() const { return this->smu13ProbeState; }
+    void   setSmu13ProbeState(UInt64 v) { this->smu13ProbeState = v; }
+    void   orSmu13ProbeState(UInt64 v) { this->smu13ProbeState |= v; }
+
+private:
+    UInt64 smu13ProbeState{0};
 };

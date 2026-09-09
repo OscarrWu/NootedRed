@@ -16,6 +16,7 @@
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
+#include <kern/debug.h>    // panic() 声明（Probe D1 v2 崩溃出口注入）
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOTypes.h>
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
@@ -627,6 +628,16 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     // Observe P2: always log the error detail (SYSLOG = visible regardless of debug flag)
     SYSLOG("X6000FB", "handleCriticalError: '%s' | '%s' | '%s'",
            fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+
+    // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
+    // 必须置于 -NRedProbePPLIB 之前：二者同开时以 Panic 优先（先取数据）。
+    // panic() 与 Apple doGPUPanic 终点同一原语（DebugEnabler.cpp:250），栈/寄存器照常写入，.panic 不残缺。
+    if (checkKernelArgument("-NRedProbePanic") && NRed::singleton().getAttributes().isPhoenix()) {
+        panic("NRed SMU13 state=%llx | orig1:%s | orig2:%s | orig3:%s",
+            NRed::singleton().getSmu13ProbeState(), fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)",
+            fmt3 ? fmt3 : "(null)");
+        // panic 不返回
+    }
 
     // Probe P1 behaviour (suppress panic) only under -NRedProbePPLIB on Phoenix
     if (checkKernelArgument("-NRedProbePPLIB") && NRed::singleton().getAttributes().isPhoenix()) {

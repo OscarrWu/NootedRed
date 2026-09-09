@@ -1106,8 +1106,14 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, res);
+        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
+        NRed::singleton().orSmu13ProbeState(1ULL << 0);
+        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 0));
         return res;
     }
+    // Probe D1 v2: 记录成功步（掩码 + rc）
+    NRed::singleton().orSmu13ProbeState(1ULL << 0);
+    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 0));
 
     // b. SetDriverDramAddrLow (0x0E), param=0
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow);
@@ -1115,8 +1121,14 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, res);
+        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
+        NRed::singleton().orSmu13ProbeState(1ULL << 1);
+        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 1));
         return res;
     }
+    // Probe D1 v2: 记录成功步（掩码 + rc）
+    NRed::singleton().orSmu13ProbeState(1ULL << 1);
+    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 1));
 
     // c. TransferTableDram2Smu (0x10), param=0
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu);
@@ -1124,8 +1136,14 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, res);
+        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
+        NRed::singleton().orSmu13ProbeState(1ULL << 2);
+        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 2));
         return res;
     }
+    // Probe D1 v2: 记录成功步（掩码 + rc）
+    NRed::singleton().orSmu13ProbeState(1ULL << 2);
+    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 2));
 
     // d. EnableGfxImu (0x16), param=1 (ENABLE_IMU_ARG_GFXOFF_ENABLE)
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu);
@@ -1133,14 +1151,23 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, res);
+        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
+        NRed::singleton().orSmu13ProbeState(1ULL << 3);
+        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 3));
         return res;
     }
+    // Probe D1 v2: 记录成功步（掩码 + rc）
+    NRed::singleton().orSmu13ProbeState(1ULL << 3);
+    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 3));
 
     return kCAILResultOK;
 }
 
 CAILResult X5000HWLibs::smu13InternalHwInit(void* const ctx)
 {
+    // Probe D1 v2: 每轮序列开始清零累积状态（若 WaitForFwLoaded 早退，state 保持 0 = "序列未执行"）
+    NRed::singleton().setSmu13ProbeState(0);
+
     singleton().smuCtxCache = ctx;
     CAILResult ret = smu13WaitForFwLoaded(ctx);
     if (ret != kCAILResultOK) {
