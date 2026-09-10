@@ -668,8 +668,24 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     // 必须置于 -NRedProbePPLIB 之前：二者同开时以 Panic 优先（先取数据）。
     // panic() 与 Apple doGPUPanic 终点同一原语（DebugEnabler.cpp:250），栈/寄存器照常写入，.panic 不残缺。
     if (checkKernelArgument("-NRedProbePanic") && NRed::singleton().getAttributes().isPhoenix()) {
-        panic("NRed SMU13 state=%llx | orig1:%s | orig2:%s | orig3:%s",
-            NRed::singleton().getSmu13ProbeState(), fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)",
+        // 诊断大打包（§16.21）：panic 消息带宽足够，一次带回所有 SMU 诊断寄存器原始值
+        // —— 避免反复猜地址域。全部用 NRed 直读（readReg32，dword 索引）。
+        auto& nred = NRed::singleton();
+        const UInt32 rFwFlags   = nred.readReg32(0x3010028 >> 2);        // MP1_FIRMWARE_FLAGS (Phoenix: 0x3010028)
+        const UInt32 rFwFlags24 = nred.readReg32(0x3010024 >> 2);        // 常规 13.0.x flags
+        const UInt32 rMsg66     = nred.readReg32(MP0_BASE_0 + 0x282);    // C2PMSG_66 (msg)
+        const UInt32 rMsg82     = nred.readReg32(MP0_BASE_0 + 0x292);    // C2PMSG_82 (arg)
+        const UInt32 rMsg90     = nred.readReg32(MP0_BASE_0 + 0x29A);    // C2PMSG_90 (resp)
+        const UInt32 rMsg91     = nred.readReg32(MP0_BASE_0 + 0x29B);    // C2PMSG_91（v11/12 旧邮箱对照）
+        const UInt32 rFbOffRaw  = nred.readReg32(0x68000 + 0x0857);      // MMHUB regMMMC_VM_FB_OFFSET
+        const UInt32 rScratch4  = nred.readReg32(0x3010060 >> 2);        // MP1_EXT_SCRATCH4 附近（MsgPortBusy 探测）
+        const UInt64 fbOff      = nred.getFbOffset();
+        const UInt64 probeState = nred.getSmu13ProbeState();
+
+        panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
+              "fbOffRaw=%x fbOff=%llx scratch4=%x | orig1:%s | orig2:%s | orig3:%s",
+            probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
+            rFbOffRaw, fbOff, rScratch4, fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)",
             fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
