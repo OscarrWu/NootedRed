@@ -671,17 +671,22 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         // 诊断大打包（§16.21）：panic 消息带宽足够，一次带回所有 SMU 诊断寄存器原始值
         // —— 避免反复猜地址域。全部用 NRed 直读（readReg32，dword 索引）。
         auto& nred = NRed::singleton();
-        const UInt32 rFwFlags   = nred.readReg32(0x3010028 >> 2);        // 候选 A：Phoenix 0x3010028
-        const UInt32 rFwFlags24 = nred.readReg32(0x3010024 >> 2);        // 候选 B：Regs/SMU.hpp MP1_FIRMWARE_FLAGS
+        // ⚠️ 根因修正（§16.34）：NRed::readReg32 的间接分支把入参当【字节地址】写进 PCIE_INDEX2
+        // （NRed.cpp:214），而分支判断按 dword 索引算。此前传 "0x3010028>>2" 导致写入
+        // 0xC0400A —— 既非 dword 索引也非正确 SMN 地址 → 全 F。
+        // 正确：传【完整 SMN 字节地址】= MP1_Public(0x3B00000) | smnMP1_FIRMWARE_FLAGS(0x3010024)
+        constexpr UInt32 kMp1Public = 0x3B00000;   // smu_v13_0.h:33
+        const UInt32 rFwFlags   = nred.readReg32(kMp1Public | 0x3010028);  // 候选 A
+        const UInt32 rFwFlags24 = nred.readReg32(kMp1Public | 0x3010024);  // 候选 B（Linux 用）
+        const UInt32 rScratch0  = nred.readReg32(kMp1Public | 0x3010020);  // MP1_SCRATCH0
         const UInt32 rMsg66     = nred.readReg32(MP0_BASE_0 + 0x282);    // C2PMSG_66 (msg)
         const UInt32 rMsg82     = nred.readReg32(MP0_BASE_0 + 0x292);    // C2PMSG_82 (arg)
         const UInt32 rMsg90     = nred.readReg32(MP0_BASE_0 + 0x29A);    // C2PMSG_90 (resp)
         const UInt32 rMsg91     = nred.readReg32(MP0_BASE_0 + 0x29B);    // C2PMSG_91（v11/12 旧邮箱对照）
         const UInt32 rFbOffRaw  = nred.readReg32(0x68000 + 0x0857);      // MMHUB regMMMC_VM_FB_OFFSET
-        const UInt32 rScratch4  = nred.readReg32(0x3010060 >> 2);        // MP1_EXT_SCRATCH4（MsgPortBusy）
-        // 新增：PMFW 版本/状态相关（MP1 公共区，判断固件是否运行）
-        const UInt32 rMp1Scratch0 = nred.readReg32(0x3010020 >> 2);      // MP1_SCRATCH 附近
-        const UInt32 rFwVer       = nred.readReg32(0x3010004 >> 2);      // 固件版本寄存器（若存在）
+        const UInt32 rScratch4  = nred.readReg32(kMp1Public | 0x3010060); // MP1_EXT_SCRATCH4
+        const UInt32 rFwVer       = nred.readReg32(kMp1Public | 0x3010004); // 固件版本（若存在）
+        const UInt32 rMp1Scratch0 = rScratch0;                            // 同上（MP1_SCRATCH0）
         const UInt64 fbOff      = nred.getFbOffset();
         const UInt64 probeState = nred.getSmu13ProbeState();
 
