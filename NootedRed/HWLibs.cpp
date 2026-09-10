@@ -1167,14 +1167,20 @@ CAILResult X5000HWLibs::smu13InternalHwInit(void* const ctx)
 {
     // Probe D1 v2: 每轮序列开始清零累积状态（若 WaitForFwLoaded 早退，state 保持 0 = "序列未执行"）
     NRed::singleton().setSmu13ProbeState(0);
+    // Probe: 标记 smu13InternalHwInit 被调用过（第 63 位）
+    NRed::singleton().orSmu13ProbeState(1ULL << 63);
 
     singleton().smuCtxCache = ctx;
     CAILResult ret = smu13WaitForFwLoaded(ctx);
     if (ret != kCAILResultOK) {
         SYSLOG("HWLibs", "smu13: internal HW init done, ret=0x%X", ret);
+        // Probe: 标记 WaitForFwLoaded 失败早退（第 61 位）
+        NRed::singleton().orSmu13ProbeState(1ULL << 61);
         return ret;
     }
 
+    // Probe: 标记 WaitForFwLoaded 成功（第 62 位）
+    NRed::singleton().orSmu13ProbeState(1ULL << 62);
     ret = smu13PowerUpConfig(ctx);
     SYSLOG("HWLibs", "smu13: internal HW init done, ret=0x%X", ret);
     return ret;
