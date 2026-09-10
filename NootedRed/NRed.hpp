@@ -65,6 +65,7 @@ public:
 
     void   setProp32(const char* key, UInt32 value) const;    // TODO: Remove!
     UInt32 readReg32(UInt32 reg) const;                       // TODO: Remove!
+    void   writeReg32(UInt32 reg, UInt32 value) const;        // TODO: Remove!
 
     /**
      * Probe D1 v2: SMU13 上电序列每步结果的累积状态（旁路记录，不改变任何原有行为）。

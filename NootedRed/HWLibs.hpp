@@ -96,6 +96,11 @@ private:
     static CAILResult smu13InternalHwInit(void* ctx);
     static CAILResult smu13NotifyEvent(void* ctx, TTLEventInput* input);
     static CAILResult smu13FullAsicReset(void* ctx, void* data);
+public:
+    // NRed 直读 MMIO 绕过 Apple SMU ctx 的 PMFW 消息发送（Phoenix 上电序列旁路）
+    // public：供 X6000FB::wrapControllerPowerUp 调用（该函数 100% 被调用，而 smu13PowerUpConfig 死点）
+    static CAILResult smu13SendMsgDirect(UInt32 msgId, UInt32 param);
+private:
     static CAILResult wrapSmu90SendMessageWithParameter(void* ctx, UInt32 message, UInt32 param);
     static CAILResult smuInternalHwExit(void* ctx);
     static CAILResult smuFullAsicReset(void* ctx, void* data);

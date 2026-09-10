@@ -206,3 +206,12 @@ UInt32 NRed::readReg32(const UInt32 reg) const
         return this->rmmioPtr[PCIE_DATA2];
     }
 }
+
+void NRed::writeReg32(const UInt32 reg, const UInt32 value) const
+{
+    if ((reg * sizeof(UInt32)) < this->rmmio->getLength()) { this->rmmioPtr[reg] = value; }
+    else {
+        this->rmmioPtr[PCIE_INDEX2] = reg;
+        this->rmmioPtr[PCIE_DATA2]  = value;
+    }
+}

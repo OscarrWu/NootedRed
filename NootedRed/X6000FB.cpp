@@ -616,6 +616,30 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto& m_flags  = getMember<UInt8>(self, 0x5F18);
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
+
+    // C1.6: NRed 直读 MMIO 旁路 —— 在 powerUp 之前用自实现 PMFW 发送跑四步序列，唤醒 BGM/IMU。
+    // 挂载点选择依据：本函数 100% 被调用（panic 栈铁证）；而 smu13PowerUpConfig 因 wrapper 休眠是死点。
+    // 失败仅记录探针位，不改变原有行为（安全旁路）。
+    if (NRed::singleton().getAttributes().isPhoenix()) {
+        const UInt32 stepMsg[4] = {
+            PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh,
+            PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow,
+            PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu,
+            PhoenixPPSMC::PPSMC_MSG_EnableGfxImu,
+        };
+        const UInt32 stepParam[4] = {0, 0, 0, 1};
+        for (UInt32 i = 0; i < 4; i += 1) {
+            const auto r = X5000HWLibs::smu13SendMsgDirect(stepMsg[i], stepParam[i]);
+            if (r == kCAILResultOK) {
+                NRed::singleton().orSmu13ProbeState(1ULL << (20 + i));
+            }
+            else {
+                NRed::singleton().orSmu13ProbeState(1ULL << (24 + i));
+                NRed::singleton().orSmu13ProbeState((UInt64)(r & 0xFF) << (32 + 8 * i));
+            }
+        }
+    }
+
     auto ret       = FunctionCast(wrapControllerPowerUp, singleton().orgControllerPowerUp)(self);
     SYSLOG("X6000FB", "D3: controller::powerUp returned 0x%X (isPhoenix=%s)", ret,
            NRed::singleton().getAttributes().isPhoenix() ? "true" : "false");

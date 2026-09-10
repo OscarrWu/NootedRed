@@ -1125,6 +1125,9 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
     // 顺序不可跳（SetDriverDramAddr → TransferTableDram2Smu → EnableGfxImu）。
     CAILResult res;
 
+    // NRed 直读 MMIO 旁路：四步序列已移至 X6000FB::wrapControllerPowerUp（100% 被调用的挂载点）。
+    // 此处保留原 ctx 路径逻辑不变（smu13PowerUpConfig 本身因 wrapper 休眠不会被调用，见 CONFIRMED §16）。
+
     // a. SetDriverDramAddrHigh (0x0D), param=0
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh);
     if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0)) != kCAILResultOK
@@ -1283,6 +1286,61 @@ UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
 
     // 7) Return actual frequency (MHz) written back by SMU
     return hw.smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_83, 0, kCAILHWBlockMP1, 0);
+}
+
+/*!
+ * NRed 直读 MMIO 自实现 PMFW 消息发送 —— 绕开 Apple SMU ctx（smu90SendMessageWithParameter / smuCgsReadWriteRegister）。
+ * 完整复刻 vbiossmcSendMsg 的 C2PMSG 时序：等 91 不忙 → 清 91 响应 → 写 83 参数 → 写 67 消息(触发) → 轮询 91 直到响应 → 判结果。
+ * 基址采用 SMUIO_BASE_0 + MP1_SMN_C2PMSG_xx（32-bit dword 索引，对齐 NRed::readReg32 约定：L930-942 用 MP0_BASE_0 + MP0_SMN_C2PMSG_*）。
+ */
+CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 param)
+{
+    auto& nred = NRed::singleton();
+
+    const UInt32 reg91 = SMUIO_BASE_0 + MP1_SMN_C2PMSG_91; // 响应/状态邮箱
+    const UInt32 reg83 = SMUIO_BASE_0 + MP1_SMN_C2PMSG_83; // 参数邮箱
+    const UInt32 reg67 = SMUIO_BASE_0 + MP1_SMN_C2PMSG_67; // 消息触发邮箱
+
+    // 1) 等 SMU 不忙 (C2PMSG_91 != BUSY)
+    UInt32 res = VBIOSSMC_Status_BUSY;
+    for (UInt32 tries = 0; tries < 200000; tries += 1) {
+        res = nred.readReg32(reg91);
+        if (res != VBIOSSMC_Status_BUSY) break;
+        IODelay(10);
+    }
+    if (res == VBIOSSMC_Status_BUSY) {
+        SYSLOG("HWLibs", "smu13Direct: busy timeout before send (msg 0x%x)", msgId);
+        return kCAILResultNoResponse;
+    }
+
+    // 2) 清响应寄存器为 BUSY（让 SMU 知道有新请求）
+    nred.writeReg32(reg91, VBIOSSMC_Status_BUSY);
+
+    // 3) 写参数
+    nred.writeReg32(reg83, param);
+
+    // 4) 写消息 ID（触发）
+    nred.writeReg32(reg67, msgId);
+
+    // 5) 等完成（轮询 91 直到 != BUSY）
+    res = VBIOSSMC_Status_BUSY;
+    for (UInt32 tries = 0; tries < 200000; tries += 1) {
+        res = nred.readReg32(reg91);
+        if (res != VBIOSSMC_Status_BUSY) break;
+        IODelay(10);
+    }
+
+    // 6) 结果判定
+    if (res == VBIOSSMC_Status_BUSY) {
+        SYSLOG("HWLibs", "smu13Direct: timeout after send (msg 0x%x)", msgId);
+        return kCAILResultNoResponse;
+    }
+    if (res == VBIOSSMC_Result_Failed) {
+        SYSLOG("HWLibs", "smu13Direct: msg 0x%x param %u returned Failed", msgId, param);
+        return kCAILResultFailed;
+    }
+
+    return kCAILResultOK;
 }
 
 SInt32 X5000HWLibs::vbiossmcSetDispclk(void* ctx, UInt32 requestedKhz)
