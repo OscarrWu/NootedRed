@@ -613,6 +613,9 @@ IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType,
                         reinterpret_cast<mach_vm_address_t>(singleton().orgMessageAccelerator))(self, reqType, arg2, arg3, arg4);
 }
 
+// 诊断：探针消息原始响应（文件作用域，供 wrapHandleCriticalError 的 panic 消息打印）
+static UInt32 gProbeResp[3] = {0, 0, 0};
+
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     auto& m_flags  = getMember<UInt8>(self, 0x5F18);
@@ -627,6 +630,18 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     //   bit24 = 表地址/Transfer 失败；bit25 = EnableGfxImu 失败；
     //   bit32-39 = 表地址/Transfer 步 rc（低8位）；bit40-47 = EnableGfxImu 步 rc（i=3 域位）。
     if (NRed::singleton().getAttributes().isPhoenix()) {
+        // ⭐ 探针三连（§16.39）：TestMessage(0x01) / GetPmfwVersion(0x02) / GetDriverIfVersion(0x03)
+        //    目的：判定 PMFW 消息端口是否开着——这三条是最基础的消息，任何固件都应响应。
+        //    全静默 → 消息端口未开；有响应 → 通道通，问题在消息内容/时序。
+        {
+            UInt32 pr[3] = {0, 0, 0};
+            X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &pr[0]);
+            X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion, 0, &pr[1]);
+            X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion, 0, &pr[2]);
+            gProbeResp[0] = pr[0];
+            gProbeResp[1] = pr[1];
+            gProbeResp[2] = pr[2];
+        }
         // ⚠️ 顺序对齐 Linux（amdgpu_smu.c）：EnableGfxImu 在 smu_start_smc_engine 之后、
         // driver 表地址设置/TransferTable 之前发送（查证 §16.20）——先前顺序（Imu 在 Transfer 后）
         // 导致 Imu NoResponse（Transfer 失败后 PMFW 消息环状态异常）。
@@ -690,11 +705,11 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 fbOff      = nred.getFbOffset();
         const UInt64 probeState = nred.getSmu13ProbeState();
 
-        panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
-              "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | orig1:%s | orig2:%s | orig3:%s",
-            probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
-            rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer, fmt1 ? fmt1 : "(null)",
-            fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+        panic("NRed SMU13 state=%llx | fwflag28=%x c2p90=%x | PB tm=%x pmfw=%x dif=%x | c2p66=%x c2p82=%x "
+              "fbOffRaw=%x fbOff=%llx | orig1:%s | orig2:%s | orig3:%s",
+            probeState, rFwFlags, rMsg90, gProbeResp[0], gProbeResp[1], gProbeResp[2],
+            rMsg66, rMsg82, rFbOffRaw, fbOff,
+            fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
 

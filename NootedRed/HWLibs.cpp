@@ -1296,7 +1296,7 @@ UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
  * 完整复刻 vbiossmcSendMsg 的 C2PMSG 时序：等 91 不忙 → 清 91 响应 → 写 83 参数 → 写 67 消息(触发) → 轮询 91 直到响应 → 判结果。
  * 基址采用 SMUIO_BASE_0 + MP1_SMN_C2PMSG_xx（32-bit dword 索引，对齐 NRed::readReg32 约定：L930-942 用 MP0_BASE_0 + MP0_SMN_C2PMSG_*）。
  */
-CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 param)
+CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 param, UInt32 *rawResp)
 {
     auto& nred = NRed::singleton();
 
@@ -1322,6 +1322,8 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
         if (res != 0) { break; }
         IODelay(10);
     }
+
+    if (rawResp != nullptr) { *rawResp = res; }   // 诊断：回传原始响应
 
     // 结果判定（PMFW 响应值：0x1=OK 0xFE=UnknownCmd 0xFD=RejectedPrereq 0xFC=RejectedBusy 0xFF=Failed）
     if (res == 0) {
