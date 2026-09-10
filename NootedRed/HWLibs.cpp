@@ -1368,9 +1368,10 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
 {
     const auto ret =
         FunctionCast(wrapSmuInitFunctionPointerList, singleton().orgSmuInitFunctionPointerList)(ctx, ipVersion);
-    if (ret == kCAILResultOK) { return ret; }
+    if (ret == kCAILResultOK && !NRed::singleton().getAttributes().isPhoenix()) { return ret; }
 
-    switch (ipVersion.major) {
+    const auto effectiveMajor = NRed::singleton().getAttributes().isPhoenix() ? 13 : ipVersion.major;
+    switch (effectiveMajor) {
         case 10: {
             singleton().smuInternalHWInitField(ctx) = reinterpret_cast<void*>(smu10InternalHwInit);
             singleton().smuNotifyEventField(ctx)    = reinterpret_cast<void*>(smu10NotifyEvent);
@@ -1397,7 +1398,7 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     singleton().smuFullscreenEventField(ctx) = reinterpret_cast<void*>(smuFullScreenEvent);
     singleton().smuInternalSWExitField(ctx)  = reinterpret_cast<void*>(retOK);
     singleton().smuInternalHWExitField(ctx)  = reinterpret_cast<void*>(smuInternalHwExit);
-    if (ipVersion.major == 13) {
+    if (effectiveMajor == 13) {
         singleton().smuFullAsicResetField(ctx) = reinterpret_cast<void*>(smu13FullAsicReset);
     }
     else {
