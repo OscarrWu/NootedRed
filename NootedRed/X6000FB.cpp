@@ -619,26 +619,31 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
 
-    // C1.6: NRed 直读 MMIO 旁路 —— 在 powerUp 之前用自实现 PMFW 发送跑四步序列，唤醒 BGM/IMU。
+    // C1.6: NRed 直读 MMIO 旁路 —— 在 powerUp 之前跑驱动表分配+Transfer 序列，唤醒 BGM/IMU。
     // 挂载点选择依据：本函数 100% 被调用（panic 栈铁证）；而 smu13PowerUpConfig 因 wrapper 休眠是死点。
     // 失败仅记录探针位，不改变原有行为（安全旁路）。
+    // 探针位新语义（改用表地址+Transfer 合并 + 独立 EnableGfxImu）：
+    //   bit20 = 表地址设置+Transfer 成功；bit21 = EnableGfxImu(0x16,1) 成功；
+    //   bit24 = 表地址/Transfer 失败；bit25 = EnableGfxImu 失败；
+    //   bit32-39 = 表地址/Transfer 步 rc（低8位）；bit40-47 = EnableGfxImu 步 rc（i=3 域位）。
     if (NRed::singleton().getAttributes().isPhoenix()) {
-        const UInt32 stepMsg[4] = {
-            PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh,
-            PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow,
-            PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu,
-            PhoenixPPSMC::PPSMC_MSG_EnableGfxImu,
-        };
-        const UInt32 stepParam[4] = {0, 0, 0, 1};
-        for (UInt32 i = 0; i < 4; i += 1) {
-            const auto r = X5000HWLibs::smu13SendMsgDirect(stepMsg[i], stepParam[i]);
-            if (r == kCAILResultOK) {
-                NRed::singleton().orSmu13ProbeState(1ULL << (20 + i));
-            }
-            else {
-                NRed::singleton().orSmu13ProbeState(1ULL << (24 + i));
-                NRed::singleton().orSmu13ProbeState((UInt64)(r & 0xFF) << (32 + 8 * i));
-            }
+        const auto rSetup = X5000HWLibs::smu13SetupDriverTableAndTransfer();
+        if (rSetup == kCAILResultOK) {
+            NRed::singleton().orSmu13ProbeState(1ULL << 20);
+        }
+        else {
+            NRed::singleton().orSmu13ProbeState(1ULL << 24);
+            NRed::singleton().orSmu13ProbeState((UInt64)(rSetup & 0xFF) << 32);
+        }
+
+        // 0x0D/0x0E/0x10 成功后，再发 EnableGfxImu(0x16, param=1)；失败仅记探针位。
+        const auto rImu = X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, 1);
+        if (rImu == kCAILResultOK) {
+            NRed::singleton().orSmu13ProbeState(1ULL << 21);
+        }
+        else {
+            NRed::singleton().orSmu13ProbeState(1ULL << 25);
+            NRed::singleton().orSmu13ProbeState((UInt64)(rImu & 0xFF) << 40);  // i=3 原 step3 rc 域
         }
     }
 

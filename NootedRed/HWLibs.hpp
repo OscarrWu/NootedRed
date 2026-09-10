@@ -18,6 +18,8 @@
 #include <Headers/kern_util.hpp>
 #include <PenguinWizardry/ObjectField.hpp>
 
+class IOBufferMemoryDescriptor;  // 仅作指针成员前向声明；定义见 <IOKit/IOMemoryDescriptor.h>
+
 class X5000HWLibs
 {
     using t_createFirmware = void*(const void* data, UInt32 size, UInt32 ipVersion, const char* filename);
@@ -33,6 +35,9 @@ class X5000HWLibs
     ObjectField<void*>                                           smuFullscreenEventField;
     void*                                                        smuCtxCache{nullptr};
     bool                                                         smu13InitAttempted{false};
+    // 驱动表（SmuMetrics_t 168B）物理连续缓冲，由 smu13SetupDriverTableAndTransfer 持有，生命周期与 kext 一致，
+    // 不释放（SMU 通过 Transfer 后仍指向该 DRAM 地址）。
+    IOBufferMemoryDescriptor*                                    smu13MetricsBuffer{nullptr};
     ObjectField<void*>                                           smuGetUCodeConstsField;
     ObjectField<void*>                                           smuInternalHWInitField;
     ObjectField<void*>                                           smuNotifyEventField;
@@ -100,6 +105,9 @@ public:
     // NRed 直读 MMIO 绕过 Apple SMU ctx 的 PMFW 消息发送（Phoenix 上电序列旁路）
     // public：供 X6000FB::wrapControllerPowerUp 调用（该函数 100% 被调用，而 smu13PowerUpConfig 死点）
     static CAILResult smu13SendMsgDirect(UInt32 msgId, UInt32 param);
+    // 分配物理连续 256B 缓冲，通知 SMU 驱动表真实 DRAM 地址（0x0D/0x0E）并 Transfer（0x10, TABLE_SMU_METRICS=7）。
+    // 缓冲存入 smu13MetricsBuffer 持有，不释放。public：供 X6000FB::wrapControllerPowerUp 调用。
+    static CAILResult smu13SetupDriverTableAndTransfer();
 private:
     static CAILResult wrapSmu90SendMessageWithParameter(void* ctx, UInt32 message, UInt32 param);
     static CAILResult smuInternalHwExit(void* ctx);

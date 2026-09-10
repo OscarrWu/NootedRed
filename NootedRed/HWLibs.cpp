@@ -24,6 +24,7 @@
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
+#include <IOKit/IOMemoryDescriptor.h>
 #include <Kexts.hpp>
 #include <NRed.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
@@ -1336,6 +1337,61 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
     }
 
     return kCAILResultOK;
+}
+
+CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
+{
+    // 分配物理连续 256B（SmuMetrics_t 168B + 对齐余量），供 SMU TransferTableDram2Smu DMA 写入。
+    // 缓冲由本类持有（smu13MetricsBuffer），kext 生命周期内不释放：SMU 通过 Transfer 后仍指向该 DRAM 地址。
+    // PAGE_SIZE 用常量（macOS 页 = 4096）保证物理对齐。
+    auto& hw = singleton();
+    if (hw.smu13MetricsBuffer != nullptr) {
+        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: buffer already allocated");
+        return kCAILResultOK;
+    }
+
+    constexpr UInt32 kMetricsSize = 168U;                 // SmuMetrics_t (Phoenix 13.0.4)
+    constexpr UInt32 kBufferSize  = 256U;                 // 物理对齐分配
+    constexpr UInt32 kPageAlign   = 4096U;                // PAGE_SIZE
+
+    IOBufferMemoryDescriptor* buf = IOBufferMemoryDescriptor::withOptions(
+        kIOMemoryPhysicallyContiguous | kIODirectionInOut, kBufferSize, kPageAlign);
+    if (buf == nullptr) {
+        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: alloc failed");
+        return kCAILResultFailed;
+    }
+    if (buf->prepare() != kIOReturnSuccess) {
+        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: prepare failed");
+        buf->release();
+        return kCAILResultFailed;
+    }
+
+    // 取第一段物理段（应覆盖整块 256B）；addr64_t / IOByteCount 来自 IOMemoryDescriptor.h
+    // getPhysicalSegment 第三参为 IOOptionBits（默认 0），传 0 即可。
+    IOByteCount segLen = 0;
+    const addr64_t phys = buf->getPhysicalSegment(0, &segLen, 0);
+    if (phys == 0 || segLen < kMetricsSize) {
+        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: bad phys seg phys=0x%llX len=%llu",
+               (unsigned long long)phys, (unsigned long long)segLen);
+        buf->complete();
+        buf->release();
+        return kCAILResultFailed;
+    }
+
+    // 1) 通知 SMU 驱动表真实 DRAM 物理地址（高低 32 位）—— 根因修复：原直发传 0 无效
+    X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh,
+                                   static_cast<UInt32>(phys >> 32));
+    X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow,
+                                   static_cast<UInt32>(phys & 0xFFFFFFFFU));
+
+    // 2) Transfer：argument=0, table_id=TABLE_SMU_METRICS=7（0x10 的 param = (argument&0xFFFF)<<16 | (table_id&0xFFFF)）
+    //    原直发传 0 = TABLE_BIOS_IF 被拒；全 0 表可被 SMU 合法 DMA 拷贝。
+    const CAILResult r = X5000HWLibs::smu13SendMsgDirect(
+        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 7U));
+
+    // 持有缓冲（不 release），后续 metrics 读取可经 smu13MetricsBuffer 取虚拟地址
+    hw.smu13MetricsBuffer = buf;
+    return r;
 }
 
 SInt32 X5000HWLibs::vbiossmcSetDispclk(void* ctx, UInt32 requestedKhz)
