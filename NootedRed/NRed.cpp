@@ -92,7 +92,16 @@ void NRed::hwLateInit()
     PANIC_COND(this->rmmio == nullptr || this->rmmio->getLength() == 0, "NRed", "Failed to map RMMIO");
     this->rmmioPtr = reinterpret_cast<volatile UInt32*>(this->rmmio->getVirtualAddress());
 
-    this->fbOffset    = static_cast<UInt64>(this->readReg32(GC_BASE_0 + MC_VM_FB_OFFSET) & 0xFFFFFF) << 24;
+    // fbOffset（GPU FB aperture 基准）——Phoenix (mmhub 3.0.2) 的寄存器在 MMHUB SMN 段：
+    // base 0x68000 + regMMMC_VM_FB_OFFSET(0x0857)（Linux mmhub_3_0_2_offset.h 头注释 + L1356）。
+    // ⛔ 旧读法 GC_BASE_0+0x96B 是错的（读回 0，CONFIRMED §16.18）。
+    // Raven/老 asic 仍走 GC_BASE_0 + 0x96B（兼容原逻辑）。
+    if (this->attributes.isPhoenix()) {
+        this->fbOffset = static_cast<UInt64>(this->readReg32(0x68000 + 0x0857) & 0xFFFFFF) << 24;
+    }
+    else {
+        this->fbOffset = static_cast<UInt64>(this->readReg32(GC_BASE_0 + MC_VM_FB_OFFSET) & 0xFFFFFF) << 24;
+    }
     this->devRevision = (this->readReg32(NBIO_BASE_2 + RCC_DEV0_EPF0_STRAP0) & RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_MASK)
                         >> RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_SHIFT;
 

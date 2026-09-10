@@ -1380,14 +1380,15 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     }
 
     // 1) 通知 SMU 驱动表 DRAM 地址（高低 32 位）
-    //    ⚠️ 地址域换算（§16.17）：普通系统 RAM 可能不在 SMU DMA 可达域；
-    //    APU 上 GPU/SMU 视角 = 主机物理 + fbOffset（MC_VM_FB_OFFSET，hwLateInit 已算）。
-    //    策略：先按 fbOffset 版发 Transfer；探针 bit26/27 记录原始 phys 版结果（区分归因）。
-    //    fbOffset==0 时（理论上 UMA 不为 0）退回原始 phys。
-    const UInt64 fbOff  = NRed::singleton().getFbOffset();
-    const addr64_t addr = (fbOff != 0) ? (phys + fbOff) : phys;
-    // 探针：bit29 = 使用了 fbOffset 换算（1）还是原始 phys（0）
-    if (fbOff != 0) { NRed::singleton().orSmu13ProbeState(1ULL << 29); }
+    //    ⚠️ 地址域（§16.19）：PMFW 的 DMA 域只保证覆盖 FB carve-out 窗口——
+    //    [fbOffset<<24, +visible_vram)。普通系统 RAM 页在窗口外 → Transfer 被拒（第 8/9 次实证）。
+    //    方案：直接用 carve-out 窗口内地址 = (fbOffset<<24) + 0x1000（第二页，避开 VBIOS 常驻的第一页）。
+    //    该内存的 CPU 侧映射/访问暂不需要（表内容全 0 即可，SMU 只做 DMA 拷贝）。
+    //    探针：bit29 = carve-out 地址已使用（1）。
+    const UInt64 fbOff      = NRed::singleton().getFbOffset();
+    const addr64_t carveout = fbOff << 24;
+    const addr64_t addr     = carveout + 0x1000;
+    NRed::singleton().orSmu13ProbeState(1ULL << 29);   // 已改用 carve-out 地址
 
     const auto rHigh = X5000HWLibs::smu13SendMsgDirect(
         PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, static_cast<UInt32>(addr >> 32));
@@ -1408,10 +1409,11 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         return rLow;
     }
 
-    // 2) Transfer：argument=0, table_id=TABLE_SMU_METRICS=7（0x10 的 param = (argument&0xFFFF)<<16 | (table_id&0xFFFF)）
-    //    原直发传 0 = TABLE_BIOS_IF 被拒；全 0 表可被 SMU 合法 DMA 拷贝。
+    // 2) Transfer：argument=0, table_id=TABLE_SMU_METRICS=5
+    //    【§16.19】Phoenix (MP1 13.0.7) 的表号：drvif7.h:1601 TABLE_SMU_METRICS=5
+    //    （此前传 7 = TABLE_ACTIVITY_MONITOR_COEFF，来自错误版本的表定义——已修正）
     const CAILResult r = X5000HWLibs::smu13SendMsgDirect(
-        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 7U));
+        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 5U));
 
     // 持有缓冲（不 release），后续 metrics 读取可经 smu13MetricsBuffer 取虚拟地址
     hw.smu13MetricsBuffer = buf;
