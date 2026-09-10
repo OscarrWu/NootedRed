@@ -694,9 +694,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         {"_smu_init_function_pointer_list", wrapSmuInitFunctionPointerList, this->orgSmuInitFunctionPointerList,
          kSmuInitFunctionPointerListCallPattern, kSmuInitFunctionPointerListCallPatternMask,
          kSmuInitFunctionPointerListCallPatternJumpInstOff},
-        {"_smu_9_0_send_message_with_parameter", wrapSmu90SendMessageWithParameter,
-         this->orgSmu90SendMessageWithParameter},
     };
+    // ⛔ 曾尝试在此加 {"_smu_9_0_send_message_with_parameter", wrapSmu90SendMessageWithParameter, ...}
+    //    实测 route 失败 → 启动早期 panic "Failed to route FW-related functions"（CONFIRMED §16.6，1dbf4c2）。
+    //    原因：该符号无 call 调用点（只被 solve 成函数指针）。**不要再加回**。
     PANIC_COND(!PenguinWizardry::JumpPatternRouteRequest::routeAll(patcher, id, fwRequests, slide, size), "HWLibs",
                "Failed to route FW-related functions");
 
