@@ -1379,11 +1379,34 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         return kCAILResultFailed;
     }
 
-    // 1) 通知 SMU 驱动表真实 DRAM 物理地址（高低 32 位）—— 根因修复：原直发传 0 无效
-    X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh,
-                                   static_cast<UInt32>(phys >> 32));
-    X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow,
-                                   static_cast<UInt32>(phys & 0xFFFFFFFFU));
+    // 1) 通知 SMU 驱动表 DRAM 地址（高低 32 位）
+    //    ⚠️ 地址域换算（§16.17）：普通系统 RAM 可能不在 SMU DMA 可达域；
+    //    APU 上 GPU/SMU 视角 = 主机物理 + fbOffset（MC_VM_FB_OFFSET，hwLateInit 已算）。
+    //    策略：先按 fbOffset 版发 Transfer；探针 bit26/27 记录原始 phys 版结果（区分归因）。
+    //    fbOffset==0 时（理论上 UMA 不为 0）退回原始 phys。
+    const UInt64 fbOff  = NRed::singleton().getFbOffset();
+    const addr64_t addr = (fbOff != 0) ? (phys + fbOff) : phys;
+    // 探针：bit29 = 使用了 fbOffset 换算（1）还是原始 phys（0）
+    if (fbOff != 0) { NRed::singleton().orSmu13ProbeState(1ULL << 29); }
+
+    const auto rHigh = X5000HWLibs::smu13SendMsgDirect(
+        PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, static_cast<UInt32>(addr >> 32));
+    if (rHigh != kCAILResultOK) {
+        NRed::singleton().orSmu13ProbeState(1ULL << 26);   // High 设置失败
+        NRed::singleton().orSmu13ProbeState(static_cast<UInt64>(rHigh & 0xFF) << 48);
+        buf->complete();
+        buf->release();
+        return rHigh;
+    }
+    const auto rLow = X5000HWLibs::smu13SendMsgDirect(
+        PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, static_cast<UInt32>(addr & 0xFFFFFFFFU));
+    if (rLow != kCAILResultOK) {
+        NRed::singleton().orSmu13ProbeState(1ULL << 27);   // Low 设置失败
+        NRed::singleton().orSmu13ProbeState(static_cast<UInt64>(rLow & 0xFF) << 48);
+        buf->complete();
+        buf->release();
+        return rLow;
+    }
 
     // 2) Transfer：argument=0, table_id=TABLE_SMU_METRICS=7（0x10 的 param = (argument&0xFFFF)<<16 | (table_id&0xFFFF)）
     //    原直发传 0 = TABLE_BIOS_IF 被拒；全 0 表可被 SMU 合法 DMA 拷贝。
