@@ -1298,47 +1298,41 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
 {
     auto& nred = NRed::singleton();
 
-    const UInt32 reg91 = SMUIO_BASE_0 + MP1_SMN_C2PMSG_91; // 响应/状态邮箱
-    const UInt32 reg83 = SMUIO_BASE_0 + MP1_SMN_C2PMSG_83; // 参数邮箱
-    const UInt32 reg67 = SMUIO_BASE_0 + MP1_SMN_C2PMSG_67; // 消息触发邮箱
+    // ⚠️ SMU13/Phoenix (IP 13.0.x) 邮箱三件套（Linux smu_v13_0.c:2223 init_msg_ctl +
+    //    mp_13_0_2_offset.h: regMP1_SMN_C2PMSG_66=0x282/_82=0x292/_90=0x29A）：
+    //    msg=C2PMSG_66, arg=C2PMSG_82, resp=C2PMSG_90 —— 均落在 rmmio 的 MP0_BASE_0 窗口（dword 0x16000）。
+    //    ⛔ 不要用 C2PMSG_67/83/91（那是 v11/v12 的）和 SMUIO_BASE_0(0x16800)——两者都错，读回恒 0（§16.12）。
+    //    0x1629A*4=0x58A68 字节 < rmmio 窗口，readReg32 走直接路径即可达。
+    const UInt32 regResp = MP0_BASE_0 + 0x29A;   // C2PMSG_90：响应（0=NoResponse，写 0 清）
+    const UInt32 regArg  = MP0_BASE_0 + 0x292;   // C2PMSG_82：参数
+    const UInt32 regMsg  = MP0_BASE_0 + 0x282;   // C2PMSG_66：命令（写即触发）
 
-    // 1) 等 SMU 不忙 (C2PMSG_91 != BUSY)
-    UInt32 res = VBIOSSMC_Status_BUSY;
-    for (UInt32 tries = 0; tries < 200000; tries += 1) {
-        res = nred.readReg32(reg91);
-        if (res != VBIOSSMC_Status_BUSY) break;
-        IODelay(10);
-    }
-    if (res == VBIOSSMC_Status_BUSY) {
-        SYSLOG("HWLibs", "smu13Direct: busy timeout before send (msg 0x%x)", msgId);
-        return kCAILResultNoResponse;
-    }
+    // Linux __smu_msg_v1_send 时序：①清响应(90=0) ②写参数(82) ③写命令(66) ④轮询 90 != 0
+    nred.writeReg32(regResp, 0);
+    nred.writeReg32(regArg, param);
+    nred.writeReg32(regMsg, msgId);
 
-    // 2) 清响应寄存器为 BUSY（让 SMU 知道有新请求）
-    nred.writeReg32(reg91, VBIOSSMC_Status_BUSY);
-
-    // 3) 写参数
-    nred.writeReg32(reg83, param);
-
-    // 4) 写消息 ID（触发）
-    nred.writeReg32(reg67, msgId);
-
-    // 5) 等完成（轮询 91 直到 != BUSY）
-    res = VBIOSSMC_Status_BUSY;
-    for (UInt32 tries = 0; tries < 200000; tries += 1) {
-        res = nred.readReg32(reg91);
-        if (res != VBIOSSMC_Status_BUSY) break;
+    // 轮询响应（C2PMSG_90 != 0，即 SMU 已写回结果）；0 = kSMUFWResponseNoResponse
+    constexpr UInt32 kRespTimeout = 200000;   // 200000 × 10µs = 2s（与 vbiossmc 一致）
+    UInt32 res = 0;
+    for (UInt32 tries = 0; tries < kRespTimeout; tries += 1) {
+        res = nred.readReg32(regResp);
+        if (res != 0) { break; }
         IODelay(10);
     }
 
-    // 6) 结果判定
-    if (res == VBIOSSMC_Status_BUSY) {
-        SYSLOG("HWLibs", "smu13Direct: timeout after send (msg 0x%x)", msgId);
+    // 结果判定（PMFW 响应值：0x1=OK 0xFE=UnknownCmd 0xFD=RejectedPrereq 0xFC=RejectedBusy 0xFF=Failed）
+    if (res == 0) {
+        SYSLOG("HWLibs", "smu13Direct: no response (msg 0x%x param %u)", msgId, param);
         return kCAILResultNoResponse;
     }
     if (res == VBIOSSMC_Result_Failed) {
         SYSLOG("HWLibs", "smu13Direct: msg 0x%x param %u returned Failed", msgId, param);
         return kCAILResultFailed;
+    }
+    if (res != VBIOSSMC_Result_OK) {
+        SYSLOG("HWLibs", "smu13Direct: msg 0x%x param %u rejected, resp=0x%X", msgId, param, res);
+        return kCAILResultUnsupported;
     }
 
     return kCAILResultOK;
