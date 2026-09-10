@@ -6,12 +6,14 @@
 #include "AmdAtomPspDirectoryDummy.hpp"
 #include "AmdAtomVramInfoIGP.hpp"
 #include <ASICCaps.hpp>
+#include "HWLibs.hpp"
 #include <GPUDriversAMD/ATOMBIOS.hpp>
 #include <GPUDriversAMD/CAIL/ASICCaps.hpp>
 #include <GPUDriversAMD/FB/AmdAsicInfo.hpp>
 #include <GPUDriversAMD/FB/AmdDeviceMemoryManager.hpp>
 #include <GPUDriversAMD/FB/VidMemType.hpp>
 #include <GPUDriversAMD/Family.hpp>
+#include <GPUDriversAMD/PhoenixPPSMC.hpp>
 #include <GPUDriversAMD/RavenIPOffset.hpp>
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
