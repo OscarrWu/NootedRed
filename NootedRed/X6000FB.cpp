@@ -705,10 +705,12 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 fbOff      = nred.getFbOffset();
         const UInt64 probeState = nred.getSmu13ProbeState();
 
-        panic("NRed SMU13 state=%llx | fwflag28=%x c2p90=%x | PB tm=%x pmfw=%x dif=%x | c2p66=%x c2p82=%x "
-              "fbOffRaw=%x fbOff=%llx | orig1:%s | orig2:%s | orig3:%s",
-            probeState, rFwFlags, rMsg90, gProbeResp[0], gProbeResp[1], gProbeResp[2],
-            rMsg66, rMsg82, rFbOffRaw, fbOff,
+        panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
+              "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x | "
+              "orig1:%s | orig2:%s | orig3:%s",
+            probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
+            rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
+            gProbeResp[0], gProbeResp[1], gProbeResp[2],
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
