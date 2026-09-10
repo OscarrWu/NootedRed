@@ -32,6 +32,7 @@ class X5000HWLibs
     ObjectField<void*>                                           smuInternalSWInitField;
     ObjectField<void*>                                           smuFullscreenEventField;
     void*                                                        smuCtxCache{nullptr};
+    bool                                                         smu13InitAttempted{false};
     ObjectField<void*>                                           smuGetUCodeConstsField;
     ObjectField<void*>                                           smuInternalHWInitField;
     ObjectField<void*>                                           smuNotifyEventField;
@@ -48,6 +49,7 @@ class X5000HWLibs
     t_putFirmware*                                               orgPutFirmware{nullptr};
     mach_vm_address_t                                            orgPspCmdKmSubmit{0};
     mach_vm_address_t                                            orgSmuInitFunctionPointerList{0};
+    mach_vm_address_t                                            orgSmu90SendMessageWithParameter{0};
     mach_vm_address_t                                            orgGcSetFwEntryInfo{0};
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
@@ -94,6 +96,7 @@ private:
     static CAILResult smu13InternalHwInit(void* ctx);
     static CAILResult smu13NotifyEvent(void* ctx, TTLEventInput* input);
     static CAILResult smu13FullAsicReset(void* ctx, void* data);
+    static CAILResult wrapSmu90SendMessageWithParameter(void* ctx, UInt32 message, UInt32 param);
     static CAILResult smuInternalHwExit(void* ctx);
     static CAILResult smuFullAsicReset(void* ctx, void* data);
     static CAILResult smu10NotifyEvent(void* ctx, TTLEventInput* input);

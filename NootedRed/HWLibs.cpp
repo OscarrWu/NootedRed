@@ -694,9 +694,19 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         {"_smu_init_function_pointer_list", wrapSmuInitFunctionPointerList, this->orgSmuInitFunctionPointerList,
          kSmuInitFunctionPointerListCallPattern, kSmuInitFunctionPointerListCallPatternMask,
          kSmuInitFunctionPointerListCallPatternJumpInstOff},
+        {"_smu_9_0_send_message_with_parameter", wrapSmu90SendMessageWithParameter,
+         this->orgSmu90SendMessageWithParameter},
     };
     PANIC_COND(!PenguinWizardry::JumpPatternRouteRequest::routeAll(patcher, id, fwRequests, slide, size), "HWLibs",
                "Failed to route FW-related functions");
+
+    // 重定向成员到 trampoline：routeFunction 已把原函数入口改为跳回 wrapper，
+    // 若不重指，smuSendMessage→成员 会重新进入 wrapper 造成递归（smu13InternalHwInit 内部发消息时）。
+    // 保护：route 失败时 org 为 0，此时保留 solve 到的原始指针（避免成员被置空导致后续崩溃）。
+    if (this->orgSmu90SendMessageWithParameter != 0) {
+        this->smu90SendMessageWithParameter =
+            reinterpret_cast<CAILResult (*)(void*, UInt32, UInt32)>(this->orgSmu90SendMessageWithParameter);
+    }
 
     KernelPatcher::RouteRequest dmcuFwRequests[] = {
         {nullptr, getDcn1FwConstants},
@@ -1003,6 +1013,21 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
     if (outParam != nullptr) { *outParam = this->smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_82, 0, kCAILHWBlockMP1, 0); }
 
     return kCAILResultOK;
+}
+
+CAILResult X5000HWLibs::wrapSmu90SendMessageWithParameter(void* const ctx, const UInt32 message, const UInt32 param)
+{
+    // Probe: 消息 hook 被触发（第 60 位）
+    NRed::singleton().orSmu13ProbeState(1ULL << 60);
+
+    if (!singleton().smu13InitAttempted) {
+        singleton().smu13InitAttempted = true;
+        singleton().smuCtxCache         = ctx;
+        smu13InternalHwInit(ctx);
+    }
+
+    return FunctionCast(wrapSmu90SendMessageWithParameter, singleton().orgSmu90SendMessageWithParameter)(ctx, message,
+                                                                                                        param);
 }
 
 CAILResult X5000HWLibs::smuPowerUpConfigCommon(void* const ctx)
