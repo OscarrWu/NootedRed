@@ -25,6 +25,7 @@
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <Kexts.hpp>
 #include <NRed.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
