@@ -735,11 +735,15 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 respHi   = nred.smu13Resp[0];
         const UInt32 respLo   = nred.smu13Resp[1];
         const UInt32 respXfer = nred.smu13Resp[2];
+        // §16.70 响应矩阵（全部预读为局部变量——铁律 0a：panic 实参禁调 singleton()）
+        const UInt32 mxDifRc = nred.smu13Resp[3], mxDifArg = nred.smu13Resp[6];
+        const UInt32 mxAH0Rc = nred.smu13Resp[4], mxAH0Arg = nred.smu13Resp[7];
+        const UInt32 mxAH8Rc = nred.smu13Resp[5];
 
         panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
               "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
               "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x bar0=%llx | "
-              "RESP hi=%x lo=%x xfer=%x | "
+              "RESP hi=%x lo=%x xfer=%x | MX 03rc=%x 03arg=%x 0D0rc=%x 0D0arg=%x 0D8rc=%x | "
               "orig1:%s | orig2:%s | orig3:%s",
             probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
             rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
@@ -747,6 +751,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
             gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6],
             rFbC0, rFbC1, rFbC2, rFbC3, rBar0,
             respHi, respLo, respXfer,
+            mxDifRc, mxDifArg, mxAH0Rc, mxAH0Arg, mxAH8Rc,
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }

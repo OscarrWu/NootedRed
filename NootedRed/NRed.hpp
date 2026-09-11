@@ -74,7 +74,8 @@ public:
      * 由 HWLibs 的 smu13PowerUpConfig 累积，在 X6000FB 的 wrapHandleCriticalError（真崩溃出口）读出并注入 panic 消息。
      */
     // §16.67：驱动表序列各步的真实 resp（发消息时立刻记录；panic 时读的是过期值）
-    UInt32 smu13Resp[4] = {0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU};
+    UInt32 smu13Resp[8] = {0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU,
+                           0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU};
     UInt64 getSmu13ProbeState() const { return this->smu13ProbeState; }
     void   setSmu13ProbeState(UInt64 v) { this->smu13ProbeState = v; }
     void   orSmu13ProbeState(UInt64 v) { this->smu13ProbeState |= v; }
