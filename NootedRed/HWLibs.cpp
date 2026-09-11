@@ -1300,14 +1300,28 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
 {
     auto& nred = NRed::singleton();
 
-    // ⚠️ SMU13/Phoenix (IP 13.0.x) 邮箱三件套（Linux smu_v13_0.c:2223 init_msg_ctl +
-    //    mp_13_0_2_offset.h: regMP1_SMN_C2PMSG_66=0x282/_82=0x292/_90=0x29A）：
-    //    msg=C2PMSG_66, arg=C2PMSG_82, resp=C2PMSG_90 —— 均落在 rmmio 的 MP0_BASE_0 窗口（dword 0x16000）。
-    //    ⛔ 不要用 C2PMSG_67/83/91（那是 v11/v12 的）和 SMUIO_BASE_0(0x16800)——两者都错，读回恒 0（§16.12）。
-    //    0x1629A*4=0x58A68 字节 < rmmio 窗口，readReg32 走直接路径即可达。
-    const UInt32 regResp = MP0_BASE_0 + 0x29A;   // C2PMSG_90：响应（0=NoResponse，写 0 清）
-    const UInt32 regArg  = MP0_BASE_0 + 0x292;   // C2PMSG_82：参数
-    const UInt32 regMsg  = MP0_BASE_0 + 0x282;   // C2PMSG_66：命令（写即触发）
+    // ══════════════════════════════════════════════════════════════════════════
+    // ⭐⭐⭐ §16.78 真根因修正（2026-09-11）：SMU 邮箱必须用 MP1 BASE_IDX **1**！
+    //   证据（三源）：
+    //   ① `mp_13_0_4_offset.h:300/332/348`：regMP1_SMN_C2PMSG_66/82/90 的 **BASE_IDX = 1**
+    //      （不是 0！Renoir 的 mp_10_0_offset.h 才是 0——沿用它导致 Phoenix 上全错）
+    //   ② `yellow_carp_offset.h:875-876`：MP1_BASE__INST0_SEG0=0x16000，**SEG1=0x0243FC00**
+    //      → SOC15_REG_OFFSET(MP1,0,reg)=reg_offset[MP1][0][1]+reg = SEG1+reg
+    //   ③ `mac-amdgpu/dext/amdgpu/smu_v14_0.cpp:68-76` 原文注释：
+    //      "declare BASE_IDX 1 … NOT BASE_IDX 0. Using base[0] routes the writes to a
+    //       completely different physical register and **SMU never responds**"
+    //   ④ `research/mac-amdgpu-bringup.md:132` 项目研究文档早已记载此坑（我没读到！）
+    //
+    //   地址（dword 索引，BASE_IDX 1）：
+    //     C2PMSG_66 = 0x0243FC00 + 0x282 = 0x243FE82
+    //     C2PMSG_82 = 0x0243FC00 + 0x292 = 0x243FE92
+    //     C2PMSG_90 = 0x0243FC00 + 0x29A = 0x243FE9A
+    //   ⚠️ 这些值 ×4 远超 BAR5 窗口 → readReg32/writeReg32 走 PCIE_INDEX2/DATA2 间接路径。
+    //      间接路径传【字节地址】（dword×4），见 NRed.cpp:240 与 §16.34。
+    constexpr UInt32 kMp1Seg1 = 0x0243FC00;   // MP1_BASE__INST0_SEG1（BASE_IDX 1）
+    const UInt32 regResp = kMp1Seg1 + 0x29A;  // C2PMSG_90：响应（0=NoResponse，写 0 清）
+    const UInt32 regArg  = kMp1Seg1 + 0x292;  // C2PMSG_82：参数
+    const UInt32 regMsg  = kMp1Seg1 + 0x282;  // C2PMSG_66：命令（写即触发）
 
     // Linux __smu_msg_v1_send 时序：①清响应(90=0) ②写参数(82) ③写命令(66) ④轮询 90 != 0
     nred.writeReg32(regResp, 0);
@@ -1347,7 +1361,7 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
 UInt32 X5000HWLibs::smu13ProbeBlank()
 {
     auto& nred = NRed::singleton();
-    const UInt32 regResp = MP0_BASE_0 + 0x29A;
+    const UInt32 regResp = 0x0243FC00 + 0x29A;   // §16.78: MP1 BASE_IDX 1
     nred.writeReg32(regResp, 0);
     UInt32 res = 0;
     for (UInt32 i = 0; i < 200000; i += 1) {
@@ -1362,7 +1376,7 @@ UInt32 X5000HWLibs::smu13ProbeBlank()
 UInt32 X5000HWLibs::smu13ProbeRegRW()
 {
     auto& nred = NRed::singleton();
-    const UInt32 regResp = MP0_BASE_0 + 0x29A;
+    const UInt32 regResp = 0x0243FC00 + 0x29A;   // §16.78: MP1 BASE_IDX 1
     nred.writeReg32(regResp, 0x5A5A);
     const UInt32 back = nred.readReg32(regResp);
     nred.writeReg32(regResp, 0);
@@ -1470,15 +1484,15 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         UInt32 r0 = 0, r1 = 0, r2 = 0, p0 = 0, p1 = 0, p2 = 0;
         X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion, 0U, &r0);
         NRed::singleton().smu13Resp[3] = r0;
-        p0 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // 立即读 arg（版本号应在其中）
+        p0 = NRed::singleton().readReg32(0x0243FC00 + 0x292);   // §16.78: BASE_IDX 1
 
         X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0U, &r1);
         NRed::singleton().smu13Resp[4] = r1;
-        p1 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);
+        p1 = NRed::singleton().readReg32(0x0243FC00 + 0x292);   // §16.78: BASE_IDX 1
 
         X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0x8U, &r2);
         NRed::singleton().smu13Resp[5] = r2;
-        p2 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);
+        p2 = NRed::singleton().readReg32(0x0243FC00 + 0x292);   // §16.78: BASE_IDX 1
 
         NRed::singleton().smu13Resp[6] = p0;   // c2p82 after 0x03
         NRed::singleton().smu13Resp[7] = p1;   // c2p82 after 0x0D(param=0)
