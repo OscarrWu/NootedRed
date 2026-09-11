@@ -1540,9 +1540,20 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     NRed::singleton().smu13Resp[2] = respXfer;
     DBGLOG("HWLibs", "smu13: TransferTableDram2Smu resp=0x%X", respXfer);
 
+    // 3) TransferTableSmu2Dram(0x0F)：从 PMFW 把 SmuMetrics 拉回驱动表地址
+    //    【§16.84】BGM「可用」= 驱动能读到 metrics。SMU 在 SetDriverDramAddr 后持续
+    //    刷新该地址；驱动必须发 0x0F（PMFW→DRAM）才能读回。此前只发 0x10 从未拉取。
+    //    param 同为 ((argument<<16)|table_id)：argument=0, table_id=7（§16.83）。
+    UInt32 respPull = 0;
+    const CAILResult rPull = X5000HWLibs::smu13SendMsgDirect(
+        PhoenixPPSMC::PPSMC_MSG_TransferTableSmu2Dram, static_cast<UInt32>((0U << 16) | 7U), &respPull);
+    // 注意：不写入 smu13Resp[]（[3]-[7] 被响应矩阵占用，§16.70/16.65；不加 panic 字段=铁律 0a）
+    DBGLOG("HWLibs", "smu13: TransferTableSmu2Dram resp=0x%X", respPull);
+
     // 持有缓冲（不 release），后续 metrics 读取可经 smu13MetricsBuffer 取虚拟地址
     hw.smu13MetricsBuffer = buf;
-    return r;
+    // rDram2Smu 为写方向结果；拉取失败不影响写成功，但记录两者
+    return (r != kCAILResultOK) ? r : rPull;
 }
 
 SInt32 X5000HWLibs::vbiossmcSetDispclk(void* ctx, UInt32 requestedKhz)
