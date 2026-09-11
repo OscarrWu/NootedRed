@@ -659,6 +659,13 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         // ⚠️ 顺序对齐 Linux（amdgpu_smu.c）：EnableGfxImu 在 smu_start_smc_engine 之后、
         // driver 表地址设置/TransferTable 之前发送（查证 §16.20）——先前顺序（Imu 在 Transfer 后）
         // 导致 Imu NoResponse（Transfer 失败后 PMFW 消息环状态异常）。
+        // ⓪ PowerUpVcn(0x07) + PowerUpJpeg(0x22)：Linux APU 早期初始化必发
+        //    （amdgpu_smu.c:1983-85, §16.86）。非 BGM 前置但序列完备性补项。
+        //    param: VCN = inst<<16（单实例→0）, Jpeg = 0
+        const auto rVcn = X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_PowerUpVcn, 0);
+        DBGLOG("X6000FB", "D3: PowerUpVcn resp=0x%X", rVcn);
+        const auto rJpeg = X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_PowerUpJpeg, 0);
+        DBGLOG("X6000FB", "D3: PowerUpJpeg resp=0x%X", rJpeg);
         // ① 先 EnableGfxImu(0x16, 1)
         const auto rImu = X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, 1);
         if (rImu == kCAILResultOK) {
