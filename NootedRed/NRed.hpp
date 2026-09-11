@@ -58,6 +58,7 @@ public:
     auto  getDevRevision() const { return devRevision; }        // TODO: Remove!
     auto  getEnumRevision() const { return enumRevision; }      // TODO: Remove!
     auto  getFbOffset() const { return fbOffset; }              // TODO: Remove!
+    IOPCIDevice* getIGPU() const { return this->iGPU; }         // §16.52: HWLibs 需映射 BAR0 写驱动表
 
     void init();
     void hwLateInit();        // TODO: Remove!

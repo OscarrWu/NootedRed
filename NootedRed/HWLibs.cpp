@@ -1380,9 +1380,11 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         return kCAILResultOK;
     }
 
-    // §16.56 修正：SmuMetricsExternal_t ≈ 2268 字节（不是之前误以为的 168/256）
-    constexpr UInt32 kMetricsSize = 2268U;                // SmuMetricsExternal_t (Phoenix 13.0.7)
-    constexpr UInt32 kBufferSize  = 2304U;                // 2268 向上对齐到 256 倍数
+    // 【§16.61 纠正】Phoenix = SMU v13_0_4（非 v13_0_7）。
+    //   v13_0_4 的 SmuMetrics_t = 244 字节（Linux: sizeof(SmuMetrics_t)），对齐 256。
+    //   原 256B 分配本来就是对的；§16.56 的"2268B"基于错误版本，已作废。
+    constexpr UInt32 kMetricsSize = 244U;                 // SmuMetrics_t (v13_0_4)
+    constexpr UInt32 kBufferSize  = 256U;                 // 244 向上对齐
     constexpr UInt32 kPageAlign   = 4096U;                // PAGE_SIZE
 
     IOBufferMemoryDescriptor* buf = IOBufferMemoryDescriptor::withOptions(
@@ -1427,7 +1429,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
 
     bool apertureWritten = false;
     {
-        IOMemoryMap* bar0Map = NRed::singleton().iGPU->mapDeviceMemoryWithRegister(
+        IOMemoryMap* bar0Map = NRed::singleton().getIGPU()->mapDeviceMemoryWithRegister(
             kIOPCIConfigBaseAddress0, kIOMapInhibitCache | kIOMapAnywhere);
         if (bar0Map != nullptr && bar0Map->getLength() > 0x1000 + kBufferSize) {
             auto* bar0Virt = reinterpret_cast<volatile UInt8*>(bar0Map->getVirtualAddress());
@@ -1444,20 +1446,6 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     DBGLOG("HWLibs", "smu13: aperture written=%s addr=0x%llX",
            apertureWritten ? "yes" : "no", (unsigned long long)addr);
     NRed::singleton().orSmu13ProbeState(1ULL << 29);   // 已改用 carve-out 地址
-
-    // §16.58：Phoenix 不支持 SetAllowedFeaturesMask(0x04/0x05)（flags=0），
-    //         应改用 EnableSmuFeaturesLow/High(0x08/0x09)（flags=1）。
-    //         位值：bit0=FEATURE_FW_DATA_READ(驱动表读取必需)、bit1=FEATURE_DPM_GFXCLK、
-    //               bit37→高位bit5=FEATURE_GFX_IMU（smu13_driver_if_v13_0_7.h:49/50/86）
-    {
-        const auto rEnLo = X5000HWLibs::smu13SendMsgDirect(
-            PhoenixPPSMC::PPSMC_MSG_EnableSmuFeaturesLow, 0x3U);
-        const auto rEnHi = X5000HWLibs::smu13SendMsgDirect(
-            PhoenixPPSMC::PPSMC_MSG_EnableSmuFeaturesHigh, 0x20U);
-        DBGLOG("HWLibs", "smu13: EnableSmuFeatures lo=%x hi=%x", rEnLo, rEnHi);
-        if (rEnLo != kCAILResultOK) { NRed::singleton().orSmu13ProbeState(1ULL << 22); }
-        if (rEnHi != kCAILResultOK) { NRed::singleton().orSmu13ProbeState(1ULL << 23); }
-    }
 
     const auto rHigh = X5000HWLibs::smu13SendMsgDirect(
         PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, static_cast<UInt32>(addr >> 32));
@@ -1478,14 +1466,14 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         return rLow;
     }
 
-    // 2) Transfer（§16.55/16.59 修正）：
-    //    Phoenix 的 Dram2Smu(0x10) flags=0【不支持】，Smu2Dram(0x0F) flags=1【支持】。
-    //    改用 0x0F 试探；且【失败不阻断】——建表的目的（告知地址）已由 0x0D/0x0E 完成，
-    //    Transfer 可能非必需（§16.59）。失败仅记录探针位，继续执行 EnableGfxImu。
+    // 2) Transfer：argument=0, table_id=TABLE_SMU_METRICS=5
+    //    【§16.61 纠正】Phoenix = SMU v13_0_4（非 v13_0_7）。
+    //    v13_0_4 的 MSG_MAP: TransferTableDram2Smu flags=1（支持）→ 原用 0x10 是对的。
+    //    之前 §16.55/16.59 误读了 v13_0_7 的表，结论作废，已回滚。
     //    【§16.19】Phoenix (MP1 13.0.7) 的表号：drvif7.h:1601 TABLE_SMU_METRICS=5
     //    （此前传 7 = TABLE_ACTIVITY_MONITOR_COEFF，来自错误版本的表定义——已修正）
     const CAILResult r = X5000HWLibs::smu13SendMsgDirect(
-        PhoenixPPSMC::PPSMC_MSG_TransferTableSmu2Dram, static_cast<UInt32>((0U << 16) | 5U));
+        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 5U));
 
     // 持有缓冲（不 release），后续 metrics 读取可经 smu13MetricsBuffer 取虚拟地址
     hw.smu13MetricsBuffer = buf;
