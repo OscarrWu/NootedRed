@@ -103,10 +103,27 @@ void NRed::hwLateInit()
         //   → 最终 dword 索引 = 0x13200 + 0x0857 = 0x13A57
         // ⛔ 旧读法 0x68000+0x0857 是错的：0x68000 是头文件里另一个 addressBlock
         //   （mmhub_dagbdec）的 base，不适用于本寄存器所在块 → 读回 ffffffff（第 16 次真机实证）
-        constexpr UInt32 kMmhubBase   = 0x13200;
-        constexpr UInt32 kFbOffOffset = 0x0857;
-        const UInt32 raw = this->readReg32(kMmhubBase + kFbOffOffset);
-        this->fbOffset = static_cast<UInt64>(raw & 0xFFFFFF) << 24;
+        // ✅ 换途径（§16.48 猜地址终结）：Linux 在 gmc_v11_0.c:697 用的是
+        //   adev->gmc.aper_base = pci_resource_start(pdev, 0) —— 即 **PCI BAR0**，
+        //   根本不读 MMHUB 寄存器（我们四个候选地址全 ffffffff，证明那条路走不通）。
+        //   NRed 只映射了 BAR5，这里补读 BAR0（物理地址）作为 fbOffset 来源。
+        IOMemoryMap *bar0 = this->iGPU->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0,
+                                                                    kIOMapInhibitCache | kIOMapAnywhere);
+        UInt64 bar0Phys = 0;
+        if (bar0 != nullptr) {
+            bar0Phys = bar0->getPhysicalAddress();
+            bar0->release();
+        }
+        if (bar0Phys != 0) {
+            this->fbOffset = bar0Phys;      // BAR0 已是完整物理地址，不再 <<24
+        }
+        else {
+            // 回退：MMHUB 寄存器（已知读不到，仅保留对照，值为全F时 fbOffset 为垃圾）
+            constexpr UInt32 kMmhubBase   = 0x13200;
+            constexpr UInt32 kFbOffOffset = 0x0857;
+            const UInt32 raw = this->readReg32(kMmhubBase + kFbOffOffset);
+            this->fbOffset = static_cast<UInt64>(raw & 0xFFFFFF) << 24;
+        }
     }
     else {
         this->fbOffset = static_cast<UInt64>(this->readReg32(GC_BASE_0 + MC_VM_FB_OFFSET) & 0xFFFFFF) << 24;

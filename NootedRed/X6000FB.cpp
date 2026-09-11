@@ -719,7 +719,9 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 rFbC2 = nred.readReg32(0x68000 + 0x0857);            // 候选C：原读法（已知无效）
         const UInt32 rFbC3 = nred.readReg32(0x3B00000 | 0x0857);          // 候选D
         // fbOffset 验证（§16.47）：读正确地址 0x13200+0x0857，确认不再是 ffffffff
-        const UInt32 rFbNew = nred.readReg32(0x13200 + 0x0857);   // ✅ 正确地址
+        // BAR0 途径（§16.48）：Linux 优先用 pci_resource_start(pdev,0) 作 aper_base
+        const UInt64 rBar0 = nred.getFbOffset();   // 若走 BAR0 分支，这里就是 BAR0 物理地址
+        const UInt32 rFbNew = nred.readReg32(0x13200 + 0x0857);   // MMHUB 寄存器（应全F）
         const UInt32 rFbOld = nred.readReg32(0x68000 + 0x0857);   // ⛔ 旧地址（对照，应仍全F）
         const UInt32 rFbOffRaw  = rFbOld;      // MMHUB regMMMC_VM_FB_OFFSET（旧，保留字段名）
         const UInt32 rScratch4  = nred.readReg32(kMp1Public | 0x3010060); // MP1_EXT_SCRATCH4
@@ -730,13 +732,13 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
 
         panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
               "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
-              "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x | "
+              "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x bar0=%llx | "
               "orig1:%s | orig2:%s | orig3:%s",
             probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
             rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
             gProbeResp[0], gProbeResp[1], gProbeResp[2],
             gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6],
-            rFbC0, rFbC1, rFbC2, rFbC3,
+            rFbC0, rFbC1, rFbC2, rFbC3, rBar0,
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
