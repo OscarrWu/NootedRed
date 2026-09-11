@@ -710,7 +710,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 rScratch0  = nred.readReg32(kMp1Public | 0x3010020);  // MP1_SCRATCH0
         const UInt32 rMsg66     = nred.readReg32((0x0243FC00 + 0x282) * 4);    // §16.78: BASE_IDX 1 字节地址
         const UInt32 rMsg82     = nred.readReg32((0x0243FC00 + 0x292) * 4);    // §16.78: BASE_IDX 1 字节地址
-        const UInt32 rMsg90     = nred.readReg32(MP0_BASE_0 + 0x29A);    // C2PMSG_90 (resp)
+        const UInt32 rMsg90     = nred.readReg32((0x0243FC00 + 0x29A) * 4);    // §16.78: BASE_IDX 1 字节地址（审查员 2026-09-11 发现漏改）
         const UInt32 rMsg91     = nred.readReg32(MP0_BASE_0 + 0x29B);    // C2PMSG_91（v11/12 旧邮箱对照）
         // fbOffset 候选地址扫描（§16.47）：一次真机读出所有候选的真值，不再逐个试。
         // 已知：Linux MMHUB_BASE.segment[0]=0x0001A000（*_ip_offset.h），regMMMC_VM_FB_OFFSET=0x0857
