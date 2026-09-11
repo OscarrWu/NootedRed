@@ -1417,8 +1417,32 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     //    探针：bit29 = carve-out 地址已使用（1）。
     // §16.40：getFbOffset() 已是 (raw & 0xFFFFFF) << 24 的结果，不能再左移（此前重复 <<24 导致垃圾地址）
     const UInt64 fbOff      = NRed::singleton().getFbOffset();
+    // §16.52 第 3 项：把驱动表内容真正写到 BAR0 aperture 内（而非只给个地址）
+    //   理由：PMFW DMA 域只覆盖 FB carve-out 窗口（§16.19/16.32-7）；
+    //   系统 RAM buffer 的物理地址不被接受。必须让"地址处真的有内存"。
+    //   做法：映射 BAR0，在 bar0Virt+0x1000 处清零 2304B（SMU 只做 DMA 拷贝，内容全 0 即可）。
+    //   失败则回退（地址仍给 carveout+0x1000，但内容无保障）。
     const addr64_t carveout = fbOff;
     const addr64_t addr     = carveout + 0x1000;
+
+    bool apertureWritten = false;
+    {
+        IOMemoryMap* bar0Map = NRed::singleton().iGPU->mapDeviceMemoryWithRegister(
+            kIOPCIConfigBaseAddress0, kIOMapInhibitCache | kIOMapAnywhere);
+        if (bar0Map != nullptr && bar0Map->getLength() > 0x1000 + kBufferSize) {
+            auto* bar0Virt = reinterpret_cast<volatile UInt8*>(bar0Map->getVirtualAddress());
+            if (bar0Virt != nullptr) {
+                for (UInt32 off = 0; off < kBufferSize; off += 1) {
+                    bar0Virt[0x1000 + off] = 0;
+                }
+                apertureWritten = true;
+                NRed::singleton().orSmu13ProbeState(1ULL << 21);   // 探针：aperture 已写入
+            }
+        }
+        if (bar0Map != nullptr) { bar0Map->release(); }
+    }
+    DBGLOG("HWLibs", "smu13: aperture written=%s addr=0x%llX",
+           apertureWritten ? "yes" : "no", (unsigned long long)addr);
     NRed::singleton().orSmu13ProbeState(1ULL << 29);   // 已改用 carve-out 地址
 
     // §16.58：Phoenix 不支持 SetAllowedFeaturesMask(0x04/0x05)（flags=0），
