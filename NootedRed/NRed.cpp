@@ -107,12 +107,34 @@ void NRed::hwLateInit()
         //   adev->gmc.aper_base = pci_resource_start(pdev, 0) —— 即 **PCI BAR0**，
         //   根本不读 MMHUB 寄存器（我们四个候选地址全 ffffffff，证明那条路走不通）。
         //   NRed 只映射了 BAR5，这里补读 BAR0（物理地址）作为 fbOffset 来源。
-        IOMemoryMap *bar0 = this->iGPU->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0,
-                                                                    kIOMapInhibitCache | kIOMapAnywhere);
+        // ═══ §16.98 修复（2026-09-11 23:25）：BAR0 物理地址必须用 PCI config 读 ═══
+        //   问题：原用 bar0->getPhysicalAddress() 得到 0x8D0000000，
+        //        但真实 VRAM 物理基址 = 0x8000000000（Manjaro dmesg + resource 实测）
+        //        → 驱动表地址 fbOff+0x1000 超出 VRAM 窗口 → SetDriverDramAddrHigh 被拒(resp=0)
+        //   正确方法（mac-amdgpu MacAMDGPU.cpp:574/589-591 参考实现）：
+        //        pci->ConfigurationRead32(0x10, &bar0_lo);   // BAR0 低 32 位
+        //        pci->ConfigurationRead32(0x14, &bar0_hi);   // BAR0 高 32 位（64-bit BAR）
+        //        phys = ((uint64)bar0_hi << 32) | (bar0_lo & 0xFFFFFFF0);  // 屏蔽 [3:0] 标志位
+        //   实测验证（Manjaro 读 config）：lo=0x0000000C hi=0x00000080
+        //        → 0x8000000000 ✅ 与 Linux pci_resource_start(pdev,0) 一致
         UInt64 bar0Phys = 0;
-        if (bar0 != nullptr) {
-            bar0Phys = bar0->getPhysicalAddress();
-            bar0->release();
+        {
+            UInt32 bar0Lo = 0, bar0Hi = 0;
+            // IOPCIDevice 的 config 读取（IOKit: configRead32 为 IOPCIDevice 方法）
+            bar0Lo = this->iGPU->configRead32(kIOPCIConfigBaseAddress0);
+            bar0Hi = this->iGPU->configRead32(kIOPCIConfigBaseAddress0 + 4);
+            if ((bar0Lo & 0xFFFFFFF0) != 0) {
+                bar0Phys = (static_cast<UInt64>(bar0Hi) << 32) | (bar0Lo & 0xFFFFFFF0);
+            }
+        }
+        if (bar0Phys == 0) {
+            // 回退：旧途径（IOMemoryMap::getPhysicalAddress，已知在某些系统给错值）
+            IOMemoryMap *bar0 = this->iGPU->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0,
+                                                                        kIOMapInhibitCache | kIOMapAnywhere);
+            if (bar0 != nullptr) {
+                bar0Phys = bar0->getPhysicalAddress();
+                bar0->release();
+            }
         }
         if (bar0Phys != 0) {
             this->fbOffset = bar0Phys;      // BAR0 已是完整物理地址，不再 <<24
