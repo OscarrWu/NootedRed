@@ -1438,7 +1438,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
                     bar0Virt[0x1000 + off] = 0;
                 }
                 apertureWritten = true;
-                NRed::singleton().orSmu13ProbeState(1ULL << 21);   // 探针：aperture 已写入
+                NRed::singleton().orSmu13ProbeState(1ULL << 5);    // 探针 bit5：aperture 已写入（bit20/21 已被占用！）
             }
         }
         if (bar0Map != nullptr) { bar0Map->release(); }
@@ -1453,15 +1453,19 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         const UInt32 old = NRed::singleton().readReg32(kHdpMiscCntl);
         NRed::singleton().writeReg32(kHdpMiscCntl, 1U << 0);   // FLUSH_INVALIDATE_CACHE = bit0
         (void)NRed::singleton().readReg32(kHdpMiscCntl);       // 回读触发
-        NRed::singleton().orSmu13ProbeState(1ULL << 20);   // 探针：HDP flush 已执行
+        NRed::singleton().orSmu13ProbeState(1ULL << 4);    // 探针 bit4：HDP flush 已执行（bit20/21 已被占用！）
         DBGLOG("HWLibs", "smu13: HDP flush (MISC_CNTL old=0x%X)", old);
     }
     DBGLOG("HWLibs", "smu13: aperture written=%s addr=0x%llX",
            apertureWritten ? "yes" : "no", (unsigned long long)addr);
     NRed::singleton().orSmu13ProbeState(1ULL << 29);   // 已改用 carve-out 地址
 
+    // §16.67：记录每步真实 resp（不能只在 panic 时读——那时早被后续消息覆盖）
+    UInt32 respHigh = 0, respLow = 0, respXfer = 0;
     const auto rHigh = X5000HWLibs::smu13SendMsgDirect(
-        PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, static_cast<UInt32>(addr >> 32));
+        PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, static_cast<UInt32>(addr >> 32), &respHigh);
+    NRed::singleton().smu13Resp[0] = respHigh;
+    DBGLOG("HWLibs", "smu13: SetDriverDramAddrHigh resp=0x%X", respHigh);
     if (rHigh != kCAILResultOK) {
         NRed::singleton().orSmu13ProbeState(1ULL << 26);   // High 设置失败
         NRed::singleton().orSmu13ProbeState(static_cast<UInt64>(rHigh & 0xFF) << 48);
@@ -1470,7 +1474,10 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         return rHigh;
     }
     const auto rLow = X5000HWLibs::smu13SendMsgDirect(
-        PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, static_cast<UInt32>(addr & 0xFFFFFFFFU));
+        PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, static_cast<UInt32>(addr & 0xFFFFFFFFU), &respLow);
+    // §16.67：Low 的 resp 记到诊断（panic 输出用；不复用 bit20-23——那是四步成功位）
+    NRed::singleton().smu13Resp[1] = respLow;
+    DBGLOG("HWLibs", "smu13: SetDriverDramAddrLow resp=0x%X", respLow);
     if (rLow != kCAILResultOK) {
         NRed::singleton().orSmu13ProbeState(1ULL << 27);   // Low 设置失败
         NRed::singleton().orSmu13ProbeState(static_cast<UInt64>(rLow & 0xFF) << 48);
@@ -1486,7 +1493,9 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     //    【§16.19】Phoenix (MP1 13.0.7) 的表号：drvif7.h:1601 TABLE_SMU_METRICS=5
     //    （此前传 7 = TABLE_ACTIVITY_MONITOR_COEFF，来自错误版本的表定义——已修正）
     const CAILResult r = X5000HWLibs::smu13SendMsgDirect(
-        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 5U));
+        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 5U), &respXfer);
+    NRed::singleton().smu13Resp[2] = respXfer;
+    DBGLOG("HWLibs", "smu13: TransferTableDram2Smu resp=0x%X", respXfer);
 
     // 持有缓冲（不 release），后续 metrics 读取可经 smu13MetricsBuffer 取虚拟地址
     hw.smu13MetricsBuffer = buf;

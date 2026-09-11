@@ -733,12 +733,15 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
               "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
               "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x bar0=%llx | "
+              "RESP hi=%x lo=%x xfer=%x | "
               "orig1:%s | orig2:%s | orig3:%s",
             probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
             rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
             gProbeResp[0], gProbeResp[1], gProbeResp[2],
             gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6],
             rFbC0, rFbC1, rFbC2, rFbC3, rBar0,
+            NRed::singleton().smu13Resp[0], NRed::singleton().smu13Resp[1],
+            NRed::singleton().smu13Resp[2],
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
