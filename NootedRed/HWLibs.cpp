@@ -1478,31 +1478,12 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
            apertureWritten ? "yes" : "no", (unsigned long long)addr);
     NRed::singleton().orSmu13ProbeState(1ULL << 29);   // 已改用 carve-out 地址
 
-    // ═══ §16.70 报文响应矩阵（一次真机回答多个问题）═══
-    //   目的：0x0D 无响应（rc=NoResponse）而 0x01/0x02/0x03 有响应（=1）——差异在哪？
-    //   做法：每个探针发完【当场记录 resp】到 smu13Resp[]，且发完立刻读 c2p82（arg 寄存器）
-    //   ① GetDriverIfVersion(0x03, param=0) → 立即读 c2p82（判定 8 是版本号还是 param）
-    //   ② SetDriverDramAddrHigh(0x0D, param=0) → 隔离 param 的影响
-    //   ③ SetDriverDramAddrHigh(0x0D, param=0x8) → 与 ② 对比
-    {
-        UInt32 r0 = 0, r1 = 0, r2 = 0, p0 = 0, p1 = 0, p2 = 0;
-        X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion, 0U, &r0);
-        NRed::singleton().smu13Resp[3] = r0;
-        p0 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // §16.89 回滚: SEG0
-
-        X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0U, &r1);
-        NRed::singleton().smu13Resp[4] = r1;
-        p1 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // §16.89 回滚: SEG0
-
-        X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0x8U, &r2);
-        NRed::singleton().smu13Resp[5] = r2;
-        p2 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // §16.89 回滚: SEG0
-
-        NRed::singleton().smu13Resp[6] = p0;   // c2p82 after 0x03
-        NRed::singleton().smu13Resp[7] = p1;   // c2p82 after 0x0D(param=0)
-        DBGLOG("HWLibs", "matrix: dif(0x03) rc=%x arg=%x | 0x0D(p=0) rc=%x arg=%x | 0x0D(p=8) rc=%x arg=%x",
-               r0, p0, r1, p1, r2, p2);
-    }
+    // ═══ §16.70 报文响应矩阵【已移除，2026-09-11 23:05】═══
+    //   移除理由（自审）：矩阵的目的（诊断 0x0D 为何无响应）已在 Manjaro 侧
+    //   实测达成（§16.90：SEG0 有效、arg=8 是版本号、空白对照成立）。
+    //   继续保留有害：它会在主序列【之前】发 0x0D(param=0) 和 0x0D(param=0x8)，
+    //   把驱动表地址设成无效值（0 / 8），可能让 PMFW 进入异常状态（§16.20 教训：
+    //   消息顺序会影响 PMFW 状态）。移除后主序列纯净执行。
 
     // §16.67：记录每步真实 resp（不能只在 panic 时读——那时早被后续消息覆盖）
     UInt32 respHigh = 0, respLow = 0, respXfer = 0;
