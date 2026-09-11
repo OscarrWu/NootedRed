@@ -712,7 +712,16 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 rMsg82     = nred.readReg32(MP0_BASE_0 + 0x292);    // C2PMSG_82 (arg)
         const UInt32 rMsg90     = nred.readReg32(MP0_BASE_0 + 0x29A);    // C2PMSG_90 (resp)
         const UInt32 rMsg91     = nred.readReg32(MP0_BASE_0 + 0x29B);    // C2PMSG_91（v11/12 旧邮箱对照）
-        const UInt32 rFbOffRaw  = nred.readReg32(0x68000 + 0x0857);      // MMHUB regMMMC_VM_FB_OFFSET
+        // fbOffset 候选地址扫描（§16.47）：一次真机读出所有候选的真值，不再逐个试。
+        // 已知：Linux MMHUB_BASE.segment[0]=0x0001A000（*_ip_offset.h），regMMMC_VM_FB_OFFSET=0x0857
+        const UInt32 rFbC0 = nred.readReg32(0x13200 + 0x0857);            // 候选A：✅正确地址（yellow_carp MMHUB_BASE seg0）
+        const UInt32 rFbC1 = nred.readReg32(0x1A000 + 0x0857);            // 候选B：旧版 MMHUB_BASE（对照）
+        const UInt32 rFbC2 = nred.readReg32(0x68000 + 0x0857);            // 候选C：原读法（已知无效）
+        const UInt32 rFbC3 = nred.readReg32(0x3B00000 | 0x0857);          // 候选D
+        // fbOffset 验证（§16.47）：读正确地址 0x13200+0x0857，确认不再是 ffffffff
+        const UInt32 rFbNew = nred.readReg32(0x13200 + 0x0857);   // ✅ 正确地址
+        const UInt32 rFbOld = nred.readReg32(0x68000 + 0x0857);   // ⛔ 旧地址（对照，应仍全F）
+        const UInt32 rFbOffRaw  = rFbOld;      // MMHUB regMMMC_VM_FB_OFFSET（旧，保留字段名）
         const UInt32 rScratch4  = nred.readReg32(kMp1Public | 0x3010060); // MP1_EXT_SCRATCH4
         const UInt32 rFwVer       = nred.readReg32(kMp1Public | 0x3010004); // 固件版本（若存在）
         const UInt32 rMp1Scratch0 = rScratch0;                            // 同上（MP1_SCRATCH0）
@@ -721,12 +730,13 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
 
         panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
               "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
-              "blank=%x inv=%x rw=%x arg=%x | "
+              "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x | "
               "orig1:%s | orig2:%s | orig3:%s",
             probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
             rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
             gProbeResp[0], gProbeResp[1], gProbeResp[2],
             gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6],
+            rFbC0, rFbC1, rFbC2, rFbC3,
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
