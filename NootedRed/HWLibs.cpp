@@ -1450,9 +1450,9 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     //   ⚠️ 未做则 SMU 可能读到旧/无效数据（Linux 在 memcpy 后必做）
     {
         constexpr UInt32 kHdpMiscCntl = 0x0FF3;   // HDP_BASE(0x0F20) + regHDP_MISC_CNTL(0x00D3)
-        const UInt32 old = nred.readReg32(kHdpMiscCntl);
-        nred.writeReg32(kHdpMiscCntl, 1U << 0);   // FLUSH_INVALIDATE_CACHE = bit0（待核 sh_mask）
-        (void)nred.readReg32(kHdpMiscCntl);       // 回读触发
+        const UInt32 old = NRed::singleton().readReg32(kHdpMiscCntl);
+        NRed::singleton().writeReg32(kHdpMiscCntl, 1U << 0);   // FLUSH_INVALIDATE_CACHE = bit0
+        (void)NRed::singleton().readReg32(kHdpMiscCntl);       // 回读触发
         NRed::singleton().orSmu13ProbeState(1ULL << 20);   // 探针：HDP flush 已执行
         DBGLOG("HWLibs", "smu13: HDP flush (MISC_CNTL old=0x%X)", old);
     }
