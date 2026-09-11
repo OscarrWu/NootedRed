@@ -1400,7 +1400,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     // 【§16.61 纠正】Phoenix = SMU v13_0_4（非 v13_0_7）。
     //   v13_0_4 的 SmuMetrics_t = 244 字节（Linux: sizeof(SmuMetrics_t)），对齐 256。
     //   原 256B 分配本来就是对的；§16.56 的"2268B"基于错误版本，已作废。
-    constexpr UInt32 kMetricsSize = 244U;                 // SmuMetrics_t (v13_0_4)
+    constexpr UInt32 kMetricsSize = 160U;                 // SmuMetrics_t v13_0_4: sizeof=160 align=4（§16.83 编译器实测；244 是 v13_0_7 残留）
     constexpr UInt32 kBufferSize  = 256U;                 // 244 向上对齐
     constexpr UInt32 kPageAlign   = 4096U;                // PAGE_SIZE
 
@@ -1529,14 +1529,14 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         return rLow;
     }
 
-    // 2) Transfer：argument=0, table_id=TABLE_SMU_METRICS=5
-    //    【§16.61 纠正】Phoenix = SMU v13_0_4（非 v13_0_7）。
-    //    v13_0_4 的 MSG_MAP: TransferTableDram2Smu flags=1（支持）→ 原用 0x10 是对的。
+    // 2) Transfer：argument=0, table_id=TABLE_SMU_METRICS=7
+    //    【§16.83】Phoenix = SMU v13_0_4：driver_if_v13_0_4.h:277 TABLE_SMU_METRICS=7。
+    //    （旧值 5 出自 v13_0_7 —— §16.61 版本错误的残留，2026-09-11 沉淀审查发现）
     //    之前 §16.55/16.59 误读了 v13_0_7 的表，结论作废，已回滚。
     //    【§16.19】Phoenix (MP1 13.0.7) 的表号：drvif7.h:1601 TABLE_SMU_METRICS=5
     //    （此前传 7 = TABLE_ACTIVITY_MONITOR_COEFF，来自错误版本的表定义——已修正）
     const CAILResult r = X5000HWLibs::smu13SendMsgDirect(
-        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 5U), &respXfer);
+        PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 7U), &respXfer);
     NRed::singleton().smu13Resp[2] = respXfer;
     DBGLOG("HWLibs", "smu13: TransferTableDram2Smu resp=0x%X", respXfer);
 
