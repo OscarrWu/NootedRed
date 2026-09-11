@@ -97,7 +97,22 @@ void NRed::hwLateInit()
     // ⛔ 旧读法 GC_BASE_0+0x96B 是错的（读回 0，CONFIRMED §16.18）。
     // Raven/老 asic 仍走 GC_BASE_0 + 0x96B（兼容原逻辑）。
     if (this->attributes.isPhoenix()) {
-        this->fbOffset = static_cast<UInt64>(this->readReg32(0x68000 + 0x0857) & 0xFFFFFF) << 24;
+        // §16.40：0x68000+0x0857 读回 ffffffff——MMHUB 同样需要完整 SMN 地址。
+        // 同 §16.34 教训：本驱动的 readReg32 间接分支要的是"完整 SMN 字节地址"。
+        // MP1 侧正确基址 MP1_Public=0x3B00000 已验证（fwflag28 读得出）。
+        // MMHUB 段：尝试 0x3B00000|0x68000+0x857 以及几种候选，取第一个非全 F 的值。
+        constexpr UInt32 kMp1Public = 0x3B00000;
+        const UInt32 cands[3] = {
+            0x68000 + 0x0857,                    // 原读法（已知无效，保留对照）
+            kMp1Public | (0x68000 + 0x0857),     // 带 MP1_Public 基址
+            kMp1Public | 0x0857,                 // 仅基址+偏移
+        };
+        UInt32 raw = 0xFFFFFFFF;
+        for (int i = 0; i < 3; i += 1) {
+            const UInt32 v = this->readReg32(cands[i]);
+            if (v != 0xFFFFFFFF) { raw = v; break; }
+        }
+        this->fbOffset = static_cast<UInt64>(raw & 0xFFFFFF) << 24;
     }
     else {
         this->fbOffset = static_cast<UInt64>(this->readReg32(GC_BASE_0 + MC_VM_FB_OFFSET) & 0xFFFFFF) << 24;

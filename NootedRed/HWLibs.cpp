@@ -1387,8 +1387,9 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     //    方案：直接用 carve-out 窗口内地址 = (fbOffset<<24) + 0x1000（第二页，避开 VBIOS 常驻的第一页）。
     //    该内存的 CPU 侧映射/访问暂不需要（表内容全 0 即可，SMU 只做 DMA 拷贝）。
     //    探针：bit29 = carve-out 地址已使用（1）。
+    // §16.40：getFbOffset() 已是 (raw & 0xFFFFFF) << 24 的结果，不能再左移（此前重复 <<24 导致垃圾地址）
     const UInt64 fbOff      = NRed::singleton().getFbOffset();
-    const addr64_t carveout = fbOff << 24;
+    const addr64_t carveout = fbOff;
     const addr64_t addr     = carveout + 0x1000;
     NRed::singleton().orSmu13ProbeState(1ULL << 29);   // 已改用 carve-out 地址
 
