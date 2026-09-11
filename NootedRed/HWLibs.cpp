@@ -1443,6 +1443,19 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         }
         if (bar0Map != nullptr) { bar0Map->release(); }
     }
+
+    // §16.63/16.64：HDP flush —— 让 SMU 看到 CPU 刚写入的表内容（Linux amdgpu_hdp_flush 等价）
+    //   寄存器：HDP_MISC_CNTL = HDP_BASE(0x0F20) + 0x00D3 = dword 0x0FF3
+    //   位：FLUSH_INVALIDATE_CACHE（hdp_v4_0.c:151 WREG32_FIELD15(HDP,0,HDP_MISC_CNTL,FLUSH_INVALIDATE_CACHE,1)）
+    //   ⚠️ 未做则 SMU 可能读到旧/无效数据（Linux 在 memcpy 后必做）
+    {
+        constexpr UInt32 kHdpMiscCntl = 0x0FF3;   // HDP_BASE(0x0F20) + regHDP_MISC_CNTL(0x00D3)
+        const UInt32 old = nred.readReg32(kHdpMiscCntl);
+        nred.writeReg32(kHdpMiscCntl, 1U << 0);   // FLUSH_INVALIDATE_CACHE = bit0（待核 sh_mask）
+        (void)nred.readReg32(kHdpMiscCntl);       // 回读触发
+        NRed::singleton().orSmu13ProbeState(1ULL << 20);   // 探针：HDP flush 已执行
+        DBGLOG("HWLibs", "smu13: HDP flush (MISC_CNTL old=0x%X)", old);
+    }
     DBGLOG("HWLibs", "smu13: aperture written=%s addr=0x%llX",
            apertureWritten ? "yes" : "no", (unsigned long long)addr);
     NRed::singleton().orSmu13ProbeState(1ULL << 29);   // 已改用 carve-out 地址
