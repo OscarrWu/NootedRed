@@ -614,7 +614,7 @@ IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType,
 }
 
 // 诊断：探针消息原始响应（文件作用域，供 wrapHandleCriticalError 的 panic 消息打印）
-static UInt32 gProbeResp[3] = {0, 0, 0};
+static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
@@ -641,6 +641,20 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             gProbeResp[0] = pr[0];
             gProbeResp[1] = pr[1];
             gProbeResp[2] = pr[2];
+            // 对照（§16.43）：blank=空白对照，inv=无效消息0xFF，rw=resp读写一致性
+            gProbeResp[3] = X5000HWLibs::smu13ProbeBlank();
+            gProbeResp[4] = X5000HWLibs::smu13SendMsgDirect(0xFF, 0, nullptr);
+            gProbeResp[5] = X5000HWLibs::smu13ProbeRegRW();
+            // arg 寄存器（版本号应在此）：GetPmfwVersion 后读 c2p82
+            gProbeResp[6] = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);
+
+            // ⭐ 对照实验（§16.42）：区分"真响应"与"假阳性"
+            //   C1 空白对照：只清 resp，不写 msg —— 若也"成功"⇒ 判定逻辑假阳性
+            //   C2 无效消息对照：发 0xFF（未定义消息）—— 正常固件应返回 Failed/UnknownCmd
+            //   C3 读写一致性：写已知值 0x5A5A 到 resp 再读回 —— 验证寄存器真可写可读
+            gProbeResp[3] = X5000HWLibs::smu13ProbeBlank();       // C1
+            gProbeResp[4] = X5000HWLibs::smu13SendMsgDirect(0xFF, 0, nullptr) == kCAILResultOK ? 1 : 0;  // C2
+            gProbeResp[5] = X5000HWLibs::smu13ProbeRegRW();       // C3
         }
         // ⚠️ 顺序对齐 Linux（amdgpu_smu.c）：EnableGfxImu 在 smu_start_smc_engine 之后、
         // driver 表地址设置/TransferTable 之前发送（查证 §16.20）——先前顺序（Imu 在 Transfer 后）
@@ -706,11 +720,13 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 probeState = nred.getSmu13ProbeState();
 
         panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
-              "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x | "
+              "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
+              "blank=%x inv=%x rw=%x arg=%x | "
               "orig1:%s | orig2:%s | orig3:%s",
             probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
             rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
             gProbeResp[0], gProbeResp[1], gProbeResp[2],
+            gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6],
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }

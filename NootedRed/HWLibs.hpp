@@ -105,6 +105,9 @@ public:
     // NRed 直读 MMIO 绕过 Apple SMU ctx 的 PMFW 消息发送（Phoenix 上电序列旁路）
     // public：供 X6000FB::wrapControllerPowerUp 调用（该函数 100% 被调用，而 smu13PowerUpConfig 死点）
     static CAILResult smu13SendMsgDirect(UInt32 msgId, UInt32 param, UInt32 *rawResp = nullptr);
+    // 判别性验证辅助（§16.43）：空白对照 / resp 寄存器读写一致性
+    static UInt32 smu13ProbeBlank();
+    static UInt32 smu13ProbeRegRW();
     // 分配物理连续 256B 缓冲，通知 SMU 驱动表真实 DRAM 地址（0x0D/0x0E）并 Transfer（0x10, TABLE_SMU_METRICS=7）。
     // 缓冲存入 smu13MetricsBuffer 持有，不释放。public：供 X6000FB::wrapControllerPowerUp 调用。
     static CAILResult smu13SetupDriverTableAndTransfer();

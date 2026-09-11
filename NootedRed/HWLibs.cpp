@@ -1342,6 +1342,33 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
     return kCAILResultOK;
 }
 
+// 空白对照（§16.43-1）：只清 resp、不写 msg，然后走同样的轮询。
+// 若也返回非 0 ⇒ 说明"响应"来自垃圾值，判定逻辑假阳性。
+UInt32 X5000HWLibs::smu13ProbeBlank()
+{
+    auto& nred = NRed::singleton();
+    const UInt32 regResp = MP0_BASE_0 + 0x29A;
+    nred.writeReg32(regResp, 0);
+    UInt32 res = 0;
+    for (UInt32 i = 0; i < 200000; i += 1) {
+        res = nred.readReg32(regResp);
+        if (res != 0) { break; }
+        IODelay(10);
+    }
+    return res;   // 期望 0；非 0 ⇒ 假阳性
+}
+
+// 读写一致性（§16.43-4）：向 resp 写已知值再读回，确认该地址真可写可读。
+UInt32 X5000HWLibs::smu13ProbeRegRW()
+{
+    auto& nred = NRed::singleton();
+    const UInt32 regResp = MP0_BASE_0 + 0x29A;
+    nred.writeReg32(regResp, 0x5A5A);
+    const UInt32 back = nred.readReg32(regResp);
+    nred.writeReg32(regResp, 0);
+    return back;   // 期望 0x5A5A
+}
+
 CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
 {
     // 分配物理连续 256B（SmuMetrics_t 168B + 对齐余量），供 SMU TransferTableDram2Smu DMA 写入。
