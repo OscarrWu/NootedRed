@@ -646,7 +646,7 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             gProbeResp[4] = X5000HWLibs::smu13SendMsgDirect(0xFF, 0, nullptr);
             gProbeResp[5] = X5000HWLibs::smu13ProbeRegRW();
             // arg 寄存器（版本号应在此）：GetPmfwVersion 后读 c2p82
-            gProbeResp[6] = NRed::singleton().readReg32((0x0243FC00 + 0x292) * 4);   // §16.78: BASE_IDX 1 字节地址
+            gProbeResp[6] = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // §16.89 回滚: SEG0
 
             // ⭐ 对照实验（§16.42）：区分"真响应"与"假阳性"
             //   C1 空白对照：只清 resp，不写 msg —— 若也"成功"⇒ 判定逻辑假阳性
@@ -715,9 +715,9 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 rFwFlags   = nred.readReg32(kMp1Public | 0x3010028);  // 候选 A
         const UInt32 rFwFlags24 = nred.readReg32(kMp1Public | 0x3010024);  // 候选 B（Linux 用）
         const UInt32 rScratch0  = nred.readReg32(kMp1Public | 0x3010020);  // MP1_SCRATCH0
-        const UInt32 rMsg66     = nred.readReg32((0x0243FC00 + 0x282) * 4);    // §16.78: BASE_IDX 1 字节地址
-        const UInt32 rMsg82     = nred.readReg32((0x0243FC00 + 0x292) * 4);    // §16.78: BASE_IDX 1 字节地址
-        const UInt32 rMsg90     = nred.readReg32((0x0243FC00 + 0x29A) * 4);    // §16.78: BASE_IDX 1 字节地址（审查员 2026-09-11 发现漏改）
+        const UInt32 rMsg66     = nred.readReg32(MP0_BASE_0 + 0x282);    // §16.89 回滚: SEG0
+        const UInt32 rMsg82     = nred.readReg32(MP0_BASE_0 + 0x292);    // §16.89 回滚: SEG0
+        const UInt32 rMsg90     = nred.readReg32(MP0_BASE_0 + 0x29A);    // §16.89 回滚: SEG0
         const UInt32 rMsg91     = nred.readReg32(MP0_BASE_0 + 0x29B);    // C2PMSG_91（v11/12 旧邮箱对照）
         // fbOffset 候选地址扫描（§16.47）：一次真机读出所有候选的真值，不再逐个试。
         // 已知：Linux MMHUB_BASE.segment[0]=0x0001A000（*_ip_offset.h），regMMMC_VM_FB_OFFSET=0x0857

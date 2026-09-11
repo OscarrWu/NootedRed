@@ -1318,13 +1318,14 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
     //     C2PMSG_90 = 0x0243FC00 + 0x29A = 0x243FE9A
     //   ⚠️ 这些值 ×4 远超 BAR5 窗口 → readReg32/writeReg32 走 PCIE_INDEX2/DATA2 间接路径。
     //      间接路径传【字节地址】（dword×4），见 NRed.cpp:240 与 §16.34。
-    constexpr UInt32 kMp1Seg1 = 0x0243FC00;   // MP1_BASE__INST0_SEG1（BASE_IDX 1）
-    // ⚠️ 传【MMIO 字节地址】（dword×4）：readReg32 间接分支把入参原样写进 PCIE_INDEX2，
-    //    而 Linux 语义（amdgpu_reg_access.c:381）SOC15 dword 走间接时也是 ×4 成字节地址。
-    //    0x243FExx*4 ≈ 152MB > BAR5 窗口 → 必走间接路径 → 必须传字节地址。
-    const UInt32 regResp = (kMp1Seg1 + 0x29A) * 4;  // C2PMSG_90：响应（0=NoResponse，写 0 清）
-    const UInt32 regArg  = (kMp1Seg1 + 0x292) * 4;  // C2PMSG_82：参数
-    const UInt32 regMsg  = (kMp1Seg1 + 0x282) * 4;  // C2PMSG_66：命令（写即触发）
+    // ═══ §16.89 回滚（2026-09-11 22:30）：SEG1 修正错误，改回 SEG0 ═══
+    //   本机实测（Manjaro root mmap BAR5 直接读）：
+    //     dword 0x16282 = 0x19, 0x1629A = 0x1, 0x16292 = 0x0   ← SEG0 真实有效
+    //     新地址（SEG1 字节 0x90FFAxx）经间接路径全 FFFFFFFF，不可达
+    //   → 实测 > 文档：mp_13_0_4_offset.h 的 BASE_IDX=1 不适用于本机路径
+    const UInt32 regResp = MP0_BASE_0 + 0x29A;  // C2PMSG_90：响应（0=NoResponse，写 0 清）
+    const UInt32 regArg  = MP0_BASE_0 + 0x292;  // C2PMSG_82：参数
+    const UInt32 regMsg  = MP0_BASE_0 + 0x282;  // C2PMSG_66：命令（写即触发）
 
     // Linux __smu_msg_v1_send 时序：①清响应(90=0) ②写参数(82) ③写命令(66) ④轮询 90 != 0
     nred.writeReg32(regResp, 0);
@@ -1364,7 +1365,7 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
 UInt32 X5000HWLibs::smu13ProbeBlank()
 {
     auto& nred = NRed::singleton();
-    const UInt32 regResp = (0x0243FC00 + 0x29A) * 4;   // §16.78: BASE_IDX 1, 字节地址
+    const UInt32 regResp = MP0_BASE_0 + 0x29A;   // §16.89 回滚: SEG0
     nred.writeReg32(regResp, 0);
     UInt32 res = 0;
     for (UInt32 i = 0; i < 200000; i += 1) {
@@ -1379,7 +1380,7 @@ UInt32 X5000HWLibs::smu13ProbeBlank()
 UInt32 X5000HWLibs::smu13ProbeRegRW()
 {
     auto& nred = NRed::singleton();
-    const UInt32 regResp = (0x0243FC00 + 0x29A) * 4;   // §16.78: BASE_IDX 1, 字节地址
+    const UInt32 regResp = MP0_BASE_0 + 0x29A;   // §16.89 回滚: SEG0
     nred.writeReg32(regResp, 0x5A5A);
     const UInt32 back = nred.readReg32(regResp);
     nred.writeReg32(regResp, 0);
@@ -1487,15 +1488,15 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         UInt32 r0 = 0, r1 = 0, r2 = 0, p0 = 0, p1 = 0, p2 = 0;
         X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion, 0U, &r0);
         NRed::singleton().smu13Resp[3] = r0;
-        p0 = NRed::singleton().readReg32((0x0243FC00 + 0x292) * 4);   // §16.78: BASE_IDX 1 字节地址
+        p0 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // §16.89 回滚: SEG0
 
         X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0U, &r1);
         NRed::singleton().smu13Resp[4] = r1;
-        p1 = NRed::singleton().readReg32((0x0243FC00 + 0x292) * 4);   // §16.78: BASE_IDX 1 字节地址
+        p1 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // §16.89 回滚: SEG0
 
         X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0x8U, &r2);
         NRed::singleton().smu13Resp[5] = r2;
-        p2 = NRed::singleton().readReg32((0x0243FC00 + 0x292) * 4);   // §16.78: BASE_IDX 1 字节地址
+        p2 = NRed::singleton().readReg32(MP0_BASE_0 + 0x292);   // §16.89 回滚: SEG0
 
         NRed::singleton().smu13Resp[6] = p0;   // c2p82 after 0x03
         NRed::singleton().smu13Resp[7] = p1;   // c2p82 after 0x0D(param=0)
