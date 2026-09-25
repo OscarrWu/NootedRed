@@ -1140,6 +1140,20 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
 
     // NRed 直读 MMIO 旁路：四步序列已移至 X6000FB::wrapControllerPowerUp（100% 被调用的挂载点）。
     // 此处保留原 ctx 路径逻辑不变（smu13PowerUpConfig 本身因 wrapper 休眠不会被调用，见 CONFIRMED §16）。
+    //
+    // ═══ 探针位改动（2026-09-25）：退役本路径的 rc 记录（原 bit8-39）═══
+    //   原因：本路径与 SMU 旁路共用同一个 smu13ProbeState，而两者的位域曾经相交：
+    //     ctx  : bit0-3 步掩码、bit8-15/16-23/24-31/32-39 四步 rc、bit60-63 生命周期
+    //     旁路 : bit4-6、bit20-21/24-27/29、bit32-39/40-47/48-55 各步 rc + bit56-59
+    //   → bit20-27 与 bit32-39 被两边同时使用。
+    //   核算：两路径完全隔离需 40 + 34 = 74 位 > 一个 UInt64 的 64 位，无法靠重排解决；
+    //   且 rc 值域到 160（kCAILResultPowerControlRefused），压缩到 4 位有损，不可行。
+    //   取舍：本路径（ctx）已被证实从未执行——入口 _smu_9_0_send_message_with_parameter
+    //   无 call 调用点、route 必然失败、已移出路由表；历史 state 的 bit0-3 恒为 0 佐证。
+    //   故退役其 rc（32 位，释放最多），**保留 bit0-3 步掩码**——它仍是"本路径是否执行过"
+    //   最直接的判据，且只需 4 位。每步 rc 仍会经 SYSLOG/DBGLOG 落到内核日志，并非完全丢失。
+    //   旁路的 rc 字段语义不变（旁路是当前主力路径）。
+    //   依据：docs 中关于探针位碰撞的分析（skill 780m-real-machine-test/references/panic-decode.md）。
 
     // a. SetDriverDramAddrHigh (0x0D), param=0
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh);
@@ -1147,14 +1161,10 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, res);
-        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
         NRed::singleton().orSmu13ProbeState(1ULL << 0);
-        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 0));
         return res;
     }
-    // Probe D1 v2: 记录成功步（掩码 + rc）
     NRed::singleton().orSmu13ProbeState(1ULL << 0);
-    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 0));
 
     // b. SetDriverDramAddrLow (0x0E), param=0
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow);
@@ -1162,14 +1172,10 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, res);
-        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
         NRed::singleton().orSmu13ProbeState(1ULL << 1);
-        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 1));
         return res;
     }
-    // Probe D1 v2: 记录成功步（掩码 + rc）
     NRed::singleton().orSmu13ProbeState(1ULL << 1);
-    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 1));
 
     // c. TransferTableDram2Smu (0x10), param=0
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu);
@@ -1177,14 +1183,10 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, res);
-        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
         NRed::singleton().orSmu13ProbeState(1ULL << 2);
-        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 2));
         return res;
     }
-    // Probe D1 v2: 记录成功步（掩码 + rc）
     NRed::singleton().orSmu13ProbeState(1ULL << 2);
-    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 2));
 
     // d. EnableGfxImu (0x16), param=1 (ENABLE_IMU_ARG_GFXOFF_ENABLE)
     DBGLOG("HWLibs", "smu13: sending msg 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu);
@@ -1192,14 +1194,10 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
         && res != kCAILResultUnsupported)
     {
         SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, res);
-        // Probe D1 v2: 记录失败步（掩码 + rc），随后按原逻辑返回
         NRed::singleton().orSmu13ProbeState(1ULL << 3);
-        NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 3));
         return res;
     }
-    // Probe D1 v2: 记录成功步（掩码 + rc）
     NRed::singleton().orSmu13ProbeState(1ULL << 3);
-    NRed::singleton().orSmu13ProbeState((UInt64)(res & 0xFF) << (8 + 8 * 3));
 
     return kCAILResultOK;
 }
@@ -1512,14 +1510,14 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         constexpr UInt64 kVramWindowHi = 0x80FFFFFFFFULL;
         // 表占 256B，要求整段都落在窗口内
         if (addr < kVramWindowLo || (addr + kBufferSize - 1) > kVramWindowHi) {
-            // 探针位（逐位核算过全项目占用，见 docs/子任务 记录）：
-            //   bit6      = 地址域校验拒绝
-            //   bit56-59  = addr>>28 的低 4 位（定位超窗档位）
-            // 选用理由：bit56-59 是 64 位里**唯一完全空闲**的连续 4 位。
-            //   已占用：0-3（ctx 路径步掩码）、4-5（旁路 HDP/aperture）、
-            //   8-31（ctx 路径 rc step0-2）、32-39（ctx rc step3 ≡ 旁路 rc setup；两组共用）、
-            //   40-55（旁路 rc imu/addr）、60-63（生命周期位）。
-            //   ⚠️ 不要用 7-19/22-23/28/30-31：它们与 ctx 路径的 rc 字段（8-15/16-23/24-31）相交。
+            // 探针位（逐位核算过全项目占用）：
+            //   bit6     = 地址域校验拒绝
+            //   bit56-59 = addr>>28 的低 4 位（定位超窗档位）
+            // 当前占用全貌（两路径已解冲突）：
+            //   ctx 路径：0-3（步掩码）、60-63（生命周期）——原 rc 域 8-39 已退役，见 smu13PowerUpConfig 注释
+            //   旁路    ：4-5（HDP/aperture）、6（本次新增的拒绝位）、20/21/24/25/26/27/29（成功失败位）、
+            //             32-39/40-47/48-55（各步 rc）、56-59（本次新增的档位）
+            //   ⇒ 现在 8-19、22-23、28、30-31 也已空闲（退役后释放）。
             NRed::singleton().orSmu13ProbeState(1ULL << 6);
             NRed::singleton().orSmu13ProbeState(static_cast<UInt64>((addr >> 28) & 0xF) << 56);
             SYSLOG("HWLibs",

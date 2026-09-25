@@ -69,9 +69,21 @@ public:
     void   writeReg32(UInt32 reg, UInt32 value) const;        // TODO: Remove!
 
     /**
-     * Probe D1 v2: SMU13 上电序列每步结果的累积状态（旁路记录，不改变任何原有行为）。
-     * 编码：bit0-5 = 已执行步掩码；bit8-15 / 16-23 / 24-31 / 32-39 = step0..3 的返回码（CAILResult 低 8 位）。
-     * 由 HWLibs 的 smu13PowerUpConfig 累积，在 X6000FB 的 wrapHandleCriticalError（真崩溃出口）读出并注入 panic 消息。
+     * Probe：SMU13 相关路径的累积探针状态（旁路记录，不改变任何原有行为）。
+     *
+     * ⚠️ 两个写入者共用这一个变量，位域**曾经相交**，2026-09-25 已解冲突：
+     *   · **ctx 路径**（smu13PowerUpConfig，走 Apple SMU 函数指针）：
+     *       bit0-3 = 已执行步掩码；bit60-63 = 生命周期
+     *       （`63`=smu13InternalHwInit 被调用、`62/61`=WaitForFwLoaded 成败、`60`=消息 hook 触发）
+     *       *原 bit8-39 的四步 rc 已退役*——与旁路 rc 域相交，而 ctx 路径已被证实从未执行
+     *       （入口无 call 点、route 必然失败），故让位给主力路径。每步 rc 仍见内核日志。
+     *   · **SMU 旁路**（wrapControllerPowerUp + smu13SetupDriverTableAndTransfer，`-NRedSmuBypass` 门控）：
+     *       bit4=HDP flush、bit5=aperture、bit6=地址域校验拒绝、bit56-59=被拒地址档位；
+     *       bit20/21=表+Transfer/Imu 成功、bit24/25/26/27=对应失败、bit29=carve-out 地址；
+     *       bit32-39=表+Transfer 步 rc、bit40-47=Imu 步 rc、bit48-55=AddrHigh/Low 步 rc。
+     *
+     * 判读：先看 bit60-63 判断 ctx 路径是否跑过（当前恒为 0 ⇒ 所有位置均为旁路语义）。
+     * 在 X6000FB 的 wrapHandleCriticalError（真崩溃出口）读出并注入 panic 消息。
      */
     // §16.67：驱动表序列各步的真实 resp（发消息时立刻记录；panic 时读的是过期值）
     UInt32 smu13Resp[8] = {0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU,
