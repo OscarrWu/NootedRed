@@ -6,7 +6,8 @@
 // 本实现提供 docs 所需的「mock 寄存器接口」：预置对某地址的读返回，
 // 使真机路径的序列能在用户态重放，从而与影子运行结果比对。
 //
-// ⛔ 不含内核头文件。可在分析机直接编译运行。
+// ⛔ **仅用户态**：本文件用 <cstdio>/<cstdint> 与 std::（kext 环境没有这些头，
+//    见 README §3.1），因此**绝不可**被内核态代码包含（内核态请用 RegSinkInjected.hpp）。
 //
 // Copyright © 2026 OscarrWu. Licensed under the Thou Shalt Not Profit License version 1.5.
 

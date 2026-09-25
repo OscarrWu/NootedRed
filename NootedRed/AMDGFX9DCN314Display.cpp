@@ -237,16 +237,15 @@ static bool makeSmuChannel(display::RegChannel* const out)
     display::RegChannel ch{};
     ch.ctx           = ctx;
     ch.blockInstance = 0;
-    ch.block         = static_cast<std::uint32_t>(kCAILHWBlockMP1);
+    ch.block         = static_cast<UInt32>(kCAILHWBlockMP1);
     ch.regOffBase    = 0;
-    ch.read  = [](void* c, std::uint32_t off, std::uint32_t bi, std::uint32_t blk, std::uint32_t base) -> std::uint32_t {
+    ch.read  = [](void* c, UInt32 off, UInt32 bi, UInt32 blk, UInt32 base) -> UInt32 {
         return X5000HWLibs::cgsReadReg(c, off, bi, static_cast<CAILHWBlock>(blk), base);
     };
-    ch.write = [](void* c, std::uint32_t off, std::uint32_t val, std::uint32_t bi, std::uint32_t blk,
-                  std::uint32_t base) -> void {
+    ch.write = [](void* c, UInt32 off, UInt32 val, UInt32 bi, UInt32 blk, UInt32 base) -> void {
         X5000HWLibs::cgsWriteReg(c, off, val, bi, static_cast<CAILHWBlock>(blk), base);
     };
-    ch.delay = [](std::uint32_t us) -> void { IODelay(us); };
+    ch.delay = [](UInt32 us) -> void { IODelay(us); };
 
     *out = ch;
     return true;
