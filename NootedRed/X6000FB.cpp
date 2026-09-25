@@ -88,12 +88,14 @@ static const UInt8      kCreateObjectInfoCallPatternMask[]      = {0xFF, 0xFF, 0
                                                                    0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
 static constexpr UInt32 kCreateObjectInfoCallPatternJumpInstOff = 12;
 
-// Fix register read (0xD31 -> 0xD2F) and family ID (0x8F -> 0x8E).
+// Fix register read (0xD31 -> 0xD35) and family ID (0x8F -> 0x8E).
+// 0xD35 = NBIO_BASE__INST0_SEG2（0xD20，yellow_carp_offset.h:975）+ regRCC_STRAP1_RCC_DEV0_EPF0_STRAP0
+//（0x15，BASE_IDX 2，nbio_7_11_0_offset.h:8818-8819），与 NRed.cpp 读 RCC_STRAP1 的 rev-id 路径一致。
 static const UInt8 kPopulateDeviceInfoOriginal[]{0xBE, 0x31, 0x0D, 0x00, 0x00, 0xFF, 0x90, 0x40, 0x01,
                                                  0x00, 0x00, 0xC7, 0x43, 0x00, 0x8F, 0x00, 0x00, 0x00};
 static const UInt8 kPopulateDeviceInfoMask[]{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                              0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF};
-static const UInt8 kPopulateDeviceInfoPatched[]{0xBE, 0x2F, 0x0D, 0x00, 0x00, 0xFF, 0x90, 0x40, 0x01,
+static const UInt8 kPopulateDeviceInfoPatched[]{0xBE, 0x35, 0x0D, 0x00, 0x00, 0xFF, 0x90, 0x40, 0x01,
                                                 0x00, 0x00, 0xC7, 0x43, 0x00, 0x8E, 0x00, 0x00, 0x00};
 
 // Remove check for Navi family
@@ -214,7 +216,8 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "X6000FB",
                "Failed to enable kernel writing");
     getMember<decltype(getGpuBrandingNameListRenoir)*>(orgAmdAsicInfoNavi10VT, 0x228) =
-        NRed::singleton().getAttributes().isRenoir()  ? getGpuBrandingNameListRenoir :
+        NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix() ?
+            getGpuBrandingNameListRenoir :
         NRed::singleton().getAttributes().isPicasso() ? getGpuBrandingNameListPicasso :
                                                         getGpuBrandingNameListRaven;
     MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
@@ -306,7 +309,9 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
         if (currentKernelVersion() <= MACOS_12_X) {
             PenguinWizardry::PatternRouteRequest getTriageHardwareDataRequest{
                 "__ZN38AMDRadeonX6000_AmdRadeonControllerNavi21getTriageHardwareDataEjP12_AMD_TRIAGE_",
-                NRed::singleton().getAttributes().isRenoir() ? getTriageHardwareDataRN : getTriageHardwareDataRV};
+                NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix() ?
+                    getTriageHardwareDataRN :
+                    getTriageHardwareDataRV};
             PANIC_COND(!getTriageHardwareDataRequest.route(patcher, id, slide, size), "X6000FB",
                        "Failed to route getTriageHardwareData");
         }
@@ -379,9 +384,10 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "X6000FB",
                "Failed to enable kernel writing");
     orgAsicCapsTable->familyId = AMD_FAMILY_RAVEN;
-    orgAsicCapsTable->ddiCaps  = NRed::singleton().getAttributes().isRenoirE() ? ddiCapsRenoirE :
-                                 NRed::singleton().getAttributes().isRenoir()  ? ddiCapsRenoir :
-                                                                                 ddiCapsRaven;
+    orgAsicCapsTable->ddiCaps =
+        NRed::singleton().getAttributes().isRenoirE() ? ddiCapsRenoirE :
+        NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix() ? ddiCapsRenoir :
+                                                                                                         ddiCapsRaven;
     orgAsicCapsTable->deviceId = NRed::singleton().getDeviceID();
     orgAsicCapsTable->revision = NRed::singleton().getDevRevision();
     orgAsicCapsTable->extRevision =
@@ -487,7 +493,7 @@ IOReturn X6000FB::initialiseReservedVRAM(void* const self)
     CHECK(singleton().mapMemorySubRange(self, AmdReservedMemorySelector::Cursor4_2bpp, 0x1C0000, 0x40000, mapOptions));
     CHECK(
         singleton().mapMemorySubRange(self, AmdReservedMemorySelector::PPLIBReserved, 0x200000, 0x100000, mapOptions));
-    if (NRed::singleton().getAttributes().isRenoir()) {
+    if (NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix()) {
         CHECK(singleton().mapMemorySubRange(self, AmdReservedMemorySelector::DMCUBReserved, 0x300000, 0x100000,
                                             mapOptions));
         return singleton().mapMemorySubRange(self, AmdReservedMemorySelector::ReserveVRAM, 0, 0x400000, mapOptions);
@@ -561,10 +567,17 @@ IOReturn X6000FB::getTriageHardwareDataRV(void*, const UInt32 fbIndex, void* con
     if (bufferSize < 2) { return kIOReturnNoResources; }
     if (fbIndex >= 4) { return kIOReturnSuccess; }
 
+    // RV 路径四个 DCN 偏移原为苹果 DCN 1.0（Raven）值，已按 dcn_3_1_4_offset.h 修正
+    // （Phoenix/780M 用；四寄存器 BASE_IDX 均=2，DCN_BASE_2=0x34C0 段基址不变）：
+    //   ODM0_OPTC_INPUT_GLOBAL_CONTROL 0x1ACA，步进 0x10（:7732-7733，ODM1=0x1ADA :7752）——原本正确，保持；
+    //   OTG0_OTG_MASTER_EN             0x1B5C，步进 0x80（:7904-7905，OTG1=0x1BDC :8116；旧值 0x1B5F 在 3_1_4 未定义）；
+    //   HUBP0_HUBP_CLK_CNTL            0x05F4，步进 0xDC（:3434-3435，HUBP1=0x06D0 :3728；旧值 0x567 实为 DCN_VM_CONTEXT2_CNTL、步进 0xC4 错）；
+    //   DIG0_DIG_BE_EN_CNTL            0x20B2，步进 0x100（:9264-9265，DIG1=0x21B2 :9618；旧值 0x20B0 实为 DIG0_AFMT_CNTL）。
+    // 注：该路径仅 <=MACOS_12_X 安装（:309 门限），13.6 上不生效——属离线正确性修复（防未来启用）。
     const auto odmOptcInputGlobalControl = NRed::singleton().readReg32(DCN_BASE_2 + 0x1ACA + (0x10 * fbIndex));
-    const auto otgMasterEn               = NRed::singleton().readReg32(DCN_BASE_2 + 0x1B5F + (0x80 * fbIndex));
-    const auto hubpClkControl            = NRed::singleton().readReg32(DCN_BASE_2 + 0x567 + (0xC4 * fbIndex));
-    const auto digBeEnControl            = NRed::singleton().readReg32(DCN_BASE_2 + 0x20B0 + (0x100 * fbIndex));
+    const auto otgMasterEn               = NRed::singleton().readReg32(DCN_BASE_2 + 0x1B5C + (0x80 * fbIndex));
+    const auto hubpClkControl            = NRed::singleton().readReg32(DCN_BASE_2 + 0x05F4 + (0xDC * fbIndex));
+    const auto digBeEnControl            = NRed::singleton().readReg32(DCN_BASE_2 + 0x20B2 + (0x100 * fbIndex));
 
     const auto chars = snprintf(bufferPointer, bufferSize, "%x %x %x %x", odmOptcInputGlobalControl, otgMasterEn,
                                 hubpClkControl, digBeEnControl);

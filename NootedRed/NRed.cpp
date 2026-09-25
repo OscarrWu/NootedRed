@@ -150,12 +150,17 @@ void NRed::hwLateInit()
     else {
         this->fbOffset = static_cast<UInt64>(this->readReg32(GC_BASE_0 + MC_VM_FB_OFFSET) & 0xFFFFFF) << 24;
     }
-    this->devRevision = (this->readReg32(NBIO_BASE_2 + RCC_DEV0_EPF0_STRAP0) & RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_MASK)
+    // devRevision 读 RCC_STRAP1 地址块的 RCC_DEV0_EPF0_STRAP0（0xD20 + 0x15 = 0xD35），
+    // 对齐 Linux nbio_v7_11_get_rev_id()：读 regRCC_STRAP1_RCC_DEV0_EPF0_STRAP0
+    // （= 0x15，BASE_IDX = 2，nbio_7_11_0_offset.h:8818-8819；段基址 0xD20 见 yellow_carp_offset.h:975），
+    // 位域复用 STRAP0 前缀的 STRAP_ATI_REV_ID_DEV0_F0（SHIFT=0x18 / MASK=0x0F000000L，
+    // nbio_7_11_0_sh_mask.h:55905/55913、amdgpu/nbio_v7_11.c:43-44）。
+    this->devRevision = (this->readReg32(NBIO_BASE_2 + RCC_STRAP1_RCC_DEV0_EPF0_STRAP0) & RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_MASK)
                         >> RCC_DEV0_EPF0_STRAP0_ATI_REV_ID_SHIFT;
 
     if (this->attributes.isPhoenix()) {
         // Phoenix(RDNA3): Raven 系 devRevision 判断不适用，enumRevision 固定为真机确认值
-        this->enumRevision = 0xA1;  // TODO: 真机读 RCC_DEV0_EPF0_STRAP0 确认
+        this->enumRevision = 0xA1;  // TODO: 真机读 RCC_STRAP1_RCC_DEV0_EPF0_STRAP0（0xD35）确认
     }
     else if (this->attributes.isRenoir() && !this->attributes.isPhoenix()) {
         if (!this->attributes.isGreenSardine() && this->devRevision == 0 && this->pciRevision >= 0x80

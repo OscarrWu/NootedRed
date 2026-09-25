@@ -247,6 +247,8 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         }
 
         // TODO: wait, what is this doing again?
+        // 豁免 Phoenix 守卫：本块仅在 macOS 10.15 及以下才执行，目标系统 13.6 不执行，
+        // 故 isRenoir() 分支无需 isPhoenix() 排除（路线图附录 A(8) 筛查豁免项）。
         if (NRed::singleton().getAttributes().isRenoir()) {
             UInt32                                   findNonBpp64 = Dcn1NonBpp64SwModeMask1015;
             UInt32                                   replNonBpp64 = Dcn2NonBpp64SwModeMask1015;
@@ -403,7 +405,7 @@ UInt32 X5000::wrapHwlConvertChipFamily(void* const self, const UInt32 family, co
         auto& settings          = singleton().chipSettingsField(self);
         settings.isArcticIsland = 1;
         settings.isRaven        = 1;
-        if (NRed::singleton().getAttributes().isRenoir()) {
+        if (NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix()) {
             settings.htileAlignFix = 1;
             settings.applyAliasFix = 1;
         }

@@ -760,6 +760,14 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         *orgDeviceTypeTable = {.deviceId = NRed::singleton().getDeviceID(), .deviceType = kAMDDeviceTypeNavi10};
     }
 
+    // 豁免 Phoenix 守卫（伪装链设计，刻意保留）：本处 isRenoir() 分支把目标设备 ID 取为
+    // 0x1636（Renoir 的 ID），780M 借此匹配 Apple CAILAsicCapsInitTable 中 familyId=RAVEN 的行
+    // 并回写为真实 ID 0x15BF；若按真实 ID 匹配则无命中，触发下方 PANIC_COND
+    // "Failed to find init caps table entry"。
+    // 依据：上游 d53df4a 引入、b9737b2 沿用（改造链条的一环）。
+    // 待复核（已登记路线图 §2.2 记录）：该表位于 AMDRadeonX5000HWLibs.kext，离线参考集中无此二进制，
+    // 表内容**未独立核验**（在 12.5 现有两个二进制中搜 CAILAsicCapsInitTable 模式 0 命中），
+    // 故"是否需要补 !isPhoenix()"待拿到该二进制或真机复核后再定。
     const auto targetDeviceId =
         NRed::singleton().getAttributes().isRenoir() ? 0x1636U : NRed::singleton().getDeviceID();
     for (; orgCapsInitTable->deviceId != 0xFFFFFFFF; orgCapsInitTable++) {
@@ -810,6 +818,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
 
     // TODO: Replace this hack with a simple hook.
     if (currentKernelVersion() <= MACOS_10_15_X) {
+        // 豁免 Phoenix 守卫：本块仅在 macOS 10.15 及以下才执行，目标系统 13.6 不执行，
+        // 故 isRenoir() 分支无需 isPhoenix() 排除（同 X5000.cpp:250 豁免处理）。
         if (NRed::singleton().getAttributes().isRenoir()) {
             const PenguinWizardry::MaskedLookupPatch patches[] = {
                 {&kextRadeonX5000HWLibs, kPspSwInit1Original1015, kPspSwInit1Patched1015, 1},
