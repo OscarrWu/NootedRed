@@ -1,7 +1,8 @@
 # 离线单元测试构建（分析机用户态，无需 macOS / 内核 SDK）
 #
-# 用法（从仓库根执行）：
-#   make -f src/NootedRed/PixelDiv/Makefile test
+# 用法（从「项目根」或「驱动仓库根 src/」执行均可，路径自动推导）：
+#   make -f src/NootedRed/PixelDiv/Makefile test        # 项目根
+#   make -f NootedRed/PixelDiv/Makefile test            # src/ 内
 #   make -f src/NootedRed/PixelDiv/Makefile clean
 #
 # 被测对象是 DCN314 像素分频纯策略函数（PixelDiv.hpp 内联 constexpr 实现；
@@ -11,7 +12,9 @@
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2
 
-PIXDIR    = src/NootedRed/PixelDiv
+MKFILE    = $(lastword $(MAKEFILE_LIST))
+ROOT      = $(patsubst %NootedRed/PixelDiv/Makefile,%,$(MKFILE))
+PIXDIR    = $(ROOT)NootedRed/PixelDiv
 INCLUDES  = -I$(PIXDIR)
 BUILDDIR  = build/pixeldiv-tests
 

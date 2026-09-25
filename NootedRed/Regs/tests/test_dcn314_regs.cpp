@@ -10,7 +10,10 @@
 // 编译运行（分析机，不依赖 IOKit / 内核 SDK）：
 //   python3 src/NootedRed/Regs/tests/mk_check.py > build/dcn314_truth.txt
 //   g++ -std=c++17 -Wall -Wextra -Werror -O2 src/NootedRed/Regs/tests/test_dcn314_regs.cpp -o build/test_dcn314_regs
-//   ./build/test_dcn314_regs
+//   ./build/test_dcn314_regs [impl.hpp 路径] [真值表路径]
+// 两个路径参数可省略；省略时按「相对驱动仓库根」的默认值取：
+//   NootedRed/Regs/DCN314.hpp  与  build/dcn314_truth.txt
+// （这样无论从项目根还是从 src/ 内执行，由 Makefile 用 -D 传入绝对/正确相对路径）
 //
 // Copyright © 2026 OscarrWu. Licensed under the Thou Shalt Not Profit License version 1.5.
 // See LICENSE for details.
@@ -65,8 +68,14 @@ bool is_stride_const(const std::string &name) {
 } // namespace
 
 int main() {
-    const auto impl = parse_impl("src/NootedRed/Regs/DCN314.hpp");
-    const auto truth = parse_truth("build/dcn314_truth.txt");
+#ifndef NRED_IMPL_PATH
+#define NRED_IMPL_PATH "NootedRed/Regs/DCN314.hpp"
+#endif
+#ifndef NRED_TRUTH_PATH
+#define NRED_TRUTH_PATH "build/dcn314_truth.txt"
+#endif
+    const auto impl = parse_impl(NRED_IMPL_PATH);
+    const auto truth = parse_truth(NRED_TRUTH_PATH);
     assert(!impl.empty() && !truth.empty());
 
     // 1. 实现文件中的每个常量都有出处（步进常量由相邻实例差值另行验证）。

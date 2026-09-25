@@ -1,7 +1,8 @@
 # 离线单元测试构建（分析机用户态，无需 macOS / 内核 SDK）
 #
-# 用法（从仓库根执行）：
-#   make -f src/NootedRed/Regs/tests/Makefile test
+# 用法（从「项目根」或「驱动仓库根 src/」执行均可，路径自动推导）：
+#   make -f src/NootedRed/Regs/tests/Makefile test          # 项目根
+#   make -f NootedRed/Regs/tests/Makefile test              # src/ 内
 #   make -f src/NootedRed/Regs/tests/Makefile regen-truth   # 需要 Linux 参考树
 #   make -f src/NootedRed/Regs/tests/Makefile clean
 #
@@ -14,7 +15,9 @@
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2
 
-REGDIR    = src/NootedRed/Regs
+MKFILE    = $(lastword $(MAKEFILE_LIST))
+ROOT      = $(patsubst %NootedRed/Regs/tests/Makefile,%,$(MKFILE))
+REGDIR    = $(ROOT)NootedRed/Regs
 TRUTH     = $(REGDIR)/tests/dcn314_truth.txt
 BUILDDIR  = build/regs-tests
 
@@ -29,9 +32,11 @@ test: $(TESTS) $(BUILDDIR)/dcn314_truth.txt
 
 $(BUILDDIR)/%: $(REGDIR)/tests/%.cpp $(REGDIR)/DCN314.hpp
 	@mkdir -p $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) -DNRED_IMPL_PATH='"$(REGDIR)/DCN314.hpp"' -DNRED_TRUTH_PATH='"$(BUILDDIR)/dcn314_truth.txt"' \
+	    $< -o $@
 
-# 测试从 build/dcn314_truth.txt 读取真值；离线运行时由入库副本复制而来。
+# 测试真值表的路径由编译期宏 NRED_TRUTH_PATH 指定（见上方规则），指向 $(BUILDDIR)/dcn314_truth.txt；
+# 该文件由入库副本复制而来，故离线运行不依赖 oldfiles-handoff。
 $(BUILDDIR)/dcn314_truth.txt: $(TRUTH)
 	@mkdir -p $(BUILDDIR)
 	cp $< $@
