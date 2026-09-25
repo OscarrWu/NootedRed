@@ -1512,12 +1512,16 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
         constexpr UInt64 kVramWindowHi = 0x80FFFFFFFFULL;
         // 表占 256B，要求整段都落在窗口内
         if (addr < kVramWindowLo || (addr + kBufferSize - 1) > kVramWindowHi) {
-            // 探针位（先查占用，见下）：bit6 = 地址域校验拒绝；bit7-10 = addr>>28 的低 4 位（定位超窗档位）
-            //   已占用位：0-5（各步 rc）、20/21（Transfer/Imu 成功）、24/25（同左失败）、
-            //   26/27（High/Low 失败）、29（carve-out）、32-39/40-47/48-55（各步 rc 域）、
-            //   56-59 保留、60-63（既有探针）。6-19 / 22-23 / 28 / 30-31 空闲。
+            // 探针位（逐位核算过全项目占用，见 docs/子任务 记录）：
+            //   bit6      = 地址域校验拒绝
+            //   bit56-59  = addr>>28 的低 4 位（定位超窗档位）
+            // 选用理由：bit56-59 是 64 位里**唯一完全空闲**的连续 4 位。
+            //   已占用：0-3（ctx 路径步掩码）、4-5（旁路 HDP/aperture）、
+            //   8-31（ctx 路径 rc step0-2）、32-39（ctx rc step3 ≡ 旁路 rc setup；两组共用）、
+            //   40-55（旁路 rc imu/addr）、60-63（生命周期位）。
+            //   ⚠️ 不要用 7-19/22-23/28/30-31：它们与 ctx 路径的 rc 字段（8-15/16-23/24-31）相交。
             NRed::singleton().orSmu13ProbeState(1ULL << 6);
-            NRed::singleton().orSmu13ProbeState(static_cast<UInt64>((addr >> 28) & 0xF) << 7);
+            NRed::singleton().orSmu13ProbeState(static_cast<UInt64>((addr >> 28) & 0xF) << 56);
             SYSLOG("HWLibs",
                    "smu13: 拒绝发送驱动表地址（超 VRAM 窗口）addr=0x%llX fbOff=0x%llX window=[0x8000000000,0x80FFFFFFFF]",
                    (unsigned long long)addr, (unsigned long long)fbOff);
