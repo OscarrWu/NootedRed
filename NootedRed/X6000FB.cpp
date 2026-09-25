@@ -642,7 +642,21 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     //   bit20 = 表地址设置+Transfer 成功；bit21 = EnableGfxImu(0x16,1) 成功；
     //   bit24 = 表地址/Transfer 失败；bit25 = EnableGfxImu 失败；
     //   bit32-39 = 表地址/Transfer 步 rc（低8位）；bit40-47 = EnableGfxImu 步 rc（i=3 域位）。
-    if (NRed::singleton().getAttributes().isPhoenix()) {
+    //
+    // ⛔ 默认关闭（2026-09-25 修复"panic 后不自动重启"）
+    //   背景：本旁路会向 PMFW 真实发出 SetDriverDramAddrHigh/Low(0x0D/0x0E)、
+    //   TransferTableDram2Smu(0x10)、EnableGfxImu(0x16)。一旦地址被 PMFW 接受
+    //   （即 e5b982a 把 fbOffset 修正为 0x8000000000、地址首次落到 VRAM 窗口内），
+    //   这几条消息就真正生效，PMFW/驱动表被接管，导致 panic 流程无法完成 reboot
+    //   → 表现为"panic 后停在黑屏、只能长按电源键"（第 24 次真机）。
+    //   对照：第 23 次之前 fbOffset=0x8D0000000 超出窗口，0x0D 被拒(resp=0)、后续早退，
+    //   PMFW 未被改动，因此仍能自动重启。
+    //   机制同 §16.75（旁路注入 SMU 消息使 PMFW 异常 → 无法完成 reboot）
+    //   与 §16.93/§16.95（同类 L2 状态写曾致整机卡死）。
+    //   处置：本旁路属**实验性探针**，不是显示点亮的必需路径——显示时钟走
+    //   VBIOSSMC（67/83/91），与 PMFW（66/82/90）是两条独立通道（见交接文档 §6.4）。
+    //   故改为 boot-arg `-NRedSmuBypass` 显式启用；默认不注入，保持系统可自动重启。
+    if (checkKernelArgument("-NRedSmuBypass") && NRed::singleton().getAttributes().isPhoenix()) {
         // ⭐ 探针三连（§16.39）：TestMessage(0x01) / GetPmfwVersion(0x02) / GetDriverIfVersion(0x03)
         //    目的：判定 PMFW 消息端口是否开着——这三条是最基础的消息，任何固件都应响应。
         //    全静默 → 消息端口未开；有响应 → 通道通，问题在消息内容/时序。

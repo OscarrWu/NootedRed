@@ -1497,6 +1497,36 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
 
     // §16.67：记录每步真实 resp（不能只在 panic 时读——那时早被后续消息覆盖）
     UInt32 respHigh = 0, respLow = 0, respXfer = 0;
+
+    // ⛔ 地址域校验（2026-09-25 新增，防"panic 后不自动重启"复发）
+    //   为什么必须挡：SetDriverDramAddrHigh/Low(0x0D/0x0E) 一旦被 PMFW 接受，
+    //   后续 Transfer(0x10) 就会真的让 PMFW 接管我们给的驱动表地址；
+    //   若地址不在 PMFW 的 DMA 域内，只会被拒（无害）；但若被接受而地址本身
+    //   不是有效的驱动表缓冲，PMFW 会进入异常状态 → panic 后无法完成 reboot（§16.75/§16.95）。
+    //   实测窗口（Manjaro dmesg + PCI resource）：VRAM 主机物理窗口 = 0x8000000000–0x80FFFFFFFF。
+    //   注：fbOffset 的来源曾在 2026-09-11 从 getPhysicalAddress()（给 0x8D0000000，超窗）
+    //   改为 PCI config 读 BAR0（给 0x8000000000，窗口内）。本检查保证无论来源如何，
+    //   只有落在窗口内的地址才会被发给 PMFW。
+    {
+        constexpr UInt64 kVramWindowLo = 0x8000000000ULL;
+        constexpr UInt64 kVramWindowHi = 0x80FFFFFFFFULL;
+        // 表占 256B，要求整段都落在窗口内
+        if (addr < kVramWindowLo || (addr + kBufferSize - 1) > kVramWindowHi) {
+            // 探针位（先查占用，见下）：bit6 = 地址域校验拒绝；bit7-10 = addr>>28 的低 4 位（定位超窗档位）
+            //   已占用位：0-5（各步 rc）、20/21（Transfer/Imu 成功）、24/25（同左失败）、
+            //   26/27（High/Low 失败）、29（carve-out）、32-39/40-47/48-55（各步 rc 域）、
+            //   56-59 保留、60-63（既有探针）。6-19 / 22-23 / 28 / 30-31 空闲。
+            NRed::singleton().orSmu13ProbeState(1ULL << 6);
+            NRed::singleton().orSmu13ProbeState(static_cast<UInt64>((addr >> 28) & 0xF) << 7);
+            SYSLOG("HWLibs",
+                   "smu13: 拒绝发送驱动表地址（超 VRAM 窗口）addr=0x%llX fbOff=0x%llX window=[0x8000000000,0x80FFFFFFFF]",
+                   (unsigned long long)addr, (unsigned long long)fbOff);
+            buf->complete();
+            buf->release();
+            return kCAILResultUnsupported;
+        }
+    }
+
     const auto rHigh = X5000HWLibs::smu13SendMsgDirect(
         PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, static_cast<UInt32>(addr >> 32), &respHigh);
     NRed::singleton().smu13Resp[0] = respHigh;
