@@ -23,7 +23,7 @@ public:
 
     virtual RegValue read(RegAddr addr)                = 0;
     virtual void     write(RegAddr addr, RegValue val) = 0;
-    virtual void     delayMicroseconds(std::uint32_t us) = 0;
+    virtual void     delayMicroseconds(uint32_t us) = 0;
 
     // 执行一条 op。返回 false 表示失败（如 Poll 超时）。
     //
@@ -43,7 +43,7 @@ public:
             delayMicroseconds(op.value);
             return true;
         case RegOp::Kind::Poll:
-            for (std::uint32_t i = 0; i < pollTimeout_; ++i) {
+            for (uint32_t i = 0; i < pollTimeout_; ++i) {
                 lastValue_ = read(op.addr);
                 if ((lastValue_ & op.mask) != 0) { return true; }
                 delayMicroseconds(pollIntervalUs_);
@@ -54,8 +54,8 @@ public:
     }
 
     // 顺序执行整条序列。遇失败即停，返回最后成功执行的索引 + 1。
-    std::size_t executeAll(const RegSeq& seq) {
-        for (std::size_t i = 0; i < seq.size(); ++i) {
+    size_t executeAll(const RegSeq& seq) {
+        for (size_t i = 0; i < seq.size(); ++i) {
             if (!execute(seq[i])) { return i; }
         }
         return seq.size();
@@ -64,7 +64,7 @@ public:
     // 最近一次 Read/Poll 读到的值（含 Write 写入值）。供调用方取回结果。
     RegValue lastValue() const { return lastValue_; }
 
-    void setPollLimits(std::uint32_t timeoutIters, std::uint32_t intervalUs) {
+    void setPollLimits(uint32_t timeoutIters, uint32_t intervalUs) {
         pollTimeout_    = timeoutIters;
         pollIntervalUs_ = intervalUs;
     }
@@ -72,8 +72,8 @@ public:
 private:
     // 对应 Linux `dcn314_smu_wait_for_response(clk_mgr, 10, 200000)`：
     // 10 µs 间隔 × 200000 次
-    std::uint32_t pollTimeout_{200000};
-    std::uint32_t pollIntervalUs_{10};
+    uint32_t pollTimeout_{200000};
+    uint32_t pollIntervalUs_{10};
     RegValue      lastValue_{0};
 };
 

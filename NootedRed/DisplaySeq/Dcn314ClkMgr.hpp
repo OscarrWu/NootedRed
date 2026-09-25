@@ -22,9 +22,9 @@ namespace dcn314_clk {
 // VBIOSSMC 邮箱的段内偏移（MP1 SEG0）。
 // 为什么不 include `Regs/SMU.hpp`：那一层含 IOKit 头，而本目录必须能在分析机用户态编译。
 // 一致性由测试保证（tests 里断言这三个值与 Linux 头文件一致，防漂移）。
-constexpr std::uint32_t kMailboxMsg67    = 0x283;  // MP1_SMN_C2PMSG_67（触发）
-constexpr std::uint32_t kMailboxParam83  = 0x293;  // MP1_SMN_C2PMSG_83（参数/读回）
-constexpr std::uint32_t kMailboxStatus91 = 0x29B;  // MP1_SMN_C2PMSG_91（状态）
+constexpr uint32_t kMailboxMsg67    = 0x283;  // MP1_SMN_C2PMSG_67（触发）
+constexpr uint32_t kMailboxParam83  = 0x293;  // MP1_SMN_C2PMSG_83（参数/读回）
+constexpr uint32_t kMailboxStatus91 = 0x29B;  // MP1_SMN_C2PMSG_91（状态）
 
 // 保守默认时钟档案（路线图 §5.4 简化项 1：本项目没有 Linux 的带宽/时序计算层，
 // 点亮阶段用固定保守值代替真实计算）。
@@ -37,17 +37,17 @@ constexpr std::uint32_t kMailboxStatus91 = 0x29B;  // MP1_SMN_C2PMSG_91（状态
 //   msg 0x7 SetHardMinDcfclkByFreq    = 200 MHz
 //   msg 0x8 SetMinDeepSleepDcfclk     =  38 MHz
 struct DefaultClockProfile {
-    std::uint32_t dispclkKhz{534000};
-    std::uint32_t dppclkKhz{519000};
-    std::uint32_t hardMinDcfclkKhz{200000};
-    std::uint32_t minDeepSleepDcfclkKhz{38000};
+    uint32_t dispclkKhz{534000};
+    uint32_t dppclkKhz{519000};
+    uint32_t hardMinDcfclkKhz{200000};
+    uint32_t minDeepSleepDcfclkKhz{38000};
 
     // 目标 zstate 支持等级：取 ALLOW_Z8_Z10_ONLY —— **与真机真值一致**：
     //   真值里 Linux 发的 0x15 事务 param = 0x500，正是该等级对应的编码
     //   （Linux dcn314_smu.c:364-367 的 case DCN_ZSTATE_SUPPORT_ALLOW_Z8_Z10_ONLY）。
     // 注意：本驱动只下发消息、不参与 zstate 的进入/退出判定，故该值只影响"发哪条消息、带什么 param"。
     // 取值域见 `display::vbios_smc::ZStateSupport`（与本结构体字段同为 Linux dc.h:736-743 的枚举）。
-    std::uint32_t zstateSupport{vbios_smc::ZSTATE_ALLOW_Z8_Z10_ONLY};
+    uint32_t zstateSupport{vbios_smc::ZSTATE_ALLOW_Z8_Z10_ONLY};
     bool          dtbclkEn{false};   // 真值里没有 0x17 SetDtbClk ⇒ Linux 那次未请求开启
 
     TargetClocks toTarget() const {
@@ -72,7 +72,7 @@ class ClkMgr {
 public:
     // 单次下发序列的固定容量。实测最长序列（两笔消息事务 + 探询）约 20 个 op，
     // 512 留足余量；溢出会被 `overflowed()` 检出（绝不静默截断后照常执行）。
-    static constexpr std::size_t kSeqCapacity = 512;
+    static constexpr size_t kSeqCapacity = 512;
 
     void setProfile(const DefaultClockProfile& p) { profile_ = p; }
     const DefaultClockProfile& profile() const { return profile_; }
@@ -82,9 +82,9 @@ public:
     void resetState() { state_ = initialStateFor(); }
 
     const ClkMgrState& state() const { return state_; }
-    std::uint32_t      smuVersion() const { return smuVersion_; }
+    uint32_t      smuVersion() const { return smuVersion_; }
     bool               smuPresent() const { return smuPresent_; }
-    std::size_t        lastOpCount() const { return lastOpCount_; }
+    size_t        lastOpCount() const { return lastOpCount_; }
 
     // 上电/初始化阶段的一次性下发：
     //   ① SMU 版本探测（Linux `dcn314_clk_mgr_construct` 的 `dcn314_smu_get_smu_version`）
@@ -136,15 +136,15 @@ public:
 private:
     ClkMgrState        state_ = initialStateFor();
     DefaultClockProfile profile_{};
-    std::uint32_t      smuVersion_{0};
+    uint32_t      smuVersion_{0};
     bool               smuPresent_{false};
-    std::size_t        lastOpCount_{0};
+    size_t        lastOpCount_{0};
 
     // 不用 `ClkMgrState{}` 做初值：那是 pwr_state = 0 = MISSION_MODE，
     // 会让"首次从 UNKNOWN 进入 mission mode"的下发被判为"已在 mission mode"而跳过，
     // 与真机行为不符（真值里首笔即 0x12 SetDisplayIdleOptimizations）。
     static ClkMgrState initialStateFor() {
-        std::uint32_t dpDtoSourceClkHz = 0;
+        uint32_t dpDtoSourceClkHz = 0;
         return initClocksState(0, false, 0, 0, 0, &dpDtoSourceClkHz);
     }
     // 固定缓冲区：内核态不做可失败分配（路线图 §3.2）。与 sink 的执行期不重叠。

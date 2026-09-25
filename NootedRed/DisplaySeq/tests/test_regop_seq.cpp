@@ -116,7 +116,7 @@ static void test_wrappers_differ_only_in_msgid() {
     assert(s2[3].value == VBIOSSMC_MSG_SetDppclkFreq);
     assert(s3[3].value == VBIOSSMC_MSG_SetHardMinDcfclkByFreq);
     // 其余位置应完全一致
-    for (std::size_t i = 0; i < s1.size(); ++i) {
+    for (size_t i = 0; i < s1.size(); ++i) {
         if (i == 3) { continue; }
         assert(s1[i].kind == s2[i].kind && s1[i].kind == s3[i].kind);
         assert(s1[i].addr == s2[i].addr && s1[i].addr == s3[i].addr);
@@ -158,13 +158,13 @@ static void test_filtering() {
 
     RegOp wbuf[64];
     RegSeq writes(wbuf, 64);
-    const std::size_t n = seq.copyWrites(writes);
+    const size_t n = seq.copyWrites(writes);
     assert(n == 3);              // clear_response / write_param / trigger_msg 共 3 个写
     assert(writes.size() == n);
 
     RegOp fbuf[64];
     RegSeq filtered(fbuf, 64);
-    const std::size_t m = seq.copyWhereStepPrefix(filtered, "wait_");
+    const size_t m = seq.copyWhereStepPrefix(filtered, "wait_");
     assert(m == 2);              // wait_idle_before + wait_complete
     assert(std::strcmp(filtered[0].step, "wait_idle_before") == 0);
     assert(std::strcmp(filtered[1].step, "wait_complete") == 0);
@@ -190,9 +190,9 @@ public:
         RegAddr addr;
         RegValue value;
     };
-    static constexpr std::size_t kCap = 128;
+    static constexpr size_t kCap = 128;
     Item        items[kCap]{};
-    std::size_t count{0};
+    size_t count{0};
 
     void presetRead(RegAddr a, RegValue v) {
         if (presetCount_ < 8) { presets_[presetCount_++] = {a, v}; }
@@ -200,7 +200,7 @@ public:
 
     RegValue read(RegAddr addr) override {
         RegValue v = 0;
-        for (std::size_t i = 0; i < presetCount_; ++i) {
+        for (size_t i = 0; i < presetCount_; ++i) {
             if (presets_[i].addr == addr) { v = presets_[i].value; break; }
         }
         if (count < kCap) { items[count++] = {'r', addr, v}; }
@@ -209,12 +209,12 @@ public:
     void write(RegAddr addr, RegValue val) override {
         if (count < kCap) { items[count++] = {'w', addr, val}; }
     }
-    void delayMicroseconds(std::uint32_t) override {}
+    void delayMicroseconds(uint32_t) override {}
 
 private:
     struct P { RegAddr addr; RegValue value; };
     P           presets_[8]{};
-    std::size_t presetCount_{0};
+    size_t presetCount_{0};
 };
 
 // 3a. ★核心：把生成器序列喂给 mock sink 执行，其**实际写序列**必须逐项等于生成器产出
@@ -228,12 +228,12 @@ static void test_mock_execution_matches_generated() {
     sink.presetRead(kMailbox91, VBIOSSMC_Result_OK);  // 预置非忙 → 两个 Poll 均立即通过
     sink.setPollLimits(4, 0);
 
-    const std::size_t reached = sink.executeAll(seq);
+    const size_t reached = sink.executeAll(seq);
     assert(reached == seq.size());                    // 全部执行成功
 
     // 逐项比对：序列里的每个 Write，必须在 sink 上以相同 addr/value 出现，且顺序一致
-    std::size_t wi = 0;
-    for (std::size_t i = 0; i < seq.size(); ++i) {
+    size_t wi = 0;
+    for (size_t i = 0; i < seq.size(); ++i) {
         if (seq[i].kind != RegOp::Kind::Write) { continue; }
         // 跳过 sink 上因 Poll 产生的读
         while (wi < sink.count && sink.items[wi].kind != 'w') { ++wi; }
@@ -255,7 +255,7 @@ static void test_poll_timeout_is_bounded() {
     sink.presetRead(kMailbox91, VBIOSSMC_Status_BUSY);  // 永远忙
     sink.setPollLimits(5, 0);                            // 5 次即放弃
 
-    const std::size_t reached = sink.executeAll(seq);
+    const size_t reached = sink.executeAll(seq);
     assert(reached == 0);                                // 第 0 项即失败
     std::puts("  [PASS] 3b Poll 超时有界");
 }
@@ -270,7 +270,7 @@ static void test_poll_completes_on_non_busy() {
     sink.presetRead(kMailbox91, 0x1);   // OK
     sink.setPollLimits(5, 0);
 
-    const std::size_t reached = sink.executeAll(seq);
+    const size_t reached = sink.executeAll(seq);
     assert(reached == 1);
     std::puts("  [PASS] 3c Poll 读到非忙值即通过");
 }
@@ -284,7 +284,7 @@ static void test_generation_is_deterministic() {
     generateSetDispclk(s2, kMailbox67, kMailbox83, kMailbox91, 594000);
 
     assert(s1.size() == s2.size());
-    for (std::size_t i = 0; i < s1.size(); ++i) {
+    for (size_t i = 0; i < s1.size(); ++i) {
         assert(s1[i].kind == s2[i].kind);
         assert(s1[i].addr == s2[i].addr);
         assert(s1[i].value == s2[i].value);
@@ -308,7 +308,7 @@ static void test_shadow_run_records_all_ops() {
     sink.presetRead(kMailbox91, VBIOSSMC_Result_OK);
     sink.setPollLimits(4, 0);
     sink.setOutput(f);
-    const std::size_t reached = sink.runAndRecord(seq);
+    const size_t reached = sink.runAndRecord(seq);
     std::fclose(f);
 
     assert(reached == seq.size());
@@ -318,7 +318,7 @@ static void test_shadow_run_records_all_ops() {
     std::FILE* g = std::fopen(path, "r");
     assert(g != nullptr);
     char line[256];
-    std::size_t lines = 0;
+    size_t lines = 0;
     bool firstOk = false;
     while (std::fgets(line, sizeof(line), g) != nullptr) {
         if (lines == 0) {

@@ -31,12 +31,12 @@ static constexpr dcn314_clk::Mailbox kMb = {kMailbox67, kMailbox83, kMailbox91};
 // 从序列中抽取"消息事务"：每 6 个 op 为一笔
 // （等闲 → 清响应 → 写参数 → 写消息触发 → 等完成 → 读回参数），
 // 同时逐项校验事务形状与顺序（Linux dcn314_smu.c L118-163）。
-struct MsgTx { std::uint32_t msgId; std::uint32_t param; };
+struct MsgTx { uint32_t msgId; uint32_t param; };
 
-static std::size_t collectTx(const RegSeq& seq, MsgTx* out, std::size_t cap) {
+static size_t collectTx(const RegSeq& seq, MsgTx* out, size_t cap) {
     assert(seq.size() % 6 == 0);
-    std::size_t n = 0;
-    for (std::size_t i = 0; i + 5 < seq.size(); i += 6) {
+    size_t n = 0;
+    for (size_t i = 0; i + 5 < seq.size(); i += 6) {
         assert(seq[i].kind == RegOp::Kind::Poll && seq[i].addr == kMailbox91);       // wait_idle_before
         assert(seq[i + 1].kind == RegOp::Kind::Write && seq[i + 1].addr == kMailbox91);
         assert(seq[i + 1].value == VBIOSSMC_Status_BUSY);                            // clear_response
@@ -87,7 +87,7 @@ static void test_update_clocks_safe_to_lower_full() {
     assert(seq.size() == 36);   // 6 笔事务 × 6 op
 
     MsgTx tx[16];
-    const std::size_t n = collectTx(seq, tx, 16);
+    const size_t n = collectTx(seq, tx, 16);
     assert(n == 6);
 
     // 消息号顺序与参数（单位 MHz，经 khz_to_mhz_ceil）
@@ -139,7 +139,7 @@ static void test_update_clocks_not_safe_to_lower() {
     assert(seq.size() == 24);   // 4 笔事务
 
     MsgTx tx[16];
-    const std::size_t n = collectTx(seq, tx, 16);
+    const size_t n = collectTx(seq, tx, 16);
     assert(n == 4);
 
     assert(tx[0].msgId == VBIOSSMC_MSG_AllowZstatesEntry);      // zstate DISALLOW (L256)
@@ -182,7 +182,7 @@ static void test_update_clocks_low_power_idle_opt() {
     assert(seq.size() == 6);   // 仅 1 笔
 
     MsgTx tx[4];
-    const std::size_t n = collectTx(seq, tx, 4);
+    const size_t n = collectTx(seq, tx, 4);
     assert(n == 1);
     assert(tx[0].msgId == VBIOSSMC_MSG_SetDisplayIdleOptimizations);
     assert(tx[0].param == 0x7);   // df_request_disabled | phy_ref_clk_off | s0i2_rdy
@@ -208,7 +208,7 @@ static void test_dppclk_dispclk_order() {
         dcn314_clk::generateUpdateClocks(seq, kMb, cur, tgt, cst, true, &next);
 
         MsgTx tx[8];
-        const std::size_t n = collectTx(seq, tx, 8);
+        const size_t n = collectTx(seq, tx, 8);
         assert(n == 2);   // dispclk + dppclk（dcfclk/deep 不变，pwr 因 displayCount=1 跳过）
         assert(tx[0].msgId == VBIOSSMC_MSG_SetDispclkFreq);   // L307 先
         assert(tx[1].msgId == VBIOSSMC_MSG_SetDppclkFreq);    // L317 后（lowered）
@@ -227,7 +227,7 @@ static void test_dppclk_dispclk_order() {
         dcn314_clk::generateUpdateClocks(seq, kMb, cur, tgt, cst, true, &next);
 
         MsgTx tx[8];
-        const std::size_t n = collectTx(seq, tx, 8);
+        const size_t n = collectTx(seq, tx, 8);
         assert(n == 2);
         assert(tx[0].msgId == VBIOSSMC_MSG_SetDispclkFreq);   // L307 先
         assert(tx[1].msgId == VBIOSSMC_MSG_SetDppclkFreq);    // L321 后（updateDppclk）
@@ -246,7 +246,7 @@ static void test_dppclk_dispclk_order() {
         dcn314_clk::generateUpdateClocks(seq, kMb, cur, tgt, cst, true, &next);
 
         MsgTx tx[8];
-        const std::size_t n = collectTx(seq, tx, 8);
+        const size_t n = collectTx(seq, tx, 8);
         assert(n == 2);
         assert(tx[0].msgId == VBIOSSMC_MSG_SetDispclkFreq);
         assert(tx[1].msgId == VBIOSSMC_MSG_SetDppclkFreq);   // updateDispclk → L321
@@ -273,7 +273,7 @@ static void test_no_dmub_ops() {
 
     assert(!seq.overflowed());
     assert(seq.size() % 6 == 0);
-    for (std::size_t i = 0; i < seq.size(); ++i) {
+    for (size_t i = 0; i < seq.size(); ++i) {
         const RegOp& op = seq[i];
         // VBIOSSMC 事务只碰这三个邮箱寄存器（Linux dcn314_smu.c 的 C2PMSG_67/83/91）
         const bool isMailbox = (op.addr == kMailbox67 || op.addr == kMailbox83 || op.addr == kMailbox91);
@@ -300,7 +300,7 @@ static void test_zstate_branches() {
         dcn314_clk::generateUpdateClocks(seq, kMb, cur, tgt, cst, true, &next);
 
         MsgTx tx[2];
-        const std::size_t n = collectTx(seq, tx, 2);
+        const size_t n = collectTx(seq, tx, 2);
         assert(n == 1);
         assert(tx[0].msgId == VBIOSSMC_MSG_AllowZstatesEntry);
         assert(tx[0].param == 0x700);   // ALLOW: (1<<10)|(1<<9)|(1<<8)（dcn314_smu.c L350）
@@ -319,7 +319,7 @@ static void test_zstate_branches() {
         dcn314_clk::generateUpdateClocks(seq, kMb, cur, tgt, cst, false, &next);
 
         MsgTx tx[2];
-        const std::size_t n = collectTx(seq, tx, 2);
+        const size_t n = collectTx(seq, tx, 2);
         assert(n == 1);
         assert(tx[0].msgId == VBIOSSMC_MSG_AllowZstatesEntry);
         assert(tx[0].param == 0);   // DISALLOW（dcn314_smu.c L355）
@@ -359,7 +359,7 @@ static void test_min_disp_clk_clamp() {
     dcn314_clk::generateUpdateClocks(seq, kMb, cur, tgt, cst, true, &next);
 
     MsgTx tx[8];
-    const std::size_t n = collectTx(seq, tx, 8);
+    const size_t n = collectTx(seq, tx, 8);
     assert(n == 3);   // zstate + dispclk + dppclk（updateDispclk → L321）
     assert(tx[0].msgId == VBIOSSMC_MSG_AllowZstatesEntry);
     assert(tx[1].msgId == VBIOSSMC_MSG_SetDispclkFreq);
@@ -423,7 +423,7 @@ static void test_adjust_dp_ref_freq_for_ss() {
 // Linux dcn314_init_clocks（L187-206）：memset 清零 → pwr/zstate 置 UNKNOWN →
 //   spll_ssc 开启时 dp_dto_source = adjust(..., L201-203)，否则 = dprefclk（L204-205）。
 static void test_init_clocks_state() {
-    std::uint32_t dto = 0;
+    uint32_t dto = 0;
     const dcn314_clk::ClkMgrState s1 = dcn314_clk::initClocksState(0, false, 594000, 375, 1000, &dto);
     assert(dto == 594000);   // ssc 关闭 → 原值
     assert(s1.pwrState == dcn314_clk::PWR_UNKNOWN);
@@ -434,7 +434,7 @@ static void test_init_clocks_state() {
     assert(s1.dispclkKhz == 0);
     assert(s1.dtbclkEn == false);
 
-    std::uint32_t dto2 = 0;
+    uint32_t dto2 = 0;
     dcn314_clk::initClocksState(0, true, 594000, 375, 1000, &dto2);
     assert(dto2 == 592886);   // ssc 开启 → adjustDpRefFreqForSs
 

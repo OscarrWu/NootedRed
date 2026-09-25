@@ -25,15 +25,15 @@ namespace display {
 // block 去查硬件上报的基址表）。生成器因此不必知道任何段基址。
 struct RegChannel {
     void*         ctx{nullptr};          // 通道上下文（内核态 = 苹果 SMU 上下文）
-    std::uint32_t blockInstance{0};      // block 实例号（苹果 cgs 第 2 参）
-    std::uint32_t block{0};              // CAILHWBlock（内核态传 kCAILHWBlockMP1）
-    std::uint32_t regOffBase{0};         // base index（苹果 cgs 第 5 参）
+    uint32_t blockInstance{0};      // block 实例号（苹果 cgs 第 2 参）
+    uint32_t block{0};              // CAILHWBlock（内核态传 kCAILHWBlockMP1）
+    uint32_t regOffBase{0};         // base index（苹果 cgs 第 5 参）
 
-    std::uint32_t (*read)(void* ctx, std::uint32_t off, std::uint32_t blockInstance, std::uint32_t block,
-                          std::uint32_t regOffBase){nullptr};
-    void (*write)(void* ctx, std::uint32_t off, std::uint32_t val, std::uint32_t blockInstance,
-                  std::uint32_t block, std::uint32_t regOffBase){nullptr};
-    void (*delay)(std::uint32_t us){nullptr};
+    uint32_t (*read)(void* ctx, uint32_t off, uint32_t blockInstance, uint32_t block,
+                          uint32_t regOffBase){nullptr};
+    void (*write)(void* ctx, uint32_t off, uint32_t val, uint32_t blockInstance,
+                  uint32_t block, uint32_t regOffBase){nullptr};
+    void (*delay)(uint32_t us){nullptr};
 };
 
 // 把 RegOp 序列落到给定通道上执行。轮询的超时上限由 RegSink 基类保证
@@ -59,16 +59,16 @@ public:
         ch_.write(ch_.ctx, addr, val, ch_.blockInstance, ch_.block, ch_.regOffBase);
     }
 
-    void delayMicroseconds(std::uint32_t us) override {
+    void delayMicroseconds(uint32_t us) override {
         if (ch_.delay != nullptr) { ch_.delay(us); }
     }
 
     // 通道缺失（函数指针为空）导致的失败次数。调用方据此判断"这次下发根本没落到硬件"。
-    std::uint32_t failures() const { return failures_; }
+    uint32_t failures() const { return failures_; }
 
 private:
     RegChannel    ch_{};
-    std::uint32_t failures_{0};
+    uint32_t failures_{0};
 };
 
 }  // namespace display

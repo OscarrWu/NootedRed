@@ -14,7 +14,7 @@
 #include "VBIOSSMC.hpp"
 #include "VbiosSmcSeq.hpp"
 
-#include <cstdint>
+#include <stdint.h>
 #include <cstdio>
 #include <cstdlib>
 
@@ -28,8 +28,8 @@ static constexpr RegAddr kMb91 = 0x29B;
 // ── 辅助：生成序列并验证标准 6-op 事务形状 ──
 // 检查消息号 (msgId)、参数值 (param)、以及 6 步的 op 种类与地址。
 // 返回第 2 步（parameter write）的 value，供调用方进一步检查单位换算。
-static RegValue checkStandardTransaction(const RegSeq& seq, std::uint32_t expectedMsgId,
-                                          std::uint32_t expectedParam,
+static RegValue checkStandardTransaction(const RegSeq& seq, uint32_t expectedMsgId,
+                                          uint32_t expectedParam,
                                           const char* label) {
     if (seq.size() != 6) {
         std::fprintf(stderr, "  [FAIL] %s: expected 6 ops, got %zu\n", label, seq.size());

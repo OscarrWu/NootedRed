@@ -15,13 +15,13 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
+#include <stddef.h>
+#include <stdint.h>
 
 namespace display {
 
-using RegAddr  = std::uint32_t;
-using RegValue = std::uint32_t;
+using RegAddr  = uint32_t;
+using RegValue = uint32_t;
 
 // 一次寄存器操作。序列生成代码只产出它，绝不直接触碰硬件。
 //
@@ -30,7 +30,7 @@ using RegValue = std::uint32_t;
 // 因此**不能**由生成器展开成死循环——必须作为一个 op 交给 sink 执行。
 // 这样生成器保持纯函数，运行时行为由 sink 负责。
 struct RegOp {
-    enum class Kind : std::uint8_t {
+    enum class Kind : uint8_t {
         Write = 0,  // sink 将 value 写入 addr
         Read  = 1,  // sink 读取 addr（值记录到 sink，不参与生成）
         Poll  = 2,  // sink 轮询 addr，直到 (值 & mask) != 0（读到非忙值），或超时
@@ -66,7 +66,7 @@ constexpr RegOp regRead(RegAddr addr, const char* step = nullptr) {
 constexpr RegOp regPollUntilNot(RegAddr addr, RegValue busyValue, const char* step = nullptr) {
     return RegOp{RegOp::Kind::Poll, addr, 0, static_cast<RegValue>(~busyValue), step};
 }
-constexpr RegOp regDelay(std::uint32_t microseconds, const char* step = nullptr) {
+constexpr RegOp regDelay(uint32_t microseconds, const char* step = nullptr) {
     return RegOp{RegOp::Kind::Delay, 0, microseconds, 0, step};
 }
 
@@ -78,9 +78,9 @@ constexpr RegOp regDelay(std::uint32_t microseconds, const char* step = nullptr)
 // 不抛异常、不做动态增长——内核态不允许。调用方生成后应检查 `overflowed()`。
 class RegSeq {
 public:
-    static constexpr std::size_t kDefaultCapacity = 256;
+    static constexpr size_t kDefaultCapacity = 256;
 
-    RegSeq(RegOp* buffer, std::size_t capacity) : buf_(buffer), cap_(capacity) {}
+    RegSeq(RegOp* buffer, size_t capacity) : buf_(buffer), cap_(capacity) {}
     RegSeq(const RegSeq&)            = delete;
     RegSeq& operator=(const RegSeq&) = delete;
 
@@ -97,13 +97,13 @@ public:
         overflow_ = false;
     }
 
-    std::size_t size() const { return count_; }
+    size_t size() const { return count_; }
     bool        empty() const { return count_ == 0; }
     bool        overflowed() const { return overflow_; }
-    std::size_t capacity() const { return cap_; }
+    size_t capacity() const { return cap_; }
 
-    const RegOp& at(std::size_t i) const { return buf_[i]; }
-    const RegOp& operator[](std::size_t i) const { return buf_[i]; }
+    const RegOp& at(size_t i) const { return buf_[i]; }
+    const RegOp& operator[](size_t i) const { return buf_[i]; }
 
     const RegOp* begin() const { return buf_; }
     const RegOp* end() const { return buf_ + count_; }
@@ -113,15 +113,15 @@ public:
     // 不分配内存；溢出时同样置 out 的 overflow 标志。
 
     // 按 step 标签前缀过滤（保留原顺序）
-    std::size_t copyWhereStepPrefix(RegSeq& out, const char* prefix) const;
+    size_t copyWhereStepPrefix(RegSeq& out, const char* prefix) const;
 
     // 只保留 Write（差分器区分读写：读序列的差异通常无害，写序列才是重点）
-    std::size_t copyWrites(RegSeq& out) const;
+    size_t copyWrites(RegSeq& out) const;
 
 private:
     RegOp*      buf_;
-    std::size_t cap_;
-    std::size_t count_{0};
+    size_t cap_;
+    size_t count_{0};
     bool        overflow_{false};
 };
 
@@ -139,10 +139,10 @@ inline bool startsWith(const char* s, const char* prefix) {
 }
 }  // namespace detail
 
-inline std::size_t RegSeq::copyWhereStepPrefix(RegSeq& out, const char* prefix) const {
+inline size_t RegSeq::copyWhereStepPrefix(RegSeq& out, const char* prefix) const {
     if (prefix == nullptr) { return 0; }
-    std::size_t n = 0;
-    for (std::size_t i = 0; i < count_; ++i) {
+    size_t n = 0;
+    for (size_t i = 0; i < count_; ++i) {
         if (detail::startsWith(buf_[i].step, prefix)) {
             out.push(buf_[i]);
             ++n;
@@ -151,9 +151,9 @@ inline std::size_t RegSeq::copyWhereStepPrefix(RegSeq& out, const char* prefix) 
     return n;
 }
 
-inline std::size_t RegSeq::copyWrites(RegSeq& out) const {
-    std::size_t n = 0;
-    for (std::size_t i = 0; i < count_; ++i) {
+inline size_t RegSeq::copyWrites(RegSeq& out) const {
+    size_t n = 0;
+    for (size_t i = 0; i < count_; ++i) {
         if (buf_[i].kind == RegOp::Kind::Write) {
             out.push(buf_[i]);
             ++n;

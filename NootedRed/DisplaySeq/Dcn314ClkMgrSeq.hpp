@@ -18,7 +18,7 @@
 #include "RegOp.hpp"
 #include "VbiosSmcSeq.hpp"   // display::vbios_smc::generateSetDispclk, generateSetDppclk, etc.
 
-#include <cstdint>
+#include <stdint.h>
 
 namespace display {
 namespace dcn314_clk {
@@ -27,7 +27,7 @@ namespace dcn314_clk {
 //
 // enum dcn_pwr_state (dc.h L730-734)：**照 Linux 原值**（UNKNOWN = -1，故用有符号类型）。
 // 刻意不重编号——重编号会让"与 Linux 逐行对照"变成需要心算的事，是将来出错的来源。
-enum PwrState : std::int32_t {
+enum PwrState : int32_t {
     PWR_UNKNOWN      = -1,  // DCN_PWR_STATE_UNKNOWN      = -1
     PWR_MISSION_MODE = 0,   // DCN_PWR_STATE_MISSION_MODE = 0
     PWR_LOW_POWER    = 3    // DCN_PWR_STATE_LOW_POWER    = 3
@@ -38,9 +38,9 @@ enum PwrState : std::int32_t {
 //   ALLOW_Z8_Z10_ONLY=3 / ALLOW_Z10_ONLY=4 / DISALLOW=5）。
 // 这里只做别名，避免两套常量各自漂移；下方 static_assert 是防漂移的机器检查。
 using ZStateSupport = vbios_smc::ZStateSupport;
-constexpr std::uint32_t ZSTATE_UNKNOWN  = vbios_smc::ZSTATE_UNKNOWN;   // = 0
-constexpr std::uint32_t ZSTATE_ALLOWED  = vbios_smc::ZSTATE_ALLOW;     // = 1
-constexpr std::uint32_t ZSTATE_DISALLOW = vbios_smc::ZSTATE_DISALLOW;  // = 5
+constexpr uint32_t ZSTATE_UNKNOWN  = vbios_smc::ZSTATE_UNKNOWN;   // = 0
+constexpr uint32_t ZSTATE_ALLOWED  = vbios_smc::ZSTATE_ALLOW;     // = 1
+constexpr uint32_t ZSTATE_DISALLOW = vbios_smc::ZSTATE_DISALLOW;  // = 5
 
 static_assert(ZSTATE_UNKNOWN == 0 && ZSTATE_ALLOWED == 1 && ZSTATE_DISALLOW == 5,
               "zstate 取值必须与 Linux dc.h:736-743 一致");
@@ -51,32 +51,32 @@ static_assert(PWR_UNKNOWN == -1 && PWR_MISSION_MODE == 0 && PWR_LOW_POWER == 3,
 
 // Linux struct dc_clocks 的子集 —— 目标时钟（由调用方提供）
 struct TargetClocks {
-    std::uint32_t dcfclkKhz;
-    std::uint32_t dcfclkDeepSleepKhz;
-    std::uint32_t dppclkKhz;
-    std::uint32_t dispclkKhz;
-    std::uint32_t zstateSupport;   // ZStateSupport
+    uint32_t dcfclkKhz;
+    uint32_t dcfclkDeepSleepKhz;
+    uint32_t dppclkKhz;
+    uint32_t dispclkKhz;
+    uint32_t zstateSupport;   // ZStateSupport
     bool          dtbclkEn;
 };
 
 // Linux clk_mgr->clks 的子集——"上一次已下发的状态"
 struct ClkMgrState {
-    std::uint32_t dcfclkKhz;
-    std::uint32_t dcfclkDeepSleepKhz;
-    std::uint32_t dppclkKhz;
-    std::uint32_t dispclkKhz;
-    std::uint32_t zstateSupport;
-    std::int32_t  pwrState;        // PwrState（Linux 的 UNKNOWN = -1，故有符号）
+    uint32_t dcfclkKhz;
+    uint32_t dcfclkDeepSleepKhz;
+    uint32_t dppclkKhz;
+    uint32_t dispclkKhz;
+    uint32_t zstateSupport;
+    int32_t  pwrState;        // PwrState（Linux 的 UNKNOWN = -1，故有符号）
     bool          dtbclkEn;
 };
 
 // 主流程用到的常量/外部输入
 struct ClkMgrConsts {
-    std::uint32_t minDispClkKhz;      // Linux dc->debug.min_disp_clk_khz（0 = 不 clamp）
-    std::uint32_t activeDisplayCount; // Linux dcn314_get_active_display_cnt_wa() 的结果
+    uint32_t minDispClkKhz;      // Linux dc->debug.min_disp_clk_khz（0 = 不 clamp）
+    uint32_t activeDisplayCount; // Linux dcn314_get_active_display_cnt_wa() 的结果
 };
 
-struct Mailbox { std::uint32_t msg67, param83, status91; };
+struct Mailbox { uint32_t msg67, param83, status91; };
 
 // ── shouldSetClock 纯函数（Linux clk_mgr_internal.h L561-564）─────────────────
 //
@@ -84,7 +84,7 @@ struct Mailbox { std::uint32_t msg67, param83, status91; };
 //   static inline bool should_set_clock(bool safe_to_lower, int calc_clk, int cur_clk) {
 //       return ((safe_to_lower && calc_clk < cur_clk) || calc_clk > cur_clk);
 //   }
-constexpr bool shouldSetClock(bool safeToLower, std::uint32_t calcClk, std::uint32_t curClk) {
+constexpr bool shouldSetClock(bool safeToLower, uint32_t calcClk, uint32_t curClk) {
     return (safeToLower && calcClk < curClk) || calcClk > curClk;
 }
 
@@ -121,12 +121,12 @@ inline void generateReadSsInfoClockSource(RegSeq& out, RegAddr clk1Clk2BypassCnt
 //       .ss_divider = 1000,
 //       .ss_percentage = {0, 0, 375, 375, 375}   // 索引 0..4
 //   };
-constexpr std::uint32_t kSsDivider = 1000;   // Linux dcn314_clk_mgr.c L493
+constexpr uint32_t kSsDivider = 1000;   // Linux dcn314_clk_mgr.c L493
 
-inline std::uint32_t ssPercentageFor(std::uint32_t clockSource) {
+inline uint32_t ssPercentageFor(uint32_t clockSource) {
     // Linux dcn314_clk_mgr.c L494: ss_percentage = {0, 0, 375, 375, 375}
     // 索引对应 CLK2_BYPASS_SEL 值（0..4），超出返回 0
-    static constexpr std::uint32_t kTable[] = {0, 0, 375, 375, 375};
+    static constexpr uint32_t kTable[] = {0, 0, 375, 375, 375};
     if (clockSource >= 5)
         return 0;
     return kTable[clockSource];
@@ -140,9 +140,9 @@ inline std::uint32_t ssPercentageFor(std::uint32_t clockSource) {
 //     adjusted = floor(dp_ref_clk_khz * (1 - ss_percentage))
 //
 // 本项目无浮点定点库 → 用 64 位整数精确复现同一计算。
-inline std::uint32_t adjustDpRefFreqForSs(std::uint32_t dpRefClkKhz,
-                                          std::uint32_t ssPercentage,
-                                          std::uint32_t ssDivider) {
+inline uint32_t adjustDpRefFreqForSs(uint32_t dpRefClkKhz,
+                                          uint32_t ssPercentage,
+                                          uint32_t ssDivider) {
     if (ssPercentage == 0 || ssDivider == 0)
         return dpRefClkKhz;
 
@@ -154,11 +154,11 @@ inline std::uint32_t adjustDpRefFreqForSs(std::uint32_t dpRefClkKhz,
     //   3. adj = dc_fixpt_mul_int(ss_percentage, dp_ref_clk_khz)
     //      = ss_percentage * dp_ref_clk_khz
     //   4. result = dc_fixpt_floor(adj)  →  adj >> 32
-    std::int64_t ssPctFixed = (static_cast<std::int64_t>(ssPercentage) << 32)
-                            / (static_cast<std::int64_t>(ssDivider) * 200);
-    std::int64_t oneMinus = (static_cast<std::int64_t>(1) << 32) - ssPctFixed;
-    std::int64_t adj = oneMinus * static_cast<std::int64_t>(dpRefClkKhz);
-    return static_cast<std::uint32_t>(adj >> 32);
+    int64_t ssPctFixed = (static_cast<int64_t>(ssPercentage) << 32)
+                            / (static_cast<int64_t>(ssDivider) * 200);
+    int64_t oneMinus = (static_cast<int64_t>(1) << 32) - ssPctFixed;
+    int64_t adj = oneMinus * static_cast<int64_t>(dpRefClkKhz);
+    return static_cast<uint32_t>(adj >> 32);
 }
 
 // ── initClocksState 纯函数 ────────────────────────────────────────────────────
@@ -171,12 +171,12 @@ inline std::uint32_t adjustDpRefFreqForSs(std::uint32_t dpRefClkKhz,
 //   5. zstate_support = DCN_ZSTATE_SUPPORT_UNKNOWN
 //   6. 若 spll_ssc_enabled → dp_dto_source = adjustDpRefFreqForSs(dprefclk)
 //      否则 dp_dto_source = dprefclk
-inline ClkMgrState initClocksState(std::uint32_t /*refDtbclkKhz*/,
+inline ClkMgrState initClocksState(uint32_t /*refDtbclkKhz*/,
                                    bool spllSscEnabled,
-                                   std::uint32_t dprefclkKhz,
-                                   std::uint32_t ssPercentage,
-                                   std::uint32_t ssDivider,
-                                   std::uint32_t* dpDtoSourceClockKhz) {
+                                   uint32_t dprefclkKhz,
+                                   uint32_t ssPercentage,
+                                   uint32_t ssDivider,
+                                   uint32_t* dpDtoSourceClockKhz) {
     // memset -> all zeros (L192)
     ClkMgrState s = {};
     // pwr_state = DCN_PWR_STATE_UNKNOWN (L197)
@@ -241,7 +241,7 @@ inline bool generateUpdateClocks(RegSeq& out, const Mailbox& mb, const ClkMgrSta
                 //   idle_info.idle_info.phy_ref_clk_off = 1;     // bit 1
                 //   idle_info.idle_info.s0i2_rdy = 1;            // bit 2
                 // 三个位域的定义见 dcn314_smu.h L81-86
-                std::uint32_t idleInfo = 0;
+                uint32_t idleInfo = 0;
                 idleInfo |= (1u << 0); // df_request_disabled
                 idleInfo |= (1u << 1); // phy_ref_clk_off
                 idleInfo |= (1u << 2); // s0i2_rdy
@@ -306,7 +306,7 @@ inline bool generateUpdateClocks(RegSeq& out, const Mailbox& mb, const ClkMgrSta
     //   to plus 4K monitor underflow.
     //   注意 Linux **就地改** new_clocks，此处用本地变量复现相同语义。
     // ──────────────────────────────────────────────────────────────────────
-    std::uint32_t clampedDppclkKhz = tgt.dppclkKhz;
+    uint32_t clampedDppclkKhz = tgt.dppclkKhz;
     if (clampedDppclkKhz < 100000)
         clampedDppclkKhz = 100000;
 
@@ -331,7 +331,7 @@ inline bool generateUpdateClocks(RegSeq& out, const Mailbox& mb, const ClkMgrSta
 
     if (shouldSetClock(safeToLower, tgt.dispclkKhz, cur.dispclkKhz) &&
         (tgt.dispclkKhz > 0 || (safeToLower && cst.activeDisplayCount == 0))) {
-        std::uint32_t requestedDispclkKhz = tgt.dispclkKhz;
+        uint32_t requestedDispclkKhz = tgt.dispclkKhz;
 
         // ────────── Linux L301: dcn314_disable_otg_wa(true) ──────────
         // Linux 在下发 dispclk 前调 dcn314_disable_otg_wa(true)，事后调 (false)。

@@ -41,7 +41,7 @@ namespace vbios_smc {
 // 其循环次数依赖真实硬件状态，无法离线预测 → 生成器产出单个 `Poll` op，
 // 由 sink 在运行时执行（见 RegOp.hpp 的说明）。
 inline void generateSendMsgWithParam(RegSeq& seq, RegAddr mailbox67, RegAddr mailbox83, RegAddr mailbox91,
-                                     std::uint32_t msgId, std::uint32_t paramMHz) {
+                                     uint32_t msgId, uint32_t paramMHz) {
     // 1) 等待 SMU 空闲
     seq.push(regPollUntilNot(mailbox91, VBIOSSMC_Status_BUSY, "wait_idle_before"));
 
@@ -62,34 +62,34 @@ inline void generateSendMsgWithParam(RegSeq& seq, RegAddr mailbox67, RegAddr mai
 }
 
 // khz → MHz 向上取整（Linux khz_to_mhz_ceil，clk_mgr_internal.h:578）
-constexpr std::uint32_t khzToMhzCeil(std::uint32_t khz) { return (khz + 999u) / 1000u; }
+constexpr uint32_t khzToMhzCeil(uint32_t khz) { return (khz + 999u) / 1000u; }
 
 // ── 四个改频 wrapper ─────────────────────────────────────────────────────────
 //
 // Linux 对应函数都在末尾调用 send_msg_with_param，参数为 khz_to_mhz_ceil(请求频率)。
 // 四者的**消息号不同、其余序列完全相同**，故共用一个实现。
 
-inline void generateSetDispclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t khz) {
+inline void generateSetDispclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t khz) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetDispclkFreq, khzToMhzCeil(khz));
 }
-inline void generateSetDppclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t khz) {
+inline void generateSetDppclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t khz) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetDppclkFreq, khzToMhzCeil(khz));
 }
-inline void generateSetDprefclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t khz) {
+inline void generateSetDprefclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t khz) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetDprefclkFreq, khzToMhzCeil(khz));
 }
-inline void generateSetHardMinDcfclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t khz) {
+inline void generateSetHardMinDcfclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t khz) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetHardMinDcfclkByFreq, khzToMhzCeil(khz));
 }
-inline void generateSetMinDeepSleepDcfclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t khz) {
+inline void generateSetMinDeepSleepDcfclk(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t khz) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetMinDeepSleepDcfclk, khzToMhzCeil(khz));
 }
-inline void generateSetDisplayCount(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t count) {
+inline void generateSetDisplayCount(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t count) {
     // 注意：Linux 此处 param **不做** khz_to_mhz_ceil（display count 不是频率）
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetDisplayCount, count);
 }
 inline void generateSetDisplayIdleOptimizations(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91,
-                                                std::uint32_t idleInfo) {
+                                                uint32_t idleInfo) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetDisplayIdleOptimizations, idleInfo);
 }
 // ── 新增：Linux dcn314_smu.c 其余 wrapper 的序列生成 ──────────────────────────
@@ -111,16 +111,16 @@ inline void generateSetDisplayIdleOptimizations(RegSeq& seq, RegAddr mb67, RegAd
 //   bit 0: df_request_disabled
 //   bit 1: phy_ref_clk_off
 //   bit 2: s0i2_rdy
-constexpr std::uint32_t IDLE_OPT_DF_REQUEST_DISABLED = 1u << 0;
-constexpr std::uint32_t IDLE_OPT_PHY_REF_CLK_OFF     = 1u << 1;
-constexpr std::uint32_t IDLE_OPT_S0I2_RDY            = 1u << 2;
+constexpr uint32_t IDLE_OPT_DF_REQUEST_DISABLED = 1u << 0;
+constexpr uint32_t IDLE_OPT_PHY_REF_CLK_OFF     = 1u << 1;
+constexpr uint32_t IDLE_OPT_S0I2_RDY            = 1u << 2;
 
 // Linux dcn31_smu.h:217-221 / dcn314_smu.c:326-336 的表 ID 常量
-constexpr std::uint32_t TABLE_DPMCLOCKS  = 4;
-constexpr std::uint32_t TABLE_WATERMARKS = 1;
+constexpr uint32_t TABLE_DPMCLOCKS  = 4;
+constexpr uint32_t TABLE_WATERMARKS = 1;
 
 // Linux dc.h:736-743 的 zstate 支持枚举值（dcn314_smu.c:346-377 逐 case 对应）
-enum ZStateSupport : std::uint32_t {
+enum ZStateSupport : uint32_t {
     ZSTATE_UNKNOWN             = 0,  // DCN_ZSTATE_SUPPORT_UNKNOWN
     ZSTATE_ALLOW               = 1,  // DCN_ZSTATE_SUPPORT_ALLOW
     ZSTATE_ALLOW_Z8_ONLY       = 2,  // DCN_ZSTATE_SUPPORT_ALLOW_Z8_ONLY
@@ -137,7 +137,7 @@ inline void generateGetSmuVersion(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAd
 
 // TestMessage：msg 0x1, param 透传
 // Linux: VBIOSSMC_MSG_TestMessage (L64)
-inline void generateTestMessage(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t param) {
+inline void generateTestMessage(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t param) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_TestMessage, param);
 }
 
@@ -152,7 +152,7 @@ inline void generatePowerUpGfx(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr 
 //   enable=true  → idle_info = {df_request_disabled=1, phy_ref_clk_off=1, s0i2_rdy=0} = 0x3
 //   enable=false → idle_info = 0
 inline void generateEnablePhyRefclkPwrdwn(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, bool enable) {
-    std::uint32_t idleInfo = enable ? (IDLE_OPT_DF_REQUEST_DISABLED | IDLE_OPT_PHY_REF_CLK_OFF) : 0;
+    uint32_t idleInfo = enable ? (IDLE_OPT_DF_REQUEST_DISABLED | IDLE_OPT_PHY_REF_CLK_OFF) : 0;
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_EnableTmdp48MHzRefclkPwrDown, idleInfo);
 }
 
@@ -164,13 +164,13 @@ inline void generateEnablePmeWa(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr
 
 // set_vbios_dram_addr_high：msg 0xE, param = addrHigh（原始地址高位，不换算）
 // Linux: dcn314_smu_set_dram_addr_high (L303-310)
-inline void generateSetVbiosDramAddrHigh(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t addrHigh) {
+inline void generateSetVbiosDramAddrHigh(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t addrHigh) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetVbiosDramAddrHigh, addrHigh);
 }
 
 // set_vbios_dram_addr_low：msg 0xF, param = addrLow（原始地址低位，不换算）
 // Linux: dcn314_smu_set_dram_addr_low (L312-319)
-inline void generateSetVbiosDramAddrLow(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t addrLow) {
+inline void generateSetVbiosDramAddrLow(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t addrLow) {
     generateSendMsgWithParam(seq, mb67, mb83, mb91, VBIOSSMC_MSG_SetVbiosDramAddrLow, addrLow);
 }
 
@@ -196,8 +196,8 @@ inline void generateTransferWmTableDram2Smu(RegSeq& seq, RegAddr mb67, RegAddr m
 //     ALLOW_Z8_Z10_ONLY   → 0x500 (bits 8,10)
 //     ALLOW_Z8_ONLY       → 0x100 (bit 8)
 //     UNKNOWN (default)   → 0x0
-inline void generateSetZstateSupport(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, std::uint32_t support) {
-    std::uint32_t param = 0;
+inline void generateSetZstateSupport(RegSeq& seq, RegAddr mb67, RegAddr mb83, RegAddr mb91, uint32_t support) {
+    uint32_t param = 0;
     switch (support) {
     case ZSTATE_ALLOW:
         param = (1u << 10) | (1u << 9) | (1u << 8);  // 0x700
