@@ -335,6 +335,9 @@ bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* cons
         applyInitialDisplayClocks();
     }
 
+    return true;
+}
+
 // setCurrentDisplayOffset 覆写（macOS ≤ 10.14 同步提交路径）：基类写地址并等待 isFlipPending
 // 完成（HW 已取走 flip）之后补 resync_fifo_dccg_dio_direct（DENTIST WDIVIDER = RDIVIDER）。
 // 守卫: sResyncFifoApplied 保证只执行一次（模式变更应用后，勿随每帧 flip 重复）。
