@@ -17,6 +17,17 @@
 #pragma once
 #include <IOKit/IOTypes.h>
 
+// ===== DCN 段基址（Linux `include/yellow_carp_offset.h:385-390` 的 `DCN_BASE__INST0_SEGn`）=====
+// ⚠️ **同一个 IP 的寄存器分布在多个段里**：只记偏移而不带对段基址，会静默算到别的地址上。
+//    本项目就吃过这个亏——`MPC_OUT0_MUX`（BASE_IDX=3）曾被写成 `DCN_BASE_2 + 0x580` = 0x3A40，
+//    而真值序列（Linux 实测）里该地址**零事件**，正确的 0x9580 有 70 个读改写事件。
+//    故凡使用本文件的寄存器偏移，**必须同时确认它的 BASE_IDX**（各常量处已逐条注明）。
+constexpr UInt32 DCN_SEG0_BASE = 0x00000012;
+constexpr UInt32 DCN_SEG1_BASE = 0x000000C0;
+constexpr UInt32 DCN_SEG2_BASE = 0x000034C0;  // 与 `DCN_BASE_2` 同值（HUBP/OTG/OPTC/DP 流编码器在此段）
+constexpr UInt32 DCN_SEG3_BASE = 0x00009000;  // MPC_OUTn_MUX 在此段
+constexpr UInt32 DCN_SEG4_BASE = 0x02403C00;
+
 // ===== HUBP（与 DCN2 100% 一致，已审查确认）=====
 constexpr UInt32 HUBP_REG_STRIDE                      = 0xDC;
 constexpr UInt32 HUBPRET_CONTROL                      = 0x66C;
@@ -55,7 +66,7 @@ constexpr UInt32 MPCC_REG_STRIDE      = 0x20;
 constexpr UInt32 MPCC_TOP_SEL         = 0x0000; // MPCC0
 constexpr UInt32 MPCC_UPDATE_LOCK_SEL = 0x0005; // MPCC0（无 MPCC_UPDATE_CTRL，锁存走此）
 constexpr UInt32 MPC_OUT_MUX_STRIDE   = 0x4;
-constexpr UInt32 MPC_OUT0_MUX         = 0x0580; // MPC_OUT0（修正：原错写 0x0）
+constexpr UInt32 MPC_OUT0_MUX         = 0x0580; // MPC_OUT0（**BASE_IDX=3** → 绝对地址 = DCN_SEG3_BASE + 本偏移 = 0x9580）
 
 // ===== DCCG 时钟控制（不叫 DCCG_ 前缀，BASE_IDX=1，已审查确认）=====
 constexpr UInt32 DISPCLK_FREQ_CHANGE_CNTL   = 0x0071;

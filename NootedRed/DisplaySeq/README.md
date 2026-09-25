@@ -47,9 +47,11 @@
 | `VbiosSmcSeq.hpp` | **VBIOSSMC 消息序列生成器**（覆盖 `dcn314_smu.c` 全部 wrapper，第五步） | ❌ 否 |
 | `Dcn314ClkMgrSeq.hpp` | **时钟主流程纯逻辑**：`update_clocks` 状态机与顺序、`init_clocks`、SS 查表（第五步） | ❌ 否 |
 | `Dcn314ClkMgr.hpp` | **时钟管理器**：持有"已下发状态"、编排生成与执行（第五步） | ❌ 否 |
+| `Dcn314OdmSeq.hpp` | **ODM 配置序列生成器**：bypass/combine 拓扑 + out-rate-control（第六步） | ❌ 否 |
 | `tests/test_regop_seq.cpp` | 离线单元测试：架构三判据（13 项断言） | ❌ 否 |
 | `tests/test_vbiossmc_seq.cpp` | 离线单元测试：消息 wrapper（11 项断言） | ❌ 否 |
 | `tests/test_clkmgr_seq.cpp` | 离线单元测试：时钟主流程（12 项断言） | ❌ 否 |
+| `tests/test_dcn314_odm_seq.cpp` | 离线单元测试：ODM 拓扑与内存掩码（4 组断言） | ❌ 否 |
 | `Makefile` | 离线构建入口（**自动发现 `tests/*.cpp`**，新增测试无需改本文件） | —— |
 
 ---

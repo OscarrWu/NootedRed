@@ -29,12 +29,19 @@ using RegValue = uint32_t;
 // （Linux dcn314_smu_wait_for_response）。轮询结果依赖真实硬件，无法离线预测，
 // 因此**不能**由生成器展开成死循环——必须作为一个 op 交给 sink 执行。
 // 这样生成器保持纯函数，运行时行为由 sink 负责。
+// 第五种 op 为 Update（读-改-写）：Linux 的显示寄存器绝大多数用 `REG_UPDATE(reg, field, val)`
+// 写入（= 读回、按掩码替换字段、再写回），故"逐位相同"的翻译必须有这一种 op。
+// 把它作为一等 op（而不是让生成器产出"读+写"，写值留待运行时算）的理由：
+//   · 生成器保持纯逻辑（不知道读回值，也不需要知道）；
+//   · sink 执行时天然产生"一次读 + 一次写"两条记录 —— **与真值记录的形态一致**，可直接比对；
+//   · 若拆成两个独立 op，写值就必须由调用方在两者之间计算，等于把逻辑挪出生成器。
 struct RegOp {
     enum class Kind : uint8_t {
-        Write = 0,  // sink 将 value 写入 addr
-        Read  = 1,  // sink 读取 addr（值记录到 sink，不参与生成）
-        Poll  = 2,  // sink 轮询 addr，直到 (值 & mask) != 0（读到非忙值），或超时
-        Delay = 3,  // sink 等待 value 微秒
+        Write = 0,   // sink 将 value 写入 addr
+        Read  = 1,   // sink 读取 addr（值记录到 sink，不参与生成）
+        Poll  = 2,   // sink 轮询 addr，直到 (值 & mask) != 0（读到非忙值），或超时
+        Delay = 3,   // sink 等待 value 微秒
+        Update = 4,  // sink 读 addr，按 (v & ~mask) | ((value << shift) & mask) 写回
     };
 
     Kind    kind{Kind::Write};
@@ -46,7 +53,12 @@ struct RegOp {
     // 取 mask = ~busy 后，"读到非忙值"等价于 (读值 & ~busy) != 0。
     // 当 busy = 0（VBIOSSMC_Status_BUSY）时 mask = 0xFFFFFFFF，
     // 判据退化为"读值 != 0"——与 Linux 完全一致。
+    //
+    // Update 专用：字段掩码（已移位后的掩码，与 Linux 的 `_MASK` 宏一致）。
     RegValue mask{0};
+
+    // Update 专用：字段左移位数（与 Linux 的 `_SHIFT` 宏一致）。
+    uint8_t shift{0};
 
     // 溯源标签：指向产该 op 的生成器步骤名（静态字符串，不持有所有权）。
     // 差分器据此定位"第一个分叉"落在哪一步，无需反查地址表。
@@ -55,19 +67,24 @@ struct RegOp {
 
 // 带标签构造器
 constexpr RegOp regWrite(RegAddr addr, RegValue value, const char* step = nullptr) {
-    return RegOp{RegOp::Kind::Write, addr, value, 0, step};
+    return RegOp{RegOp::Kind::Write, addr, value, 0, 0, step};
 }
 constexpr RegOp regRead(RegAddr addr, const char* step = nullptr) {
-    return RegOp{RegOp::Kind::Read, addr, 0, 0, step};
+    return RegOp{RegOp::Kind::Read, addr, 0, 0, 0, step};
 }
 // 轮询直到读值不再等于 busyValue。
 // mask 取 ~busyValue：若 busyValue 为全 0（VBIOSSMC BUSY=0x0），则 mask=0xFFFFFFFF，
 // 判据退化为"读值 != 0"——与 Linux `while (val == BUSY)` 完全一致。
 constexpr RegOp regPollUntilNot(RegAddr addr, RegValue busyValue, const char* step = nullptr) {
-    return RegOp{RegOp::Kind::Poll, addr, 0, static_cast<RegValue>(~busyValue), step};
+    return RegOp{RegOp::Kind::Poll, addr, 0, static_cast<RegValue>(~busyValue), 0, step};
 }
 constexpr RegOp regDelay(uint32_t microseconds, const char* step = nullptr) {
-    return RegOp{RegOp::Kind::Delay, 0, microseconds, 0, step};
+    return RegOp{RegOp::Kind::Delay, 0, microseconds, 0, 0, step};
+}
+// Linux `REG_UPDATE(reg, field, val)` 的等价 op：读-改-写。
+// mask / shift 与 Linux 的 `reg__field_MASK` / `__SHIFT` 一一对应。
+constexpr RegOp regUpdate(RegAddr addr, RegValue mask, uint8_t shift, RegValue value, const char* step = nullptr) {
+    return RegOp{RegOp::Kind::Update, addr, value, mask, shift, step};
 }
 
 // 有序的寄存器操作序列 —— 由调用方提供的固定容量缓冲区承载。

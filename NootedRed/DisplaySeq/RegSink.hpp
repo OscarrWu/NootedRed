@@ -39,6 +39,15 @@ public:
         case RegOp::Kind::Read:
             lastValue_ = read(op.addr);
             return true;
+        case RegOp::Kind::Update: {
+            // Linux `REG_UPDATE(reg, field, val)` 的等价执行：
+            //   v = (v & ~mask) | ((value << shift) & mask)
+            // 注意会产生**一次读 + 一次写**两条硬件访问 —— 与真值记录的形态一致。
+            const RegValue cur = read(op.addr);
+            lastValue_        = (cur & ~op.mask) | ((op.value << op.shift) & op.mask);
+            write(op.addr, lastValue_);
+            return true;
+        }
         case RegOp::Kind::Delay:
             delayMicroseconds(op.value);
             return true;

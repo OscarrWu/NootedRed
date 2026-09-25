@@ -17,6 +17,7 @@
 #include <DisplaySeq/Dcn314ClkMgr.hpp>
 #include <GPUDriversAMD/CAIL/HWBlock.hpp>
 #include <IOKit/IOLib.h>
+#include <DisplaySeq/Dcn314OdmSeq.hpp>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSMetaClass.h>
 
@@ -363,7 +364,8 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::setCurrentDisplayOffset(AMDRadeonX5000
 //   所有 mask/shift/偏移均来自已审查文档与 DCN314.hpp，未推测。
 // =============================================================================
 
-// 寄存器位操作 helper（展平 REG_SET / REG_UPDATE / REG_GET）
+// 寄存器位操作 helper（展平 REG_SET / REG_UPDATE / REG_GET）——仅供 resync_fifo 使用。
+// （ODM 路径已改为"生成器 + sink"，见下方 update_odm_direct。）
 static inline void dcn314RegSet(AMDRadeonX5000_AMDHWRegisters& regs, UInt32 addr,
                                 UInt32 mask, UInt32 shift, UInt32 val)
 {
@@ -372,32 +374,25 @@ static inline void dcn314RegSet(AMDRadeonX5000_AMDHWRegisters& regs, UInt32 addr
     regs.write(addr, v);
 }
 
-// DCN314.hpp sh_mask 未含的位域常量（值取自设计文档，未推测）
-static constexpr UInt32 OPTC_SEGMENT_WIDTH_MASK               = 0x00001FFFUL;
-static constexpr UInt32 MPC_OUT_RATE_CONTROL_DISABLE_MASK     = 0x00000100UL;
-static constexpr UInt32 MPC_OUT_RATE_CONTROL_DISABLE_SHIFT    = 8;
-static constexpr UInt32 MPC_OUT_RATE_CONTROL_MASK             = 0x00000200UL;
-static constexpr UInt32 MPC_OUT_RATE_CONTROL_SHIFT            = 9;
-
-// compute_odm_memory_mask: 直译 dcn314_optc.c:60-70
-//   h_active = slice_width * opp_cnt；每 2048 像素一个内存实例
-static UInt32 compute_odm_memory_mask(const UInt32 opp_inst[], UInt32 opp_cnt, UInt32 slice_width)
+// DCN 段的寄存器通道：把 RegOp 的读写落到 display 对象的寄存器访问器（`AMDHWRegisters::read/write`，
+// 地址语义 = **绝对 dword 索引**，与 Linux 真值记录同一坐标系）上。
+//   为什么单独建通道：ODM 的寄存器在 SEG2/SEG3（不是时钟用的 MP1 段），需要另一条 MMIO 通路；
+//   但消费者仍是第五步那个 `InjectedRegSink`（路线图 §3.2：同一份消费者代码，三处共用）。
+static void makeDcnChannel(AMDRadeonX5000_AMDHWRegisters& regs, display::RegChannel* const out)
 {
-    const UInt32 h_active      = slice_width * opp_cnt;
-    const UInt32 odm_mem_count = (h_active + 2047) / 2048;
-
-    if (opp_cnt == 4) {
-        if (odm_mem_count <= 1) { return 0x3; }
-        if (odm_mem_count <= 2) { return 0xf; }
-        return 0x3f;
-    }
-    // opp_cnt == 2：每 OPP 占 2 个内存实例（起始 = opp_id*2）
-    UInt32 mask = 0;
-    for (UInt32 i = 0; i < opp_cnt; ++i) {
-        const UInt32 base = opp_inst[i] * 2;
-        for (UInt32 m = 0; m < odm_mem_count; ++m) { mask |= (1u << (base + m)); }
-    }
-    return mask;
+    display::RegChannel ch{};
+    ch.ctx           = &regs;
+    ch.blockInstance = 0;
+    ch.block         = 0;
+    ch.regOffBase    = 0;
+    ch.read  = [](void* c, UInt32 off, UInt32, UInt32, UInt32) -> UInt32 {
+        return static_cast<AMDRadeonX5000_AMDHWRegisters*>(c)->read(off);
+    };
+    ch.write = [](void* c, UInt32 off, UInt32 val, UInt32, UInt32, UInt32) -> void {
+        static_cast<AMDRadeonX5000_AMDHWRegisters*>(c)->write(off, val);
+    };
+    ch.delay = nullptr;  // ODM 序列无延时/轮询
+    *out     = ch;
 }
 
 void AMDRadeonX5000_AMDGFX9DCN314Display::update_odm_direct(AMDRadeonX5000_AMDHWRegisters& regs,
@@ -406,48 +401,42 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::update_odm_direct(AMDRadeonX5000_AMDHW
                                                             UInt32                          opp_cnt,
                                                             UInt32                          slice_width)
 {
-    const UInt32 dss  = DCN_BASE_2 + OPTC_DATA_SOURCE_SELECT + ODM_REG_STRIDE * otg_inst; // DATA_SOURCE_SELECT
-    const UInt32 wctl = DCN_BASE_2 + OPTC_WIDTH_CONTROL      + ODM_REG_STRIDE * otg_inst; // WIDTH_CONTROL
-    const UInt32 mcfg = DCN_BASE_2 + OPTC_MEMORY_CONFIG      + ODM_REG_STRIDE * otg_inst; // MEMORY_CONFIG
-    const UInt32 htc  = DCN_BASE_2 + OTG_H_TIMING_CNTL       + OTG_REG_STRIDE * otg_inst; // OTG_H_TIMING_CNTL
+    // ⚠️ 这里**不再**逐寄存器直写：序列由 `DisplaySeq/Dcn314OdmSeq.hpp` 生成，
+    //    与用户态的离线影子运行共用同一份代码（路线图 §3.2「禁止第二份手写实现」）。
+    //    生成器逐行对照 Linux `dcn314_optc.c` / `dcn30_mpc.c`，并区分 REG_SET（不读直写）
+    //    与 REG_UPDATE（读-改-写）两种硬件形态——真值序列印证了这两种形态。
+    static constexpr size_t kMaxOdmOps = 16;
+    display::RegOp          buf[kMaxOdmOps]{};
+    display::RegSeq         seq(buf, kMaxOdmOps);
 
-    if (opp_cnt <= 1) {
-        // ---- set_odm_bypass 直译 ----
-        dcn314RegSet(regs, dss, OPTC_NUM_OF_INPUT_SEGMENT_MASK, OPTC_NUM_OF_INPUT_SEGMENT_SHIFT, 0);
-        dcn314RegSet(regs, dss, OPTC_SEG0_SRC_SEL_MASK, OPTC_SEG0_SRC_SEL_SHIFT, otg_inst);
-        dcn314RegSet(regs, dss, OPTC_SEG1_SRC_SEL_MASK, OPTC_SEG1_SRC_SEL_SHIFT, 0xF);
-        dcn314RegSet(regs, dss, OPTC_SEG2_SRC_SEL_MASK, OPTC_SEG2_SRC_SEL_SHIFT, 0xF);
-        dcn314RegSet(regs, dss, OPTC_SEG3_SRC_SEL_MASK, OPTC_SEG3_SRC_SEL_SHIFT, 0xF);
-        dcn314RegSet(regs, htc, OTG_H_TIMING_DIV_MODE_MASK, OTG_H_TIMING_DIV_MODE_SHIFT, 0); // bypass: NO_DIV
-        dcn314RegSet(regs, mcfg, OPTC_MEMORY_CONFIG_OPTC_MEM_SEL_MASK, OPTC_MEMORY_CONFIG_OPTC_MEM_SEL_SHIFT, 0);
-    } else {
-        // ---- set_odm_combine 直译 ----
-        const UInt32 memory_mask = compute_odm_memory_mask(opp_inst, opp_cnt, slice_width);
-        dcn314RegSet(regs, mcfg, OPTC_MEMORY_CONFIG_OPTC_MEM_SEL_MASK, OPTC_MEMORY_CONFIG_OPTC_MEM_SEL_SHIFT, memory_mask);
-        dcn314RegSet(regs, dss, OPTC_NUM_OF_INPUT_SEGMENT_MASK, OPTC_NUM_OF_INPUT_SEGMENT_SHIFT,
-                     (opp_cnt == 4) ? 3 : 1);
-        dcn314RegSet(regs, dss, OPTC_SEG0_SRC_SEL_MASK, OPTC_SEG0_SRC_SEL_SHIFT, opp_inst[0]);
-        dcn314RegSet(regs, dss, OPTC_SEG1_SRC_SEL_MASK, OPTC_SEG1_SRC_SEL_SHIFT, opp_inst[1]);
-        if (opp_cnt == 4) {
-            dcn314RegSet(regs, dss, OPTC_SEG2_SRC_SEL_MASK, OPTC_SEG2_SRC_SEL_SHIFT, opp_inst[2]);
-            dcn314RegSet(regs, dss, OPTC_SEG3_SRC_SEL_MASK, OPTC_SEG3_SRC_SEL_SHIFT, opp_inst[3]);
-        }
-        dcn314RegSet(regs, wctl, OPTC_SEGMENT_WIDTH_MASK,
-                     OPTC_WIDTH_CONTROL_OPTC_SEGMENT_WIDTH_SHIFT, slice_width);
-        dcn314RegSet(regs, htc, OTG_H_TIMING_DIV_MODE_MASK, OTG_H_TIMING_DIV_MODE_SHIFT, opp_cnt - 1);
+    // twoPixelsPerContainer：Linux `optc->funcs->is_two_pixels_per_container(dc_crtc_timing)`
+    // （dcn314_optc.c:173）。本驱动没有 timing 对象；点亮阶段按"每容器 1 像素"处理（= NO_DIV）。
+    // 判据：真值里 `OTG_H_TIMING_DIV_MODE` 字段读=写（字段值 0），即 Linux 那次也用了 NO_DIV。
+    display::dcn314_odm::generateUpdateOdmFull(seq, DCN_SEG2_BASE, DCN_SEG3_BASE, otg_inst, opp_inst, opp_cnt,
+                                               slice_width, /*twoPixelsPerContainer=*/false);
+    if (seq.overflowed()) {
+        SYSLOG("GFX9DCN314Display", "update_odm_direct: 序列溢出（capacity=%zu）", kMaxOdmOps);
+        return;
     }
 
-    // ---- set_out_rate_control 直译 (DCN30+ 空操作：DISABLE=1 / RATE_CONTROL=0) ----
-    for (UInt32 i = 0; i < opp_cnt; ++i) {
-        const UInt32 mux = DCN_BASE_2 + MPC_OUT0_MUX + MPC_OUT_MUX_STRIDE * opp_inst[i];
-        dcn314RegSet(regs, mux, MPC_OUT_RATE_CONTROL_DISABLE_MASK, MPC_OUT_RATE_CONTROL_DISABLE_SHIFT, 1);
-        dcn314RegSet(regs, mux, MPC_OUT_RATE_CONTROL_MASK, MPC_OUT_RATE_CONTROL_SHIFT, 0);
+    display::RegChannel ch{};
+    makeDcnChannel(regs, &ch);
+    display::InjectedRegSink sink(ch);
+    const size_t             done = sink.executeAll(seq);
+    if (done != seq.size()) {
+        SYSLOG("GFX9DCN314Display", "update_odm_direct: 序列执行中断（done=%zu/%zu，otg=%u）", done, seq.size(),
+               otg_inst);
+        return;
     }
+    DBGLOG("GFX9DCN314Display", "update_odm_direct: 下发 %zu 个寄存器操作（otg=%u opp_cnt=%u）", seq.size(),
+           otg_inst, opp_cnt);
 }
 
 void AMDRadeonX5000_AMDGFX9DCN314Display::resync_fifo_dccg_dio_direct(AMDRadeonX5000_AMDHWRegisters& regs)
 {
-    const UInt32 addr = DCN_BASE_2 + DENTIST_DISPCLK_CNTL; // 0x34C0 + 0x64
+    // ⚠️ DENTIST_DISPCLK_CNTL 的 BASE_IDX = 1（不是 2）→ 必须用 SEG1 基址（0xC0 + 0x64 = 0x124）。
+    //    真值证据：0x124 有 3 个事件（含一次 0x7f1000 → 0x7f1010 的读改写），而 0x3524 零事件。
+    const UInt32 addr = DCN_SEG1_BASE + DENTIST_DISPCLK_CNTL;
 
     // REG_GET(DENTIST_DISPCLK_CNTL, DENTIST_DISPCLK_RDIVIDER, &v)
     const UInt32 rdiv = (regs.read(addr) & DENTIST_DISPCLK_RDIVIDER_MASK) >> DENTIST_DISPCLK_RDIVIDER_SHIFT;
