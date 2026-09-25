@@ -563,6 +563,15 @@ bool X5000::fixedGetDisplayInfo(AMDRadeonX5000_AMDHWDisplay* const self, const U
 
     fbInfo->isMapped = aperture != nullptr && vram != nullptr;
 
+    // §简化项 15：捕获 Apple 自己认定的 **VRAM 基址**，供 NRed 计算 fbOffset 用。
+    // 为什么在这里：这是 NRed 已有的钩子里最早能拿到 `IOFramebuffer` 的地方，而 `getVRAMRange()`
+    //   给出的正是"VRAM 的地址范围"——与消费方（Apple 的 wrapAdjustVRAMAddress 换算）天然同源。
+    //   替代了此前两版被证伪的做法（读 BAR0 / 读 MMHUB 寄存器，理由见 NRed.cpp 的 hwLateInit）。
+    if (vram != nullptr) {
+        const auto vramBase = static_cast<UInt64>(vram->getPhysicalSegment(0, nullptr));
+        if (vramBase != 0) { NRed::singleton().setFbLocationBase(vramBase); }
+    }
+
     [[clang::suppress]] OSSafeReleaseNULL(aperture);
     [[clang::suppress]] OSSafeReleaseNULL(vram);
 

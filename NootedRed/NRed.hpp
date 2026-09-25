@@ -48,6 +48,9 @@ class NRed
     UInt16           devRevision{0};       // TODO: Remove!
     UInt16           enumRevision{0};      // TODO: Remove!
     UInt64           fbOffset{0};          // TODO: Remove!
+    // §简化项 15：Apple 侧认定的 VRAM 基址（`IOFramebuffer::getVRAMRange()` 的地址）。
+    // 由 X5000::fixedGetDisplayInfo 捕获；与 fbOffset 的消费方（Apple 的地址换算）天然同源。
+    UInt64           fbLocationBase{0};
 
 public:
     static NRed& singleton();
@@ -58,6 +61,8 @@ public:
     auto  getDevRevision() const { return devRevision; }        // TODO: Remove!
     auto  getEnumRevision() const { return enumRevision; }      // TODO: Remove!
     auto  getFbOffset() const { return fbOffset; }              // TODO: Remove!
+    auto  getFbLocationBase() const { return this->fbLocationBase; }     // §简化项 15
+    void  setFbLocationBase(const UInt64 v) { this->fbLocationBase = v; }    // §简化项 15
     IOPCIDevice* getIGPU() const { return this->iGPU; }         // §16.52: HWLibs 需映射 BAR0 写驱动表
 
     void init();

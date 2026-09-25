@@ -92,60 +92,26 @@ void NRed::hwLateInit()
     PANIC_COND(this->rmmio == nullptr || this->rmmio->getLength() == 0, "NRed", "Failed to map RMMIO");
     this->rmmioPtr = reinterpret_cast<volatile UInt32*>(this->rmmio->getVirtualAddress());
 
-    // fbOffset（GPU FB aperture 基准）——Phoenix (mmhub 3.0.2) 的寄存器在 MMHUB SMN 段：
-    // base 0x68000 + regMMMC_VM_FB_OFFSET(0x0857)（Linux mmhub_3_0_2_offset.h 头注释 + L1356）。
-    // ⛔ 旧读法 GC_BASE_0+0x96B 是错的（读回 0，CONFIRMED §16.18）。
-    // Raven/老 asic 仍走 GC_BASE_0 + 0x96B（兼容原逻辑）。
+    // ── fbOffset：VRAM 基址（消费方要的是"VRAM 起始"，不是"某个映射窗口地址"）
+    //    —— 见 ROADMAP §5.4「简化项 15」及其详述 ──
+    // ⛔ 两版旧读法都已被证伪，均已移除：
+    //   ① 读 BAR0（PCI config 0x10/0x14）：BAR 是 **OS 枚举时分配的映射窗口**，随 OS 而变
+    //      （Manjaro 0x8000000000 / macOS 0x8D0000000），**不是** VRAM 基址。
+    //   ② 读 MMHUB 的 MC_VM_FB_OFFSET：其绝对地址取决于 **IP discovery 上报的 MMHUB 基址**
+    //      （amdgpu_discovery.c：reg_offset[hw_ip][inst] = ip->base_address），**不是**静态表里的 0x13200；
+    //      由静态表推导出的四个候选地址，在 macOS（第 25 次真机 panic 日志的 FB c0..c3）与 Manjaro
+    //      （只读实测）**两侧都读回 0xFFFFFFFF** ⇒ 那条路走不通。
+    // ✅ 现做法：**向 Apple 要** —— `IOFramebuffer::getVRAMRange()` 就是 Apple 自己对 VRAM 范围的认定，
+    //    与消费方（Apple 自己的地址换算 wrapAdjustVRAMAddress）**天然同源**；
+    //    由 X5000::fixedGetDisplayInfo 捕获（该钩子本就在用它，此前只当布尔用）。
+    //    Fallback：固件分配的 UMA carve-out 基址 —— **与 OS 无关**（Manjaro dmesg 实测
+    //    `VRAM: 4096M 0x8000000000-0x80FFFFFFFF` 与之吻合）。见 ROADMAP §5.4「简化项 16」。
     if (this->attributes.isPhoenix()) {
-        // ✅ 正确地址（§16.47 + ROADMAP 当前状态）：
-        //   MMHUB_BASE.segment[0] = 0x00013200（yellow_carp_offset.h:103，Phoenix/Yellow Carp）
-        //   regMMMC_VM_FB_OFFSET  = 0x0857（mmhub_3_0_2_offset.h:1356，BASE_IDX=0）
-        //   → 最终 dword 索引 = 0x13200 + 0x0857 = 0x13A57
-        // ⛔ 旧读法 0x68000+0x0857 是错的：0x68000 是头文件里另一个 addressBlock
-        //   （mmhub_dagbdec）的 base，不适用于本寄存器所在块 → 读回 ffffffff（第 16 次真机实证）
-        // ✅ 换途径（§16.48 猜地址终结）：Linux 在 gmc_v11_0.c:697 用的是
-        //   adev->gmc.aper_base = pci_resource_start(pdev, 0) —— 即 **PCI BAR0**，
-        //   根本不读 MMHUB 寄存器（我们四个候选地址全 ffffffff，证明那条路走不通）。
-        //   NRed 只映射了 BAR5，这里补读 BAR0（物理地址）作为 fbOffset 来源。
-        // ═══ §16.98 修复（2026-09-11 23:25）：BAR0 物理地址必须用 PCI config 读 ═══
-        //   问题：原用 bar0->getPhysicalAddress() 得到 0x8D0000000，
-        //        但真实 VRAM 物理基址 = 0x8000000000（Manjaro dmesg + resource 实测）
-        //        → 驱动表地址 fbOff+0x1000 超出 VRAM 窗口 → SetDriverDramAddrHigh 被拒(resp=0)
-        //   正确方法（mac-amdgpu MacAMDGPU.cpp:574/589-591 参考实现）：
-        //        pci->ConfigurationRead32(0x10, &bar0_lo);   // BAR0 低 32 位
-        //        pci->ConfigurationRead32(0x14, &bar0_hi);   // BAR0 高 32 位（64-bit BAR）
-        //        phys = ((uint64)bar0_hi << 32) | (bar0_lo & 0xFFFFFFF0);  // 屏蔽 [3:0] 标志位
-        //   实测验证（Manjaro 读 config）：lo=0x0000000C hi=0x00000080
-        //        → 0x8000000000 ✅ 与 Linux pci_resource_start(pdev,0) 一致
-        UInt64 bar0Phys = 0;
-        {
-            UInt32 bar0Lo = 0, bar0Hi = 0;
-            // IOPCIDevice 的 config 读取（IOKit: configRead32 为 IOPCIDevice 方法）
-            bar0Lo = this->iGPU->configRead32(kIOPCIConfigBaseAddress0);
-            bar0Hi = this->iGPU->configRead32(kIOPCIConfigBaseAddress0 + 4);
-            if ((bar0Lo & 0xFFFFFFF0) != 0) {
-                bar0Phys = (static_cast<UInt64>(bar0Hi) << 32) | (bar0Lo & 0xFFFFFFF0);
-            }
-        }
-        if (bar0Phys == 0) {
-            // 回退：旧途径（IOMemoryMap::getPhysicalAddress，已知在某些系统给错值）
-            IOMemoryMap *bar0 = this->iGPU->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0,
-                                                                        kIOMapInhibitCache | kIOMapAnywhere);
-            if (bar0 != nullptr) {
-                bar0Phys = bar0->getPhysicalAddress();
-                bar0->release();
-            }
-        }
-        if (bar0Phys != 0) {
-            this->fbOffset = bar0Phys;      // BAR0 已是完整物理地址，不再 <<24
-        }
-        else {
-            // 回退：MMHUB 寄存器（已知读不到，仅保留对照，值为全F时 fbOffset 为垃圾）
-            constexpr UInt32 kMmhubBase   = 0x13200;
-            constexpr UInt32 kFbOffOffset = 0x0857;
-            const UInt32 raw = this->readReg32(kMmhubBase + kFbOffOffset);
-            this->fbOffset = static_cast<UInt64>(raw & 0xFFFFFF) << 24;
-        }
+        constexpr UInt64 kFirmwareCarveOutBase = 0x8000000000ULL;    // §简化项 16
+        this->fbOffset = this->fbLocationBase != 0 ? this->fbLocationBase : kFirmwareCarveOutBase;
+        DBGLOG("NRed", "fbOffset 来源=%s value=0x%llX",
+               this->fbLocationBase != 0 ? "Apple getVRAMRange" : "固件 carve-out fallback(简化项16)",
+               this->fbOffset);
     }
     else {
         this->fbOffset = static_cast<UInt64>(this->readReg32(GC_BASE_0 + MC_VM_FB_OFFSET) & 0xFFFFFF) << 24;
