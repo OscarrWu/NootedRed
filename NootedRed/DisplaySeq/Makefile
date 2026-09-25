@@ -18,7 +18,8 @@ SEQDIR    = $(ROOT)NootedRed/DisplaySeq
 INCLUDES  = -I$(SEQDIR)
 BUILDDIR  = build/display-tests
 
-TESTS = $(BUILDDIR)/test_regop_seq
+# 自动发现 tests/*.cpp —— 新增测试文件无需改本 Makefile
+TESTS = $(patsubst $(SEQDIR)/tests/%.cpp,$(BUILDDIR)/%,$(wildcard $(SEQDIR)/tests/*.cpp))
 
 .PHONY: test clean
 

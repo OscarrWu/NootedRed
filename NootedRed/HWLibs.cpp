@@ -1246,6 +1246,28 @@ CAILResult X5000HWLibs::smu13FullAsicReset(void* const ctx, void* data)
 // VBIOSSMC: kHz → MHz (向上取整，对齐 Linux khz_to_mhz_ceil)
 static inline UInt32 khzToMhzCeil(UInt32 khz) { return (khz + 999U) / 1000U; }
 
+// ── 供 DCN314 时钟主流程内核态消费者使用的寄存器通道（第五步）─────────────────
+// 语义约定：通道不可用（上下文为空 / cgs 指针未 resolve）时——读返回 0、写丢弃。
+// 消费方靠"轮询超时或读值不匹配"识别失败；此为**静默退化**，调用方须在
+// 调用前检查 smuContext()[见 AMDGFX9DCN314Display 的 applyDisplayClocks]。
+void* X5000HWLibs::smuContext() { return singleton().smuCtxCache; }
+
+UInt32 X5000HWLibs::cgsReadReg(void* const ctx, const UInt32 off, const UInt32 blockInstance, const CAILHWBlock block,
+                               const UInt32 regOffBase)
+{
+    auto& hw = singleton();
+    if (ctx == nullptr || hw.smuCgsReadRegister == nullptr) { return 0; }
+    return hw.smuCgsReadRegister(ctx, off, blockInstance, block, regOffBase);
+}
+
+void X5000HWLibs::cgsWriteReg(void* const ctx, const UInt32 off, const UInt32 val, const UInt32 blockInstance,
+                              const CAILHWBlock block, const UInt32 regOffBase)
+{
+    auto& hw = singleton();
+    if (ctx == nullptr || hw.smuCgsWriteRegister == nullptr) { return; }
+    hw.smuCgsWriteRegister(ctx, off, blockInstance, val, block, regOffBase);
+}
+
 UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
 {
     if (ctx == nullptr) {

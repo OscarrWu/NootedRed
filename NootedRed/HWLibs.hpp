@@ -141,4 +141,14 @@ private:
 public:
     static SInt32 vbiossmcSetDispclkCached(UInt32 requestedKhz);
     static SInt32 vbiossmcSetDppclkCached(UInt32 requestedKhz);
+
+    // ── 供 DCN314 显示时钟主流程的内核态消费者使用（第五步）────────────────
+    // 为什么不把 smuCgsRead/WriteRegister 直接暴露成 public：消费方只需要
+    // "按段内偏移读写一段寄存器"这一件事，故在此给出最小面（并统一做空指针兜底）。
+    //   smuContext()      : 苹果 SMU 上下文；为空表示 SMU 尚未初始化（消费方应放弃下发）
+    //   cgsReadReg/cgsWriteReg: 转发到苹果按 block 查找基址的 MMIO 通道
+    static void*  smuContext();
+    static UInt32 cgsReadReg(void* ctx, UInt32 off, UInt32 blockInstance, CAILHWBlock block, UInt32 regOffBase);
+    static void   cgsWriteReg(void* ctx, UInt32 off, UInt32 val, UInt32 blockInstance, CAILHWBlock block,
+                              UInt32 regOffBase);
 };

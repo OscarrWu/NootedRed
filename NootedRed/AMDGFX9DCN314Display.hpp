@@ -80,8 +80,12 @@ class AMDRadeonX5000_AMDGFX9DCN314Display : public AMDRadeonX5000_AMDGFX9DCNDisp
 
     static void initDCNRegOffs(AMDRadeonX5000_AMDGFX9DCN314Display* self);
 
-    // DCN 3.1.4 显示时钟下发 (VBIOSSMC)：挂 VFT 时钟更新槽 (方案 A)
-    // req 字段：dispclk_khz / dppclk_khz / hard_min_dcfclk_khz / min_deep_sleep_dcfclk_khz / pstate_enabled
+    // DCN 3.1.4 显示时钟下发（VBIOSSMC 完整主流程；路线图第五步）。
+    //   序列由 `DisplaySeq/` 的生成器产出（内核态与用户态测试共用同一份），
+    //   本函数只把调用方给的目标时钟转成生成器输入，再经 MP1 段邮箱落到硬件。
+    //   req 字段：dispclk_khz / dppclk_khz / hard_min_dcfclk_khz / min_deep_sleep_dcfclk_khz。
+    //   （req.pstate_enabled 当前未被使用：它只决定 Linux `construct` 是否读 DPM 表，
+    //     而本驱动不下发 DPM 表 —— 见第五步执行记录中的缺口登记。）
     static void updateDisplayClocks(AMDRadeonX5000_AMDGFX9DCN314Display* self,
                                     const struct dcn314_display_clock_req* req);
 

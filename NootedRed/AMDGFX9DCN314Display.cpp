@@ -14,6 +14,9 @@
 #include <PenguinWizardry/RuntimeMC.hpp>
 #include <PenguinWizardry/RuntimeVFT.hpp>
 #include <Regs/DCN314.hpp>
+#include <DisplaySeq/Dcn314ClkMgr.hpp>
+#include <GPUDriversAMD/CAIL/HWBlock.hpp>
+#include <IOKit/IOLib.h>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSMetaClass.h>
 
@@ -204,31 +207,99 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::initDCNRegOffs(AMDRadeonX5000_AMDGFX9D
     expansion.regShiftsMasks.isValid             = true;
 }
 
-// DCN 3.1.4 显示时钟下发 (VBIOSSMC, 方案 A)
-//   - 内部统一经 X5000HWLibs 的 cached wrapper 下发，wrapper 已用 smuCtxCache + smu12IsFwLoaded 守卫
-//   - 单位：输入 kHz；wrapper 内部 khzToMhzCeil → MHz 写入 C2PMSG_83
-//   移植自 Linux dcn314_smu_set_dispclk / dcn314_clk_mgr 的 update_clocks 下发路径
+// ═════════════════════════════════════════════════════════════════════════════
+// 显示时钟下发（路线图第五步）：Linux `dcn314_clk_mgr.c` + `dcn314_smu.c` 的翻译
 //
-//   注：pstate 的 hard min / deep sleep dcfclk 因 HWLibs 尚无对应 cached wrapper
-//   （smuCtxCache 为 private，本文件无法直接取 ctx），暂不在此下发；待 HWLibs 补
-//   vbiossmcSetHardMinDcfclkCached / vbiossmcSetMinDeepSleepDcfclkCached 后接入。
+// 分工（路线图 §3.2「同一份生成器，三处共用」）：
+//   · 序列生成：`DisplaySeq/Dcn314ClkMgrSeq.hpp` + `DisplaySeq/VbiosSmcSeq.hpp`（与用户态测试共用）
+//   · 状态与编排：`DisplaySeq/Dcn314ClkMgr.hpp`
+//   · 落到硬件：本文件只提供"寄存器通道"——MP1 段的 VBIOSSMC 邮箱
+//     （段内偏移 0x283/0x293/0x29B），经苹果的 cgs MMIO 通道访问。
+//
+// ⚠️ 已知缺口（登记于路线图 §5.4）：Linux `dcn314_init_clocks` 还需读 CLK 段寄存器
+//   （`CLK6_0_CLK6_spll_field_8` 的 spll_ssc_en、`CLK1_CLK2_BYPASS_CNTL` 的 bypass sel）
+//   来决定 dp_dto_source_clock；本驱动当前只接 MP1 通道，故该项未实现（不影响内置屏点亮）。
+// ═════════════════════════════════════════════════════════════════════════════
+
+static bool                        sClocksApplied = false;
+static display::dcn314_clk::ClkMgr sClkMgr;
+
+// 构造 VBIOSSMC 邮箱所在的寄存器通道（MP1 段）。
+// 通道不可用时返回 false —— 绝不让轮询在空通道上空转到超时（那会白等 2 秒且毫无意义）。
+static bool makeSmuChannel(display::RegChannel* const out)
+{
+    void* const ctx = X5000HWLibs::smuContext();
+    if (ctx == nullptr) {
+        SYSLOG("GFX9DCN314Display", "display clocks: SMU context unavailable, sequence not sent");
+        return false;
+    }
+
+    display::RegChannel ch{};
+    ch.ctx           = ctx;
+    ch.blockInstance = 0;
+    ch.block         = static_cast<std::uint32_t>(kCAILHWBlockMP1);
+    ch.regOffBase    = 0;
+    ch.read  = [](void* c, std::uint32_t off, std::uint32_t bi, std::uint32_t blk, std::uint32_t base) -> std::uint32_t {
+        return X5000HWLibs::cgsReadReg(c, off, bi, static_cast<CAILHWBlock>(blk), base);
+    };
+    ch.write = [](void* c, std::uint32_t off, std::uint32_t val, std::uint32_t bi, std::uint32_t blk,
+                  std::uint32_t base) -> void {
+        X5000HWLibs::cgsWriteReg(c, off, val, bi, static_cast<CAILHWBlock>(blk), base);
+    };
+    ch.delay = [](std::uint32_t us) -> void { IODelay(us); };
+
+    *out = ch;
+    return true;
+}
+
+// 初始化阶段的一次性下发：Linux `dcn314_clk_mgr_construct` + 首次 `update_clocks` 的等价物。
+// 与影子运行器共用 `ClkMgr::applyInitial` 这一条路径（真机行为与离线比对的序列因此同源）：
+//   ① SMU 版本探测 → ② 首次下发（safe_to_lower = false）→ ③ 允许 zstate（safe_to_lower = true）
+static bool applyInitialDisplayClocks()
+{
+    display::RegChannel ch{};
+    if (!makeSmuChannel(&ch)) { return false; }
+    display::InjectedRegSink sink(ch);
+
+    if (!sClkMgr.applyInitial(sink)) {
+        SYSLOG("GFX9DCN314Display", "initial display clock sequence failed (lastOps=%zu)", sClkMgr.lastOpCount());
+        return false;
+    }
+    DBGLOG("GFX9DCN314Display", "initial display clocks applied (smuVersion=0x%X, lastOps=%zu)", sClkMgr.smuVersion(),
+           sClkMgr.lastOpCount());
+    return true;
+}
+
+// DCN 3.1.4 显示时钟下发（VBIOSSMC 完整主流程）。
+//   序列由 `DisplaySeq/` 的生成器产出、经 MP1 段邮箱落到硬件（见本文件上方「显示时钟下发」一节）。
+//   本函数把调用方给出的目标时钟转成生成器输入，用于**模式变更时按需更新**；
+//   初始化阶段的一次性下发不经过本函数，而走 `ClkMgr::applyInitial`（见 `applyInitialDisplayClocks`）。
 void AMDRadeonX5000_AMDGFX9DCN314Display::updateDisplayClocks(AMDRadeonX5000_AMDGFX9DCN314Display* const self,
                                                               const struct dcn314_display_clock_req* const req)
 {
     if (req == nullptr) { return; }
 
-    // 1. dispclk / dppclk 下发 (cached wrapper 内含 FW 加载守卫，未加载时透传原值不报错)
-    const SInt32 dispclk = X5000HWLibs::vbiossmcSetDispclkCached(req->dispclk_khz);
-    const SInt32 dppclk  = X5000HWLibs::vbiossmcSetDppclkCached(req->dppclk_khz);
-    if (dispclk < 0) {
-        SYSLOG("GFX9DCN314Display", "updateDisplayClocks: dispclk set failed (req %u kHz)", req->dispclk_khz);
-    }
-    if (dppclk < 0) {
-        SYSLOG("GFX9DCN314Display", "updateDisplayClocks: dppclk set failed (req %u kHz)", req->dppclk_khz);
-    }
+    // 目标时钟：Linux 里由带宽/时序层填进 `struct dc_clocks`；本驱动没有该层，
+    // 故由调用方直接给出目标值（路线图 §5.4 简化项 1：点亮阶段用固定保守值）。
+    display::dcn314_clk::TargetClocks tgt{};
+    tgt.dcfclkKhz          = req->hard_min_dcfclk_khz;
+    tgt.dcfclkDeepSleepKhz = req->min_deep_sleep_dcfclk_khz;
+    tgt.dppclkKhz          = req->dppclk_khz;
+    tgt.dispclkKhz         = req->dispclk_khz;
+    tgt.zstateSupport      = sClkMgr.profile().zstateSupport;
+    tgt.dtbclkEn           = false;   // 真值序列里无 0x17 SetDtbClk ⇒ 不请求开 DTB clk
 
-    DBGLOG("GFX9DCN314Display", "updateDisplayClocks: dispclk %d / dppclk %d kHz",
-           dispclk, dppclk);
+    display::RegChannel ch{};
+    if (!makeSmuChannel(&ch)) { return; }
+    display::InjectedRegSink sink(ch);
+
+    if (!sClkMgr.apply(tgt, /*safeToLower=*/false, sink)) {
+        SYSLOG("GFX9DCN314Display", "updateDisplayClocks: sequence failed (dispclk %u kHz, lastOps=%zu)",
+               req->dispclk_khz, sClkMgr.lastOpCount());
+        return;
+    }
+    DBGLOG("GFX9DCN314Display", "updateDisplayClocks: applied dispclk %u / dppclk %u kHz (lastOps=%zu)",
+           req->dispclk_khz, req->dppclk_khz, sClkMgr.lastOpCount());
 }
 
 // dcn314 的 DCN3 翻转选项（基类硬编码 DCN2，已审查确认）
@@ -257,8 +328,13 @@ bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* cons
                    MAX_SUPPORTED_DISPLAYS_RV);
         }
     }
-    return true;
-}
+
+    // 显示时钟：初始化阶段一次性下发（对应 Linux `dcn314_clk_mgr_construct` + 首次 `update_clocks`）。
+    // 挂在 init 而不是每次 flip：时钟是模式级配置，随每帧重复下发既无必要也会抖。
+    if (!sClocksApplied) {
+        sClocksApplied = true;
+        applyInitialDisplayClocks();
+    }
 
 // setCurrentDisplayOffset 覆写（macOS ≤ 10.14 同步提交路径）：基类写地址并等待 isFlipPending
 // 完成（HW 已取走 flip）之后补 resync_fifo_dccg_dio_direct（DENTIST WDIVIDER = RDIVIDER）。
