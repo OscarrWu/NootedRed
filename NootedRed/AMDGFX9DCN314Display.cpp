@@ -42,6 +42,10 @@
 static bool (*superInit)(AMDRadeonX5000_AMDHWDisplay*, void*, void*)                   = nullptr;
 static bool sDisplayInitSeqApplied = false;
 
+// 前置声明：编排入口（applyPixelRateDiv / applyInitialDisplaySequence）用到 DCN 段的
+// 寄存器通道构造函数，而它的定义在本文件后部的「update_odm / resync_fifo 寄存器级直译」一节。
+static void makeDcnChannel(AMDRadeonX5000_AMDHWRegisters& regs, display::RegChannel* const out);
+
 PWDefineRuntimeMC(AMDRadeonX5000_AMDGFX9DCN314Display, Constructor)
 
 AMDRadeonX5000_AMDGFX9DCNDisplay::VFT AMDRadeonX5000_AMDGFX9DCN314Display::vft;
