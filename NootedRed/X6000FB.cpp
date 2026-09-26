@@ -808,36 +808,71 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 //  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic6`（与其它探针互斥使用）。
 UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
-    if (checkKernelArgument("-NRedStagePanic6")) {
+    const bool wantProbe = checkKernelArgument("-NRedStagePanic6");
+    const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
+
+    if (wantProbe || wantRegister) {
         auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
         };
+        auto store64 = [](UInt64 base, UInt64 off, UInt64 v) {
+            *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base) + off) = v;
+        };
 
         const UInt64 s = reinterpret_cast<UInt64>(self);
         UInt64 o20 = 0, o50 = 0, vt20 = 0, vt50 = 0, a00 = 0, s850 = 0, s10 = 0;
+        UInt64 c7960 = 0, s670 = 0, s6b8 = 0;
         if (isKernelPtr(s)) {
-            o20 = load64(s, 0x20);
-            o50 = load64(s, 0x50);
+            o20 = load64(s, 0x20);   // = controller（见 pph_report.md）
+            o50 = load64(s, 0x50);   // = HWServices 实例（controller->vtable[0xa08]()）
             if (isKernelPtr(o20)) {
                 vt20 = load64(o20, 0x00);
                 if (isKernelPtr(vt20)) { a00 = load64(vt20, 0xA00); }
+                c7960 = load64(o20, 0x7960);   // ★ IRI 转发的目标对象（messageAccelerator 读它）
             }
             if (isKernelPtr(o50)) {
                 vt50 = load64(o50, 0x00);
                 if (isKernelPtr(vt50)) {
-                    s850 = load64(vt50, 0x850);
-                    s10  = load64(vt50, 0x10);
+                    s850 = load64(vt50, 0x850);   // getTtl()
+                    s10  = load64(vt50, 0x10);    // TTL RTS
+                    s670 = load64(vt50, 0x670);   // 绑定方法（注册时调用）
+                    s6b8 = load64(vt50, 0x6B8);   // ★ IRI 转发（messageAccelerator 最终调它）
                 }
             }
         }
-        // 铁律：panic 实参只能是已求值的局部变量
-        const UInt64 vS = s, v20 = o20, v50 = o50, vVt20 = vt20, vA00 = a00;
-        const UInt64 vVt50 = vt50, v850 = s850, v10 = s10;
-        const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
-        panic("NRed PPH probe: self=%llx o20=%llx o50=%llx | vt20=%llx a00=%llx | vt50=%llx s850=%llx s10=%llx "
-              "| ma calls=%llu iri=%llu dummy=%llu",
-              vS, v20, v50, vVt20, vA00, vVt50, v850, v10, vCalls, vIri, vDummy);
+
+        // ─── 补注册（门控 `-NRedRegisterHwSvc`，默认关闭）───────────────────────
+        //  依据（2026-09-26 第 4 批次离线取证）：
+        //   · `AmdRadeonController::messageAccelerator`（VM 0x4f58a）在 `controller+0x7960 == NULL`
+        //     时直接返回 0xe00002c7 ⇒ 这正是 PP 的 IRI 第一步必然失败的原因；
+        //   · 该字段的唯一非零写入点是 `callPlatformFunctionFromDrvr` 的 selector=0 路径
+        //     （"注册对象 + 调 对象->vtable[0x670](controller)"），而它由**本 kext 之外**
+        //     （AMDSupport / 加速器侧）发起 ⇒ 在本场景下没有发生；
+        //   · HWServices 类族（Navi/SWIP/Abstract/Interface）的 vtable 都是 271 槽 ⇒ 含 0x6b8。
+        //  ⇒ 本门控把 PP helper 已经持有的 HWServices 实例（`this+0x50`）补注册进去，
+        //    并调用 Apple 自己的绑定方法（vtable[0x670]），**不构造任何假对象**。
+        if (wantRegister && isKernelPtr(o20) && o50 != 0 && c7960 == 0) {
+            store64(o20, 0x7960, o50);
+            if (isKernelPtr(s670)) {
+                auto bind = reinterpret_cast<void (*)(void*, void*)>(s670);
+                bind(reinterpret_cast<void*>(o50), reinterpret_cast<void*>(o20));
+            }
+            SYSLOG("X6000FB", "HwSvc register: controller->f7960 <- %llx (bind=%llx, iri=%llx)",
+                   static_cast<unsigned long long>(o50), static_cast<unsigned long long>(s670),
+                   static_cast<unsigned long long>(s6b8));
+        }
+
+        if (wantProbe) {
+            // 铁律：panic 实参只能是已求值的局部变量
+            const UInt64 vS = s, v20 = o20, v50 = o50, vVt20 = vt20, vA00 = a00;
+            const UInt64 vVt50 = vt50, v850 = s850, v10 = s10;
+            const UInt64 v7960 = c7960, v670 = s670, v6b8 = s6b8;
+            const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
+            panic("NRed PPH probe: self=%llx o20=%llx o50=%llx | vt20=%llx a00=%llx | vt50=%llx s850=%llx s10=%llx "
+                  "| c7960=%llx s670=%llx s6b8=%llx | ma calls=%llu iri=%llu dummy=%llu",
+                  vS, v20, v50, vVt20, vA00, vVt50, v850, v10, v7960, v670, v6b8, vCalls, vIri, vDummy);
+        }
     }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
