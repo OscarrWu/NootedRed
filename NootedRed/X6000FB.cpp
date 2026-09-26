@@ -692,6 +692,13 @@ static UInt32 gMaCalls = 0;   // messageAccelerator 被调用次数
 static UInt32 gMaIri   = 0;   // 命中 `isPhoenix && reqType == 3`（IRI）的次数
 static UInt32 gMaDummy = 0;   // 实际返回 dummy success 的次数（关掉 D3 后应为 0）
 
+// ─── 观测可信度对照（第 5 批次补充）──────────────────────────────────────────
+//  第 5 批次真机探针出现异常读数（HWServices 的 vtable 槽连 [8]/[10] 都是 0）。为区分
+//  "读取不可信" 与 "对象确实是空壳" 两种解释，这里放一个**内容已知**的静态标量：
+//  探针读它，若读回值等于初值 ⇒ 读取通道可信（则那些 0 是事实）；否则 ⇒ 探针读法有问题。
+//  常量初始化，无 guard variable（符合内核态约束）。
+static UInt64 gReadCheckMagic = 0xA5A5A5A512345678ULL;
+
 // D3: route messageAccelerator, dummy IRI send (reqType=3) on Phoenix so powerUp
 // continues into its success path (TTL RTS / m_ppInitialized / FB_Boot_PPInitialized)
 IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType, void* arg2, void* arg3, void* arg4)
@@ -827,7 +834,15 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         //   +0x8(typeinfo) 与 +0x10(第一个虚函数) 应非 0；再读 +0x118（PP helper 会用它做 isReady）。
         UInt64 v0_0 = 0, v0_8 = 0, v0_10 = 0, v0_118 = 0;
         UInt64 v1_0 = 0, v1_8 = 0, v1_10 = 0;
+        UInt64 svt = 0, sv8 = 0, sv10 = 0, magicRead = 0;
         if (isKernelPtr(s)) {
+            // ★ 读取可信度对照：读一个内容已知的静态标量 + self 自身的 vtable
+            magicRead = load64(reinterpret_cast<UInt64>(&gReadCheckMagic), 0);
+            svt = load64(s, 0x000);          // self(PP helper) 的 vtable
+            if (isKernelPtr(svt)) {
+                sv8  = load64(svt, 0x008);
+                sv10 = load64(svt, 0x010);
+            }
             o20 = load64(s, 0x20);   // = controller（见 pph_report.md）
             o50 = load64(s, 0x50);   // = HWServices 实例（controller->vtable[0xa08]()）
             if (isKernelPtr(o20)) {
@@ -882,12 +897,15 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             const UInt64 w00 = v0_0, w08 = v0_8, w10 = v0_10, w118 = v0_118;
             const UInt64 x00 = v1_0, x08 = v1_8, x10 = v1_10;
             const UInt64 v7960 = c7960;
+            const UInt64 vMagic = magicRead, vSvt = svt, vSv8 = sv8, vSv10 = sv10;
             const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
-            panic("NRed PPH probe: self=%llx o20=%llx o50=%llx "
+            panic("NRed PPH probe: READCHK magic=%llx[exp=a5a5a5a512345678] self=%llx svt=%llx sv[8]=%llx sv[10]=%llx "
+                  "| o20=%llx o50=%llx "
                   "| vt20=%llx [0]=%llx [8]=%llx [10]=%llx [118]=%llx [a00]=%llx "
                   "| vt50=%llx [0]=%llx [8]=%llx [10]=%llx [850]=%llx [670]=%llx [6b8]=%llx "
                   "| c7960=%llx | ma calls=%llu iri=%llu dummy=%llu",
-                  vS, v20, v50,
+                  vMagic, vS, vSvt, vSv8, vSv10,
+                  v20, v50,
                   vVt20, w00, w08, w10, w118, vA00,
                   vVt50, x00, x08, x10, v850, v670, v6b8,
                   v7960, vCalls, vIri, vDummy);
