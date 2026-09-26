@@ -835,6 +835,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         UInt64 v0_0 = 0, v0_8 = 0, v0_10 = 0, v0_118 = 0;
         UInt64 v1_0 = 0, v1_8 = 0, v1_10 = 0;
         UInt64 svt = 0, sv8 = 0, sv10 = 0, magicRead = 0;
+        UInt64 ctl5f18 = 0, hs28 = 0, ctl100 = 0;
         if (isKernelPtr(s)) {
             // ★ 读取可信度对照：读一个内容已知的静态标量 + self 自身的 vtable
             magicRead = load64(reinterpret_cast<UInt64>(&gReadCheckMagic), 0);
@@ -842,6 +843,20 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             if (isKernelPtr(svt)) {
                 sv8  = load64(svt, 0x008);
                 sv10 = load64(svt, 0x010);
+            }
+            // ★ 第二组对照：读 controller 上**已知会被 Apple 代码读写**的普通字段
+            //   （`wrapControllerPowerUp` 就在用 `getMember<UInt8>(self, 0x5F18)`）——
+            //   若这些普通字段也读出 0，说明"读 Apple 对象"这一动作本身有问题；
+            //   若它们正常而只有 vtable 槽为 0，则"空壳"结论成立。
+            //   ⚠️ 解引用前必须做内核地址校验（探针自身绝不能崩）。
+            {
+                const UInt64 cs = load64(s, 0x20);
+                const UInt64 hs = load64(s, 0x50);
+                if (isKernelPtr(cs)) {
+                    ctl5f18 = load64(cs, 0x5F18);
+                    ctl100  = load64(cs, 0x100);
+                }
+                if (isKernelPtr(hs)) { hs28 = load64(hs, 0x28); }
             }
             o20 = load64(s, 0x20);   // = controller（见 pph_report.md）
             o50 = load64(s, 0x50);   // = HWServices 实例（controller->vtable[0xa08]()）
@@ -898,13 +913,16 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             const UInt64 x00 = v1_0, x08 = v1_8, x10 = v1_10;
             const UInt64 v7960 = c7960;
             const UInt64 vMagic = magicRead, vSvt = svt, vSv8 = sv8, vSv10 = sv10;
+            const UInt64 vCtl5f18 = ctl5f18, vCtl100 = ctl100, vHs28 = hs28;
             const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
             panic("NRed PPH probe: READCHK magic=%llx[exp=a5a5a5a512345678] self=%llx svt=%llx sv[8]=%llx sv[10]=%llx "
+                  "| CTL[5f18]=%llx CTL[100]=%llx HS[28]=%llx "
                   "| o20=%llx o50=%llx "
                   "| vt20=%llx [0]=%llx [8]=%llx [10]=%llx [118]=%llx [a00]=%llx "
                   "| vt50=%llx [0]=%llx [8]=%llx [10]=%llx [850]=%llx [670]=%llx [6b8]=%llx "
                   "| c7960=%llx | ma calls=%llu iri=%llu dummy=%llu",
                   vMagic, vS, vSvt, vSv8, vSv10,
+                  vCtl5f18, vCtl100, vHs28,
                   v20, v50,
                   vVt20, w00, w08, w10, w118, vA00,
                   vVt50, x00, x08, x10, v850, v670, v6b8,
