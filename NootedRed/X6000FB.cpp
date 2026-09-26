@@ -324,7 +324,8 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
         //   同样**条件路由**（仅在 `-NRedStagePanic6` 或 `-NRedRegisterHwSvc` 时），保证默认路径零影响。
         //   ⚠️ 修正（2026-09-26，第 6 批次）：原条件**漏了 `-NRedRegisterHwSvc`** ⇒ 该门控
         //      从未真正安装 hook，"补注册"从未在真机执行过（第 5 批次对它的否定评价属**未实测的推断**）。
-        if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")) {
+        if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")
+            || checkKernelArgument("-NRedAccelProbe")) {
             KernelPatcher::RouteRequest pphRequest{"__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv",
                                                   wrapPpHelperPowerUp, this->orgPpHelperPowerUp};
             if (!patcher.routeMultiple(id, &pphRequest, 1, slide, size)) {
