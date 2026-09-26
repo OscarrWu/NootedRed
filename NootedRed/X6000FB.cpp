@@ -21,6 +21,8 @@
 #include <StageMark.hpp>
 #include <kern/debug.h>    // panic() 声明（Probe D1 v2 崩溃出口注入）
 #include <IOKit/IOReturn.h>
+#include <IOKit/IOService.h>          // 第八步加速器探针：读 provider 的属性（LoadAccelerator 等）
+#include <libkern/c++/OSBoolean.h>    // 第八步加速器探针：属性值的真假判定
 #include <IOKit/IOTypes.h>
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
 #include <Kexts.hpp>
@@ -329,6 +331,23 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                 SYSLOG("X6000FB", "stage-mark: failed to route AmdPowerPlayHelper::powerUp");
             } else {
                 DBGLOG("X6000FB", "stage-mark: routed AmdPowerPlayHelper::powerUp");
+            }
+        }
+
+        // 第八步观测（第 7 批次）：hook `AmdRadeonController::callPlatformFunctionFromDrvr` 入口，
+        //   直接观测"加速器 → controller"的注册调用是否发生（selector / 参数指针）。
+        //   依据：`AMDRadeonX5000_AMDGraphicsAccelerator::start`（VM 0x18b7）用
+        //   `OSSymbol("SpecialAMDKey")` 调 controller 的 `vtable[0x6b8]`，最终进入本函数；
+        //   selector=0 才是注册（写 `controller+0x7960`）。
+        //   同样**条件路由**（仅 `-NRedAccelProbe`），保证默认路径零影响。
+        if (checkKernelArgument("-NRedAccelProbe")) {
+            KernelPatcher::RouteRequest drvrRequest{
+                "__ZN34AMDRadeonX6000_AmdRadeonController28callPlatformFunctionFromDrvrEjPvS0_S0_",
+                wrapCallPlatformFunctionFromDrvr, this->orgCallPlatformFunctionFromDrvr};
+            if (!patcher.routeMultiple(id, &drvrRequest, 1, slide, size)) {
+                SYSLOG("X6000FB", "accel-probe: failed to route callPlatformFunctionFromDrvr");
+            } else {
+                DBGLOG("X6000FB", "accel-probe: routed callPlatformFunctionFromDrvr");
             }
         }
 
@@ -819,8 +838,9 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
     const bool wantProbe = checkKernelArgument("-NRedStagePanic6");
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
+    const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
 
-    if (wantProbe || wantRegister) {
+    if (wantProbe || wantRegister || wantAccelProbe) {
         auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
@@ -832,6 +852,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         const UInt64 s = reinterpret_cast<UInt64>(self);
         UInt64 o20 = 0, o50 = 0, vt20 = 0, vt50 = 0, a00 = 0, s850 = 0;
         UInt64 c7960 = 0, s670 = 0, s6b8 = 0;
+        UInt64 pci = 0, lHws = 0, lCtl = 0, lAcc = 0;   // 加速器探针：provider 上的三个加载属性
         // vtable 自证字段（第 5 批次补充）：若 vt 真的是 vtable，则 +0x0(offset-to-top)=0、
         //   +0x8(typeinfo) 与 +0x10(第一个虚函数) 应非 0；再读 +0x118（PP helper 会用它做 isReady）。
         UInt64 v0_0 = 0, v0_8 = 0, v0_10 = 0, v0_118 = 0;
@@ -884,6 +905,28 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                     s6b8 = load64(vt50, 0x6B8);   // ★ IRI 转发（messageAccelerator 最终调它）
                 }
             }
+
+            // ─── 加速器加载前置判据（门控 `-NRedAccelProbe`）────────────────────
+            //  依据（2026-09-26 离线取证）：Apple 的 `AmdGpuWrangler::vendor_doDeviceAttribute`
+            //  （Framebuffer VM 0x44b0c）把三个属性写到 provider 上：LoadHWServices /
+            //  LoadController / LoadAccelerator；加速器 kext 的 personality 要求
+            //  `IOPropertyMatch = { LoadAccelerator = true }`（NootedRed 注入的
+            //  `com.apple.kext.AMDRadeonX5000.xml` 亦然）⇒ **provider 上该属性为真**是
+            //  加速器被匹配、start、进而写 `controller+0x7960` 的必要条件。
+            //  安全：只调用 IOKit 的只读访问器（getProvider/getProperty），不调用 Apple 虚方法。
+            if (wantAccelProbe && isKernelPtr(o20)) {
+                auto* prov = OSDynamicCast(IOService, reinterpret_cast<IOService*>(o20)->getProvider());
+                if (prov != nullptr) {
+                    pci = reinterpret_cast<UInt64>(prov);
+                    auto readBool = [prov](const char* const key) -> UInt64 {
+                        auto* b = OSDynamicCast(OSBoolean, prov->getProperty(key));
+                        return (b != nullptr && b->isTrue()) ? 1 : 0;
+                    };
+                    lHws = readBool("LoadHWServices");
+                    lCtl = readBool("LoadController");
+                    lAcc = readBool("LoadAccelerator");
+                }
+            }
         }
 
         // ─── 补注册（门控 `-NRedRegisterHwSvc`，默认关闭）───────────────────────
@@ -930,9 +973,54 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                   vVt50, x00, x08, x10, v850, v670, v6b8,
                   v7960, vCalls, vIri, vDummy);
         }
+
+        // ─── 加速器加载前置判据的输出（门控 `-NRedAccelProbe`）─────────────────
+        //  判读：
+        //   · LoadAccel=0 ⇒ 加速器 kext **从未被允许加载** ⇒ 不存在 IOAccelerator 服务
+        //     ⇒ `+0x7960` 必然为空（根因在 wrangler 的属性设置，而非注册动作）；
+        //   · LoadAccel=1 而 c7960=0 ⇒ 加速器被允许加载但注册未完成 ⇒ 下一步查加速器
+        //     `start` 是否走到注册调用（本门控同时 hook 了 `callPlatformFunctionFromDrvr`，
+        //     若注册**被发起过**，那一侧的探针会先 panic，本轮就不会看到本行）。
+        if (wantAccelProbe) {
+            const UInt64 vCtl = o20, vPci = pci, vLhws = lHws, vLctl = lCtl, vLacc = lAcc;
+            const UInt64 v7960 = c7960, vMagic = magicRead;
+            panic("NRed accel probe: ctl=%llx pci=%llx LoadHwSvc=%llu LoadCtl=%llu LoadAccel=%llu "
+                  "| c7960=%llx | READCHK magic=%llx[exp=a5a5a5a512345678]",
+                  vCtl, vPci, vLhws, vLctl, vLacc, v7960, vMagic);
+        }
     }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
+}
+
+// ─── 第八步观测探针：加速器 → controller 的注册调用（决定性判据）──────────────
+//  依据（2026-09-26 离线取证）：
+//   · `AMDRadeonX5000_AMDGraphicsAccelerator::start`（X5000 VM 0x18b7）用
+//     `OSSymbol("SpecialAMDKey")` 调 `(controller)->vtable[0x6b8](sym, false, &sel(=0), this, 0, 0)`；
+//   · `AmdRadeonController::callPlatformFunction` 按符号名分派到本函数（VM 0x4f5e6）；
+//     **selector = 0** 分支才把 `controller+0x7960` 写上（"Accelerator successfully registered"）。
+//  ⇒ 在入口读 selector 与三个实参即可判定：
+//     · 本函数**从未被调用** ⇒ 加速器没有发起注册（未加载 / start 未走到该步）；
+//     · 被调用且 sel = 0 而 `+0x7960` 仍空 ⇒ 注册被拒（"!!! Invalid Accel pointer"）。
+//  安全：只读寄存器实参，不调用任何 Apple 方法；门控 boot-arg `-NRedAccelProbe`（默认关闭），
+//        与 `-NRedStagePanic6` **互斥**使用（两者都 panic，先触发者先停）。
+IOReturn X6000FB::wrapCallPlatformFunctionFromDrvr(void* const self, const UInt32 selector, void* const arg2,
+                                                   void* const arg3, void* const arg4)
+{
+    UInt64       v7960 = 0;
+    const UInt64 vSelf = reinterpret_cast<UInt64>(self);
+    if (vSelf >= 0xffffff7f80000000ULL) {
+        v7960 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(self) + 0x7960);
+    }
+    const UInt64 vSel = selector;
+    const UInt64 v2   = reinterpret_cast<UInt64>(arg2);
+    const UInt64 v3   = reinterpret_cast<UInt64>(arg3);
+    const UInt64 v4   = reinterpret_cast<UInt64>(arg4);
+    panic("NRed accel drvr probe: self=%llx sel=%llu a2=%llx a3=%llx a4=%llx c7960=%llx", vSelf, vSel, v2, v3, v4,
+          v7960);
+
+    return FunctionCast(wrapCallPlatformFunctionFromDrvr,
+                        singleton().orgCallPlatformFunctionFromDrvr)(self, selector, arg2, arg3, arg4);
 }
 
 // ─── 第八步观测探针：AmdDalHelper::powerUp ───────────────────────────────────

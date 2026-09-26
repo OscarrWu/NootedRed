@@ -35,6 +35,7 @@ class X6000FB
     mach_vm_address_t      orgDcClkMgrCreate{0};     // 第八步观测：dc_clk_mgr_create（模式定位，读 ctx/pp_smu）
     mach_vm_address_t      orgPpSmuFill{0};          // 第八步观测：填充 pp_smu_funcs 的函数（模式定位）
     mach_vm_address_t      orgPpHelperPowerUp{0};    // 第八步观测：AmdPowerPlayHelper::powerUp（读 this+0x20/+0x50 对象）
+    mach_vm_address_t      orgCallPlatformFunctionFromDrvr{0};   // 第八步观测：注册调用（加速器 → controller）
     mach_vm_address_t      orgCreateObjectInfo{0};
     mach_vm_address_t      orgCreateVramInfo{0};
     mach_vm_address_t      orgGetVendorInfo{0};
@@ -67,6 +68,7 @@ private:
     static void*                            wrapDcClkMgrCreate(void* ctx, void* ppSmu, void* dccg);   // 第八步观测探针
     static void*                            wrapPpSmuFill(void* ctx, void* ppSmu);                     // 第八步观测探针
     static UInt32                           wrapPpHelperPowerUp(void* self);                           // 第八步观测探针
+    static IOReturn                         wrapCallPlatformFunctionFromDrvr(void* self, UInt32 selector, void* arg2, void* arg3, void* arg4);   // 第八步观测探针
     static IOReturn                         wrapMessageAccelerator(void* self, UInt32 reqType, void* arg2, void* arg3, void* arg4);
     static UInt32                           wrapHandleCriticalError(void* self, const char* fmt1, const char* fmt2, const char* fmt3);
     static void*                            wrapCreateObjectInfo(void* helper, UInt32 tableOffset);
