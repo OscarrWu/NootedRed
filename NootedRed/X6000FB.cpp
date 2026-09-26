@@ -23,6 +23,8 @@
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOService.h>          // 第八步加速器探针：读 provider 的属性（LoadAccelerator 等）
 #include <libkern/c++/OSBoolean.h>    // 第八步加速器探针：属性值的真假判定
+#include <libkern/c++/OSDictionary.h> // 加速器补注册：serviceMatching 的匹配字典
+#include <libkern/c++/OSSymbol.h>     // 加速器补注册：OSSymbol("SpecialAMDKey")
 #include <IOKit/IOTypes.h>
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
 #include <Kexts.hpp>
@@ -1225,6 +1227,62 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             NRed::singleton().orSmu13ProbeState(1ULL << 24);
             NRed::singleton().orSmu13ProbeState(static_cast<UInt64>(rSetup & 0xFF) << 32);
         }
+        }
+    }
+
+    // ─── 加速器补注册（门控 `-NRedRegisterAccel`，默认关闭）───────────────────────
+    //  问题（离线取证见 `kb/re/加速器注册链报告.md`）：controller 的加速器注册位 `+0x7960`
+    //  为空 ⇒ `AmdRadeonController::messageAccelerator` 直接返回 `kIOReturnUnsupported`
+    //  ⇒ PP 上电第一步（IRI）必失败 ⇒ `handleCriticalError`。该字段的**唯一**写入者是
+    //  Apple 自己的 `callPlatformFunctionFromDrvr(selector = 0, 加速器)`，其条件是
+    //  `findAccelerator()`（按 IORegistry 名 `"IOAccelerator"` 查）返回的对象 == 传入对象。
+    //  加速器侧本应在自己的 `start` 里发起这次调用（X5000 VM 0x18b7），但真机上未发生。
+    //  ⇒ 本段**复用 Apple 自己的注册通道**：按同一个名字取**真实**加速器实例（不造 stub），
+    //    再调 controller 的 `callPlatformFunction(OSSymbol("SpecialAMDKey"), false, &sel(0),
+    //    accel, …)`（vtable 槽 `+0x6B8`，字节级验证 = `callPlatformFunction`）
+    //    ⇒ 让 Apple 的 selector = 0 分支完成 `+0x7960 = accel` 与 `attach(controller)`。
+    //  安全：① 门控默认关闭；② 取不到实例就什么都不做（并记日志）；③ 只调用 Apple 既有入口，
+    //        不构造假对象、不写 MMIO；④ 若实例不满足条件，Apple 自己会打
+    //        "!!! Invalid Accel pointer. Found/Given" 并返回错误。
+    if (checkKernelArgument("-NRedRegisterAccel")) {
+        const UInt64 ctl = reinterpret_cast<UInt64>(self);
+        UInt64       f7960 = 0;
+        if (ctl >= 0xffffff7f80000000ULL) {
+            f7960 = *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(self) + 0x7960);
+        }
+        if (f7960 != 0) {
+            SYSLOG("X6000FB", "registerAccel: skipped, controller+0x7960 already = %llx", f7960);
+        }
+        else {
+            IOService* accel    = nullptr;
+            auto*      matching = IOService::serviceMatching("IOAccelerator");
+            if (matching != nullptr) {
+                accel = IOService::copyMatchingService(matching);
+                matching->release();
+            }
+            if (accel == nullptr) {
+                SYSLOG("X6000FB", "registerAccel: no IOAccelerator service found");
+            }
+            else {
+                const UInt64 vt = *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(self));
+                auto*        sym = OSSymbol::withCString("SpecialAMDKey");
+                if (sym == nullptr || vt < 0xffffff7f80000000ULL) {
+                    SYSLOG("X6000FB", "registerAccel: aborted (sym=%llx vt=%llx)", sym, vt);
+                }
+                else {
+                    auto fn = reinterpret_cast<IOReturn (*)(void*, const OSSymbol*, bool, void*, void*, void*, void*)>(
+                        *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(vt) + 0x6B8));
+                    UInt32 sel = 0;
+                    const IOReturn r = fn(self, sym, false, &sel, accel, nullptr, nullptr);
+                    const UInt64   after =
+                        *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(self) + 0x7960);
+                    SYSLOG("X6000FB",
+                           "registerAccel: accel=%llx ret=0x%x sel=%u c7960: %llx -> %llx",
+                           reinterpret_cast<UInt64>(accel), r, sel, f7960, after);
+                }
+                if (sym != nullptr) { sym->release(); }
+                accel->release();
+            }
         }
     }
 
