@@ -821,21 +821,33 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         };
 
         const UInt64 s = reinterpret_cast<UInt64>(self);
-        UInt64 o20 = 0, o50 = 0, vt20 = 0, vt50 = 0, a00 = 0, s850 = 0, s10 = 0;
+        UInt64 o20 = 0, o50 = 0, vt20 = 0, vt50 = 0, a00 = 0, s850 = 0;
         UInt64 c7960 = 0, s670 = 0, s6b8 = 0;
+        // vtable 自证字段（第 5 批次补充）：若 vt 真的是 vtable，则 +0x0(offset-to-top)=0、
+        //   +0x8(typeinfo) 与 +0x10(第一个虚函数) 应非 0；再读 +0x118（PP helper 会用它做 isReady）。
+        UInt64 v0_0 = 0, v0_8 = 0, v0_10 = 0, v0_118 = 0;
+        UInt64 v1_0 = 0, v1_8 = 0, v1_10 = 0;
         if (isKernelPtr(s)) {
             o20 = load64(s, 0x20);   // = controller（见 pph_report.md）
             o50 = load64(s, 0x50);   // = HWServices 实例（controller->vtable[0xa08]()）
             if (isKernelPtr(o20)) {
                 vt20 = load64(o20, 0x00);
-                if (isKernelPtr(vt20)) { a00 = load64(vt20, 0xA00); }
+                if (isKernelPtr(vt20)) {
+                    v0_0   = load64(vt20, 0x000);
+                    v0_8   = load64(vt20, 0x008);
+                    v0_10  = load64(vt20, 0x010);
+                    v0_118 = load64(vt20, 0x118);
+                    a00    = load64(vt20, 0xA00);
+                }
                 c7960 = load64(o20, 0x7960);   // ★ IRI 转发的目标对象（messageAccelerator 读它）
             }
             if (isKernelPtr(o50)) {
                 vt50 = load64(o50, 0x00);
                 if (isKernelPtr(vt50)) {
+                    v1_0   = load64(vt50, 0x000);
+                    v1_8   = load64(vt50, 0x008);
+                    v1_10  = load64(vt50, 0x010);
                     s850 = load64(vt50, 0x850);   // getTtl()
-                    s10  = load64(vt50, 0x10);    // TTL RTS
                     s670 = load64(vt50, 0x670);   // 绑定方法（注册时调用）
                     s6b8 = load64(vt50, 0x6B8);   // ★ IRI 转发（messageAccelerator 最终调它）
                 }
@@ -866,12 +878,19 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         if (wantProbe) {
             // 铁律：panic 实参只能是已求值的局部变量
             const UInt64 vS = s, v20 = o20, v50 = o50, vVt20 = vt20, vA00 = a00;
-            const UInt64 vVt50 = vt50, v850 = s850, v10 = s10;
-            const UInt64 v7960 = c7960, v670 = s670, v6b8 = s6b8;
+            const UInt64 vVt50 = vt50, v850 = s850, v670 = s670, v6b8 = s6b8;
+            const UInt64 w00 = v0_0, w08 = v0_8, w10 = v0_10, w118 = v0_118;
+            const UInt64 x00 = v1_0, x08 = v1_8, x10 = v1_10;
+            const UInt64 v7960 = c7960;
             const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
-            panic("NRed PPH probe: self=%llx o20=%llx o50=%llx | vt20=%llx a00=%llx | vt50=%llx s850=%llx s10=%llx "
-                  "| c7960=%llx s670=%llx s6b8=%llx | ma calls=%llu iri=%llu dummy=%llu",
-                  vS, v20, v50, vVt20, vA00, vVt50, v850, v10, v7960, v670, v6b8, vCalls, vIri, vDummy);
+            panic("NRed PPH probe: self=%llx o20=%llx o50=%llx "
+                  "| vt20=%llx [0]=%llx [8]=%llx [10]=%llx [118]=%llx [a00]=%llx "
+                  "| vt50=%llx [0]=%llx [8]=%llx [10]=%llx [850]=%llx [670]=%llx [6b8]=%llx "
+                  "| c7960=%llx | ma calls=%llu iri=%llu dummy=%llu",
+                  vS, v20, v50,
+                  vVt20, w00, w08, w10, w118, vA00,
+                  vVt50, x00, x08, x10, v850, v670, v6b8,
+                  v7960, vCalls, vIri, vDummy);
         }
     }
 
