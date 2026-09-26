@@ -319,8 +319,10 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
         }
 
         // 第八步观测（第 3 批次）：hook `AmdPowerPlayHelper::powerUp` 入口，读 PP 侧两个后端对象。
-        //   同样**条件路由**（仅在 `-NRedStagePanic6` 时），保证默认路径零影响。
-        if (checkKernelArgument("-NRedStagePanic6")) {
+        //   同样**条件路由**（仅在 `-NRedStagePanic6` 或 `-NRedRegisterHwSvc` 时），保证默认路径零影响。
+        //   ⚠️ 修正（2026-09-26，第 6 批次）：原条件**漏了 `-NRedRegisterHwSvc`** ⇒ 该门控
+        //      从未真正安装 hook，"补注册"从未在真机执行过（第 5 批次对它的否定评价属**未实测的推断**）。
+        if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")) {
             KernelPatcher::RouteRequest pphRequest{"__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv",
                                                   wrapPpHelperPowerUp, this->orgPpHelperPowerUp};
             if (!patcher.routeMultiple(id, &pphRequest, 1, slide, size)) {
@@ -732,7 +734,7 @@ static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* const dccg)
 {
     if (checkKernelArgument("-NRedStagePanic2")) {
-        auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+        auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
         };
@@ -777,7 +779,7 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 {
     auto ret = FunctionCast(wrapPpSmuFill, singleton().orgPpSmuFill)(ctx, ppSmu);
 
-    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
     auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
         return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
     };
@@ -819,7 +821,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
 
     if (wantProbe || wantRegister) {
-        auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+        auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
         };
@@ -836,7 +838,23 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         UInt64 v1_0 = 0, v1_8 = 0, v1_10 = 0;
         UInt64 svt = 0, sv8 = 0, sv10 = 0, magicRead = 0;
         UInt64 ctl5f18 = 0, hs28 = 0, ctl100 = 0;
+        // ─── 第 6 批次补充 ─────────────────────────────────────────────────────
+        //  (a) `dc_clk_mgr_create` 的 arg2（`pp_smu_funcs`）来源链（待决策 3 遗留项）：
+        //      反汇编显示 arg2 = `某个对象的 +0x1c0`，而填充函数（`dm_pp_get_funcs`）的调用者
+        //      把结果存进「另一对象的 +0x1c0」。探针同时读 controller+0x308（符号 `dc_context`
+        //      的持有者候选）↔ 其 +0x1c0，以及同一对象的 +0x310（clk_mgr 候选），
+        //      用来判定「填充函数写的实例」与「clk_mgr 收到的实例」是否同一个。
+        //  (b) Apple 的 vtable 槽内容是**可执行跳转桩**（7 字节 `mov 0xXXXX(%rip),%rax; jmp *(%rax)`），
+        //      真正的实现地址在桩**解引用后**才拿到 ⇒ 读槽自身 + 解引用一并记录。
+        UInt64 c308 = 0, c310 = 0, d1c0 = 0;
+        UInt64 hs10 = 0, hs18 = 0, hs20 = 0;
+        UInt64 a00t = 0, s6b8t = 0;
+        UInt64 predSelf = 0, selfFnAddr = 0;
         if (isKernelPtr(s)) {
+            // ★ 判据自检（第 6 批次）：本探针函数自身的运行地址就是"本 kext 映像内的可执行地址"，
+            //   用它直接验证新阈值是否覆盖 kext 映像区。该值应为 `0xffffff7f…`，且判据须返回真。
+            predSelf = isKernelPtr(reinterpret_cast<UInt64>(&X6000FB::wrapPpHelperPowerUp)) ? 1ULL : 0ULL;
+            selfFnAddr = reinterpret_cast<UInt64>(&X6000FB::wrapPpHelperPowerUp);
             // ★ 读取可信度对照：读一个内容已知的静态标量 + self 自身的 vtable
             magicRead = load64(reinterpret_cast<UInt64>(&gReadCheckMagic), 0);
             svt = load64(s, 0x000);          // self(PP helper) 的 vtable
@@ -856,7 +874,12 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                     ctl5f18 = load64(cs, 0x5F18);
                     ctl100  = load64(cs, 0x100);
                 }
-                if (isKernelPtr(hs)) { hs28 = load64(hs, 0x28); }
+                if (isKernelPtr(hs)) {
+                    hs10 = load64(hs, 0x10);
+                    hs18 = load64(hs, 0x18);
+                    hs20 = load64(hs, 0x20);
+                    hs28 = load64(hs, 0x28);
+                }
             }
             o20 = load64(s, 0x20);   // = controller（见 pph_report.md）
             o50 = load64(s, 0x50);   // = HWServices 实例（controller->vtable[0xa08]()）
@@ -868,8 +891,13 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                     v0_10  = load64(vt20, 0x010);
                     v0_118 = load64(vt20, 0x118);
                     a00    = load64(vt20, 0xA00);
+                    if (isKernelPtr(a00)) { a00t = load64(a00, 0x00); }
                 }
                 c7960 = load64(o20, 0x7960);   // ★ IRI 转发的目标对象（messageAccelerator 读它）
+                // (a) `pp_smu_funcs` 来源链：读 controller+0x308 → 其 +0x1c0；再读 +0x310
+                c308 = load64(o20, 0x308);
+                c310 = load64(o20, 0x310);
+                if (isKernelPtr(c308)) { d1c0 = load64(c308, 0x1c0); }
             }
             if (isKernelPtr(o50)) {
                 vt50 = load64(o50, 0x00);
@@ -880,6 +908,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                     s850 = load64(vt50, 0x850);   // getTtl()
                     s670 = load64(vt50, 0x670);   // 绑定方法（注册时调用）
                     s6b8 = load64(vt50, 0x6B8);   // ★ IRI 转发（messageAccelerator 最终调它）
+                    if (isKernelPtr(s6b8)) { s6b8t = load64(s6b8, 0x00); }
                 }
             }
         }
@@ -891,7 +920,9 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         //   · 该字段的唯一非零写入点是 `callPlatformFunctionFromDrvr` 的 selector=0 路径
         //     （"注册对象 + 调 对象->vtable[0x670](controller)"），而它由**本 kext 之外**
         //     （AMDSupport / 加速器侧）发起 ⇒ 在本场景下没有发生；
-        //   · HWServices 类族（Navi/SWIP/Abstract/Interface）的 vtable 都是 271 槽 ⇒ 含 0x6b8。
+        //   · PP helper 持有的后端实例（`this+0x50`）经离线坐标换算确认，其 vtable 是
+        //     `__ZTV38AMDRadeonX5000_AMDRadeonHWServicesVega`（在 X5000HWServices kext 内，
+        //     该 kext 已加载）⇒ 这是 Apple 自己为"Renoir 身份"选定的实现类，**不是空壳**。
         //  ⇒ 本门控把 PP helper 已经持有的 HWServices 实例（`this+0x50`）补注册进去，
         //    并调用 Apple 自己的绑定方法（vtable[0x670]），**不构造任何假对象**。
         if (wantRegister && isKernelPtr(o20) && o50 != 0 && c7960 == 0) {
@@ -915,17 +946,24 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             const UInt64 vMagic = magicRead, vSvt = svt, vSv8 = sv8, vSv10 = sv10;
             const UInt64 vCtl5f18 = ctl5f18, vCtl100 = ctl100, vHs28 = hs28;
             const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
-            panic("NRed PPH probe: READCHK magic=%llx[exp=a5a5a5a512345678] self=%llx svt=%llx sv[8]=%llx sv[10]=%llx "
-                  "| CTL[5f18]=%llx CTL[100]=%llx HS[28]=%llx "
+            const UInt64 vPred = predSelf, vSelfFn = selfFnAddr;
+            const UInt64 v308 = c308, v310 = c310, vD1c0 = d1c0;
+            const UInt64 vHs10 = hs10, vHs18 = hs18, vHs20 = hs20;
+            const UInt64 vA00t = a00t, v6b8t = s6b8t;
+            panic("NRed PPH probe: PREDCHK selfFn=%llx pred=%llu[exp:0xffffff7f.. & 1] "
+                  "magic=%llx[exp=a5a5a5a512345678] self=%llx svt=%llx sv[8]=%llx sv[10]=%llx "
+                  "| CTL[5f18]=%llx CTL[100]=%llx CTL[308]=%llx CTL[310]=%llx DC308_1c0=%llx "
+                  "| HS[10]=%llx HS[18]=%llx HS[20]=%llx HS[28]=%llx "
                   "| o20=%llx o50=%llx "
-                  "| vt20=%llx [0]=%llx [8]=%llx [10]=%llx [118]=%llx [a00]=%llx "
-                  "| vt50=%llx [0]=%llx [8]=%llx [10]=%llx [850]=%llx [670]=%llx [6b8]=%llx "
+                  "| vt20=%llx [0]=%llx [8]=%llx [10]=%llx [118]=%llx [a00]=%llx a00impl=%llx "
+                  "| vt50=%llx [0]=%llx [8]=%llx [10]=%llx [850]=%llx [670]=%llx [6b8]=%llx 6b8impl=%llx "
                   "| c7960=%llx | ma calls=%llu iri=%llu dummy=%llu",
-                  vMagic, vS, vSvt, vSv8, vSv10,
-                  vCtl5f18, vCtl100, vHs28,
+                  vSelfFn, vPred, vMagic, vS, vSvt, vSv8, vSv10,
+                  vCtl5f18, vCtl100, v308, v310, vD1c0,
+                  vHs10, vHs18, vHs20, vHs28,
                   v20, v50,
-                  vVt20, w00, w08, w10, w118, vA00,
-                  vVt50, x00, x08, x10, v850, v670, v6b8,
+                  vVt20, w00, w08, w10, w118, vA00, vA00t,
+                  vVt50, x00, x08, x10, v850, v670, v6b8, v6b8t,
                   v7960, vCalls, vIri, vDummy);
         }
     }
@@ -939,7 +977,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 //  安全：只在 boot-arg `-NRedStageMark` 存在时生效；解引用前做内核地址范围校验，探针自身绝不 panic。
 UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
 {
-    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
     auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
         return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
     };
