@@ -325,7 +325,7 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
         //   ⚠️ 修正（2026-09-26，第 6 批次）：原条件**漏了 `-NRedRegisterHwSvc`** ⇒ 该门控
         //      从未真正安装 hook，"补注册"从未在真机执行过（第 5 批次对它的否定评价属**未实测的推断**）。
         if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")
-            || checkKernelArgument("-NRedAccelProbe")) {
+            || checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")) {
             KernelPatcher::RouteRequest pphRequest{"__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv",
                                                   wrapPpHelperPowerUp, this->orgPpHelperPowerUp};
             if (!patcher.routeMultiple(id, &pphRequest, 1, slide, size)) {
@@ -840,8 +840,9 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     const bool wantProbe = checkKernelArgument("-NRedStagePanic6");
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
     const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
+    const bool wantAccelLog = checkKernelArgument("-NRedAccelLog");
 
-    if (wantProbe || wantRegister || wantAccelProbe) {
+    if (wantProbe || wantRegister || wantAccelProbe || wantAccelLog) {
         auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
@@ -916,7 +917,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             //  `com.apple.kext.AMDRadeonX5000.xml` 亦然）⇒ **provider 上该属性为真**是
             //  加速器被匹配、start、进而写 `controller+0x7960` 的必要条件。
             //  安全：只调用 IOKit 的只读访问器（getProvider/getProperty），不调用 Apple 虚方法。
-            if (wantAccelProbe && isKernelPtr(o20)) {
+            if ((wantAccelProbe || wantAccelLog) && isKernelPtr(o20)) {
                 auto* prov = OSDynamicCast(IOService, reinterpret_cast<IOService*>(o20)->getProvider());
                 if (prov != nullptr) {
                     pci = reinterpret_cast<UInt64>(prov);
@@ -994,6 +995,17 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                   "| c7960=%llx hsD8=%llx | READCHK magic=%llx[exp=a5a5a5a512345678]",
                   vCtl, vPci, vLhws, vLctl, vLacc, v7960, vD8, vMagic);
         }
+
+        // ─── 通道 A（**推荐**）：日志通道（门控 `-NRedAccelLog`，零挂死风险）────────
+        //  与 drvr 探针同理：SYSLOG → `liludump` 落盘 → 离线读 macOS 卷的 Lilu 日志。
+        if (wantAccelLog) {
+            SYSLOG("X6000FB",
+                   "accel probe: ctl=%llx pci=%llx LoadHwSvc=%llu LoadCtl=%llu LoadAccel=%llu c7960=%llx hsD8=%llx",
+                   static_cast<unsigned long long>(o20), static_cast<unsigned long long>(pci),
+                   static_cast<unsigned long long>(lHws), static_cast<unsigned long long>(lCtl),
+                   static_cast<unsigned long long>(lAcc), static_cast<unsigned long long>(c7960),
+                   static_cast<unsigned long long>(hsD8));
+        }
     }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
@@ -1022,8 +1034,27 @@ IOReturn X6000FB::wrapCallPlatformFunctionFromDrvr(void* const self, const UInt3
     const UInt64 v2   = reinterpret_cast<UInt64>(arg2);
     const UInt64 v3   = reinterpret_cast<UInt64>(arg3);
     const UInt64 v4   = reinterpret_cast<UInt64>(arg4);
-    panic("NRed accel drvr probe: self=%llx sel=%llu a2=%llx a3=%llx a4=%llx c7960=%llx", vSelf, vSel, v2, v3, v4,
-          v7960);
+
+    // ─── 通道 A（**推荐**）：日志通道，零挂死风险（门控 `-NRedAccelLog`）──────────
+    //  理由（2026-09-26 教训）：主动 panic 会中断启动，且本项目已两次遇到"同一二进制
+    //  一轮成功、一轮挂死"的非确定性挂死。改用 SYSLOG 后由 Lilu 的 `liludump` 定时落盘，
+    //  之后**离线只读挂载 macOS 卷**即可读（读法见技能文件）——不仅零挂死风险，
+    //  一轮引导还能拿到**全部**观测点（panic 通道只能拿到最早触发的那一个）。
+    //  仅记录注册请求（selector = 0）：本函数调用面很宽，无过滤会把高频噪声灌满日志。
+    if (selector == 0 && checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("X6000FB", "accel drvr probe: self=%llx sel=%llu a2=%llx a3=%llx a4=%llx c7960=%llx",
+               static_cast<unsigned long long>(vSelf), static_cast<unsigned long long>(vSel),
+               static_cast<unsigned long long>(v2), static_cast<unsigned long long>(v3),
+               static_cast<unsigned long long>(v4), static_cast<unsigned long long>(v7960));
+    }
+
+    // ─── 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；**高风险，慎用**）────
+    //  ⚠️ 加 `selector == 0` 过滤（2026-09-26）：无过滤地 panic 可能落在极早阶段
+    //     （任何平台函数调用都会进来），破坏"panic 后自动重启"。格式串本身未改（已投产）。
+    if (selector == 0 && checkKernelArgument("-NRedAccelProbe")) {
+        panic("NRed accel drvr probe: self=%llx sel=%llu a2=%llx a3=%llx a4=%llx c7960=%llx", vSelf, vSel, v2, v3, v4,
+              v7960);
+    }
 
     return FunctionCast(wrapCallPlatformFunctionFromDrvr,
                         singleton().orgCallPlatformFunctionFromDrvr)(self, selector, arg2, arg3, arg4);

@@ -203,8 +203,9 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     //  "IOFramebuffer" 查得）非空时，才会用 `OSSymbol("SpecialAMDKey")`（`this+0x1f48`）向
     //  controller 发 selector = 0 的注册调用（`call *(controller)->vtable[0x6b8]`）；
     //  为 0 则整段跳过 ⇒ `controller+0x7960` 永远为空。
-    //  仅 `-NRedAccelProbe` 时安装（默认零影响）；与其它探针互斥使用（先触发者先 panic）。
-    if (checkKernelArgument("-NRedAccelProbe")) {
+    //  仅 `-NRedAccelProbe`（panic 通道）或 `-NRedAccelLog`（日志通道，零挂死风险）时安装；
+    //  默认零影响。
+    if (checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")) {
         PenguinWizardry::PatternRouteRequest accelStartReq{
             "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator5startEP9IOService", wrapAccelStart, this->orgAccelStart};
         if (!accelStartReq.route(patcher, id, slide, size)) {
@@ -839,8 +840,21 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
     }
     const UInt64 vRet  = ret ? 1 : 0;
     const UInt64 vProv = reinterpret_cast<UInt64>(provider);
-    panic("NRed accel start probe: self=%llx provider=%llx ret=%llu | f140=%llx f148=%llx f158=%llx f160=%llx", s,
-          vProv, vRet, f140, f148, f158, f160);
+
+    // 通道 A（**推荐**）：日志通道（门控 `-NRedAccelLog`，零挂死风险）——SYSLOG → `liludump` 落盘 → 离线读。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("X5000", "accel start probe: self=%llx provider=%llx ret=%llu f140=%llx f148=%llx f158=%llx f160=%llx",
+               static_cast<unsigned long long>(s), static_cast<unsigned long long>(vProv),
+               static_cast<unsigned long long>(vRet), static_cast<unsigned long long>(f140),
+               static_cast<unsigned long long>(f148), static_cast<unsigned long long>(f158),
+               static_cast<unsigned long long>(f160));
+    }
+
+    // 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；高风险，慎用）。格式串未改（已投产）。
+    if (checkKernelArgument("-NRedAccelProbe")) {
+        panic("NRed accel start probe: self=%llx provider=%llx ret=%llu | f140=%llx f148=%llx f158=%llx f160=%llx", s,
+              vProv, vRet, f140, f148, f158, f160);
+    }
 
     return ret;
 }
