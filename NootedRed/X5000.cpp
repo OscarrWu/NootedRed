@@ -142,9 +142,14 @@ X5000::X5000()
     }
 }
 
+// 第八步观测：保存 X5000 kext 的 slide，供探针在运行时定位其内部符号（如 probe 用的属性名 OSSymbol）
+UInt64 gX5000Slide = 0;
+
 void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000.loadIndex != id) { return; }
+
+    gX5000Slide = slide;
 
     DBGLOG("X5000", "processKext: X5000 matched, begin (id=%zu slide=0x%llX size=0x%zX)", id, slide, size);
 

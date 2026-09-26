@@ -46,6 +46,7 @@ extern UInt64 gAccelProbeRet;
 extern UInt64 gAccelProbeScoreIn;
 extern UInt64 gAccelProbeScoreOut;
 extern UInt64 gAccelProbeProv;
+extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
 static const UInt8 kCailAsicCapsTablePattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                   0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -1135,6 +1136,28 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
+
+    // ─── `probe` 所需属性名探针（门控 `-NRedAccelExist3`，默认关闭）─────────────────
+    //  动机（第 16 轮读数）：加速器类**已注册**（`metaCls != 0`）却**零实例**；离线反汇编
+    //  `probe`（VM 0x1054）显示入口有"取 provider 某属性，取不到即 `*score = -1` 拒绝"的路径，
+    //  该属性名以 OSSymbol 形式存放在 kext 内部地址 `0x1ED008`（归零 VM）。
+    //  本探针把那个 OSSymbol 的**字符串**读出来（纯读访问器 `getCStringNoCopy()`；不做任何调用型副作用），
+    //  从而知道"Apple 的 probe 到底在等哪个属性"。
+    //  安全：只读两个候选地址（slide 语义不确定，故两个都试）、只做一次纯读访问器调用；
+    //        panic 实参全部预先求值；新开探针位。
+    if (checkKernelArgument("-NRedAccelExist3")) {
+        const UInt64 candA = gX5000Slide + 0x1ED008;                 // 若 slide 已含 kext 链接基准
+        const UInt64 candB = gX5000Slide + 0x4B37000 + 0x1ED008;     // 若 slide 为相对链接地址的偏移
+        UInt64 symA = 0, symB = 0;
+        if (candA >= 0xffffff7f80000000ULL) { symA = *reinterpret_cast<volatile UInt64*>(candA); }
+        if (candB >= 0xffffff7f80000000ULL) { symB = *reinterpret_cast<volatile UInt64*>(candB); }
+        const char* nameA = nullptr;
+        const char* nameB = nullptr;
+        if (symA >= 0xffffff7f80000000ULL) { nameA = reinterpret_cast<OSSymbol*>(symA)->getCStringNoCopy(); }
+        if (symB >= 0xffffff7f80000000ULL) { nameB = reinterpret_cast<OSSymbol*>(symB)->getCStringNoCopy(); }
+        panic("NRed accel exist3: slide=%llx | A=%llx symA=%llx nameA=%s | B=%llx symB=%llx nameB=%s", gX5000Slide,
+              candA, symA, nameA != nullptr ? nameA : "(null)", candB, symB, nameB != nullptr ? nameB : "(null)");
+    }
 
     // ─── 加速器类注册状态探针（门控 `-NRedAccelExist2`，默认关闭）──────────────────
     //  背景（第 13 轮）：在匹配阶段（`probe`）panic **太早**，panic 文本可能写不完 ⇒ 表现为挂死。
