@@ -25,6 +25,7 @@
 #include <libkern/c++/OSBoolean.h>    // 第八步加速器探针：属性值的真假判定
 #include <libkern/c++/OSDictionary.h> // 加速器补注册：serviceMatching 的匹配字典
 #include <libkern/c++/OSSymbol.h>     // 加速器补注册：OSSymbol("SpecialAMDKey")
+#include <libkern/c++/OSMetaClass.h>  // 加速器类注册状态探针：getMetaClassWithName
 #include <IOKit/IOTypes.h>
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
 #include <Kexts.hpp>
@@ -1127,6 +1128,53 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
+
+    // ─── 加速器类注册状态探针（门控 `-NRedAccelExist2`，默认关闭）──────────────────
+    //  背景（第 13 轮）：在匹配阶段（`probe`）panic **太早**，panic 文本可能写不完 ⇒ 表现为挂死。
+    //  ⇒ 本探针改挂**已验证安全**的 `AmdRadeonController::powerUp`（早但不过早，历史多轮均能自动重启）。
+    //  要回答的问题：加速器类**在 IOKit 里是否已注册**——若未注册，personality 再正确也无法实例化。
+    //  读数：
+    //   · metaCls  = `OSMetaClass::getMetaClassWithName("AMDRadeonX5000_AMDVega10GraphicsAccelerator")`
+    //                （0 ⇒ 类未注册 ⇒ 匹配必然失败）
+    //   · metaBase = 同上，基类 `AMDRadeonX5000_AMDGraphicsAccelerator`（对照）
+    //   · accel    = `copyMatchingService(serviceMatching("IOAccelerator"))`
+    //   · accelCls = `copyMatchingService(serviceMatching("<Vega10 加速器类名>"))`
+    //  安全：只读查询；新开探针位（不改已投产格式串）；panic 实参全部预先求值。
+    if (checkKernelArgument("-NRedAccelExist2")) {
+        auto probeSvc = [](const char* const cls) -> UInt64 {
+            auto*  m = IOService::serviceMatching(cls);
+            UInt64 r = 0;
+            if (m != nullptr) {
+                auto* s = IOService::copyMatchingService(m);
+                m->release();
+                if (s != nullptr) {
+                    r = reinterpret_cast<UInt64>(s);
+                    s->release();
+                }
+            }
+            return r;
+        };
+        UInt64 metaCls = 0, metaBase = 0;
+        auto*  symCls = OSSymbol::withCString("AMDRadeonX5000_AMDVega10GraphicsAccelerator");
+        auto*  symBase = OSSymbol::withCString("AMDRadeonX5000_AMDGraphicsAccelerator");
+        if (symCls != nullptr) {
+            metaCls = reinterpret_cast<UInt64>(OSMetaClass::getMetaClassWithName(symCls));
+        }
+        if (symBase != nullptr) {
+            metaBase = reinterpret_cast<UInt64>(OSMetaClass::getMetaClassWithName(symBase));
+        }
+        UInt64 f7960 = 0;
+        const UInt64 ctlAddr2 = reinterpret_cast<UInt64>(self);
+        if (ctlAddr2 >= 0xffffff7f80000000ULL) {
+            f7960 = *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(self) + 0x7960);
+        }
+        const UInt64 vAccel    = probeSvc("IOAccelerator");
+        const UInt64 vAccelCls = probeSvc("AMDRadeonX5000_AMDVega10GraphicsAccelerator");
+        if (symCls != nullptr) { symCls->release(); }
+        if (symBase != nullptr) { symBase->release(); }
+        panic("NRed accel exist2: metaCls=%llx metaBase=%llx accel=%llx accelCls=%llx c7960=%llx", metaCls, metaBase,
+              vAccel, vAccelCls, f7960);
+    }
 
     // ─── 加速器实例存在性探针（门控 `-NRedAccelExist`，默认关闭）────────────────────
     //  为什么挂这里：本 hook 的 route 是**无条件**安装的（`processKext` 里对
