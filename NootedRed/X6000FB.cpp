@@ -18,6 +18,7 @@
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
+#include <NvDiag.hpp>      // NVRAM 写入能力诊断探针（诊断用，见该文件头部注释）
 #include <StageMark.hpp>
 #include <kern/debug.h>    // panic() 声明（Probe D1 v2 崩溃出口注入）
 #include <IOKit/IOReturn.h>
@@ -1108,6 +1109,20 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
         if (p30 != 0) {
             StageMark::markHex("dh-b118", b118);
         }
+    }
+
+    // ─── NVRAM 写入能力诊断（门控 `-NRedNvDiagRead` / `-NRedNvDiagWrite`，默认关闭）──────
+    //  目的：一次真机引导取回 `/options` 节点的类名、读通道是否工作、两种 GUID 的写结果、
+    //        safeToSync/sync 返回值 —— 用于定位 `NVStorage::write` 返回 false 的确切环节。
+    //  依据：docs/NVRAM观测通道方案与风险评估.md §3.3；kb/re/AppleEFINVRAM写入判据报告.md
+    //  安全：`-NRedNvDiagRead` 全程只读；`-NRedNvDiagWrite` 才写 2 个小变量。两者不要同时开。
+    if (checkKernelArgument("-NRedNvDiagRead") || checkKernelArgument("-NRedNvDiagWrite")) {
+        const bool allowWrite = checkKernelArgument("-NRedNvDiagWrite");
+        const auto nvd = NvDiag::run(allowWrite);
+        panic("NRed nvdiag: entry=%llx dtn=%llu cls=%llx rdlen=%llu rd0=%llx"
+              " wrC=%llu wrA=%llu sSafe=%llu sDone=%llu",
+              nvd.entry, nvd.isDtn, nvd.clsWord, nvd.rdLen, nvd.rd0,
+              nvd.wrCustom, nvd.wrApple, nvd.syncSafe, nvd.syncDone);
     }
 
     // 诊断出口（boot-arg `-NRedStagePanic`）：用**已验证可靠**的 panic→efivarfs 通道把
