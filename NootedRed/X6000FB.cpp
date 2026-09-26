@@ -71,6 +71,14 @@ static const UInt8 kDpReceiverPowerCtrlPattern1404[] = {0x55, 0x48, 0x89, 0xE5, 
                                                         0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x10, 0x41,
                                                         0x89, 0xF7, 0xB0, 0x02, 0x44, 0x28, 0xF8};
 
+// `dc_clk_mgr_create`（Apple DC 时钟管理器工厂，未导出符号）的入口模式。
+// 唯一性已核验：13.6 目标二进制与 12.5 基准各命中 1 处（kb/kexts/13.6/extracted/*.macho 本地搜索）。
+// 用途见第八步执行记录：崩溃链 `[[X+0x58]+0x30]+0x118` 位于本函数内。
+static const UInt8 kDcClkMgrCreatePattern[] = {
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x48, 0x89,
+    0xFB, 0x8B, 0x47, 0x2C, 0x44, 0x8B, 0x6F, 0x34, 0x3D, 0x86, 0x00, 0x00, 0x00, 0x7E, 0x4A, 0x05,
+    0x79, 0xFF, 0xFF, 0xFF, 0x83, 0xF8, 0x08, 0x0F, 0x87, 0x81, 0x01, 0x00, 0x00, 0x49, 0x89, 0xD4};
+
 static const UInt8      kCreateVramInfoCallPattern[]          = {0x48, 0x8B, 0x7B, 0x18, 0x48, 0x8B, 0x43, 0x20, 0x0F,
                                                                  0xB7, 0x70, 0x3C, 0xE8, 0x00, 0x00, 0x00, 0x00};
 static const UInt8      kCreateVramInfoCallPatternMask[]      = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -274,6 +282,18 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                 SYSLOG("X6000FB", "stage-mark: failed to route AmdDalHelper::powerUp");
             } else {
                 DBGLOG("X6000FB", "stage-mark: routed AmdDalHelper::powerUp");
+            }
+        }
+
+        // 第八步观测：hook Apple 的 dc_clk_mgr_create（**未导出符号** → 用模式定位）
+        //   观测点选在它入口：此处 `ctx->f58` 已由 powerUp 内部赋值，等于崩溃时刻的值。
+        {
+            PenguinWizardry::PatternRouteRequest clkRequest{"dc_clk_mgr_create", wrapDcClkMgrCreate,
+                                                             this->orgDcClkMgrCreate, kDcClkMgrCreatePattern};
+            if (!clkRequest.route(patcher, id, slide, size)) {
+                SYSLOG("X6000FB", "stage-mark: failed to route dc_clk_mgr_create (pattern miss)");
+            } else {
+                DBGLOG("X6000FB", "stage-mark: routed dc_clk_mgr_create");
             }
         }
 
@@ -643,14 +663,56 @@ IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType,
 // 诊断：探针消息原始响应（文件作用域，供 wrapHandleCriticalError 的 panic 消息打印）
 static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 
+// ─── 第八步观测探针：dc_clk_mgr_create（精确观测点）───────────────────────────
+//  为什么需要它：崩溃链是 `[[A+0x58]+0x30]+0x118`，其中 `A->f58` 由 `AmdDalHelper::powerUp`
+//  **内部**创建后再复制给 A（实测：在 powerUp 入口读 `dalHelper->f48->f58` 为 0，
+//  而崩溃时 `A->f58` 非空——CI run80 的探针已证）。因此要读崩溃时刻的值，
+//  观测点必须落在 `dc_clk_mgr_create` 入口：该函数由 powerUp 内部在完成 `A->f58` 赋值后调用
+//  （`0xff660` 赋值 → `0xff77d` 调用），故入口处读到的 `ctx->f58->f30` 就是崩溃时的值。
+//  额外收益：本函数的第二个参数就是 `struct pp_smu_funcs *`（PP-SMU 侧），
+//  读它即可判定"PPLIB 被抑制后 PP-SMU 侧是否真的可用"——这是决定后续路线的关键证据。
+//  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic2`（与 DalHelper 探针互斥使用）。
+void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* const dccg)
+{
+    if (checkKernelArgument("-NRedStagePanic2")) {
+        auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+        auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+
+        const UInt64 c = reinterpret_cast<UInt64>(ctx);
+        UInt64 p58 = 0, p30 = 0, b118 = 0xff;
+        if (isKernelPtr(c) && isKernelPtr(load64(c, 0x58))) {
+            p58 = load64(c, 0x58);
+            if (isKernelPtr(load64(p58, 0x30))) {
+                p30 = load64(p58, 0x30);
+                b118 = *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(p30) + 0x118);
+            }
+        }
+
+        const UInt64 pp = reinterpret_cast<UInt64>(ppSmu);
+        UInt64 pp0 = 0, pp8 = 0, pp10 = 0, pp18 = 0;
+        if (isKernelPtr(pp)) {
+            pp0  = load64(pp, 0x00);
+            pp8  = load64(pp, 0x08);
+            pp10 = load64(pp, 0x10);
+            pp18 = load64(pp, 0x18);
+        }
+
+        const UInt64 d = reinterpret_cast<UInt64>(dccg);
+        const UInt64 v58 = p58, v30 = p30, v118 = b118, v0 = pp0, v8 = pp8, v10 = pp10, v18 = pp18;
+        panic("NRed clk_mgr probe: ctx=%llx ctx58=%llx ctx58_30=%llx b118=%llx "
+              "| pp_smu=%llx [0]=%llx [8]=%llx [10]=%llx [18]=%llx | dccg=%llx",
+              c, v58, v30, v118, pp, v0, v8, v10, v18, d);
+    }
+
+    return FunctionCast(wrapDcClkMgrCreate, singleton().orgDcClkMgrCreate)(ctx, ppSmu, dccg);
+}
+
 // ─── 第八步观测探针：AmdDalHelper::powerUp ───────────────────────────────────
-//  目的：读崩溃链上的指针实际取值（`dalHelper->f48->f58->f30` 及 `f30+0x118`），
-//        写进 NVRAM（`StageMark`），使"崩溃即发生"的引导也能把状态带回来。
-//  依据：第八步第 1 批次的真机崩溃点在 Apple 的 `dc_clk_mgr_create` 路径上，
-//        形如 `[[X+0x58]+0x30]+0x118`，而该链在 `AmdDalHelper::powerUp` 内部被使用；
-//        入口处读到的值即崩溃时刻的值（该函数内部未再改写 `f48->f58`）。
-//  安全：只在 boot-arg `-NRedStageMark` 存在时生效；解引用前做内核地址范围校验，
-//        探针自身绝不 panic（失败即静默）。
+//  目的：读 `dalHelper->f48->f58->f30` 在 **powerUp 入口**的取值（结论：入口读到的是
+//        尚未创建的状态——CI run80 实测 f58=0），用于确认"该字段由 powerUp 内部创建"。
+//  安全：只在 boot-arg `-NRedStageMark` 存在时生效；解引用前做内核地址范围校验，探针自身绝不 panic。
 UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
 {
     auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
