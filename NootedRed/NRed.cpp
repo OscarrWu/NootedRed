@@ -19,6 +19,7 @@
 #include <Headers/kern_iokit.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
+#include <StageMark.hpp>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOTypes.h>
 #include <IOKit/pci/IOPCIDevice.h>
@@ -41,6 +42,8 @@ NRed& NRed::singleton() { return moduleInstance; }
 
 void NRed::init()
 {
+    // 第八步观测：驱动初始化已进入（NVRAM 侧，`-NRedStageMark` 时生效；崩溃也能取回）
+    StageMark::mark("nred-init");
     SYSLOG("NRed", "|-----------------------------------------------------------------|");
     SYSLOG("NRed", "| Copyright 2022-2025 ChefKiss.                                   |");
     SYSLOG("NRed", "| If you've paid for this, you've been scammed. Ask for a refund! |");

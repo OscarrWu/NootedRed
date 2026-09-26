@@ -11,6 +11,7 @@
 #include <GPUDriversAMD/Accel/HWDisplay.hpp>
 #include <GPUDriversAMD/RavenIPOffset.hpp>
 #include <Headers/kern_util.hpp>
+#include <StageMark.hpp>
 #include <PenguinWizardry/RuntimeMC.hpp>
 #include <PenguinWizardry/RuntimeVFT.hpp>
 #include <Regs/DCN314.hpp>
@@ -327,6 +328,7 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
     UInt32 stages = 0;
 
     DBGLOG("GFX9DCN314Display", "display-init: sequence start");
+    StageMark::mark("seq-start");
 
     // ① 显示时钟（第五步）：VBIOSSMC 完整主流程。
     //    对应 Linux `dcn31_init_hw` 的第一步 `clk_mgr->funcs->init_clocks`（dcn31_hwseq.c:124-125）。
@@ -376,6 +378,8 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
            "display-init: sequence done (stages=0x%X clocks=%u pixrate=%u odm=%u resync=%u)", stages,
            (stages & kStageClocks) != 0, (stages & kStagePixelRate) != 0, (stages & kStageOdm) != 0,
            (stages & kStageFifoResync) != 0);
+    // NVRAM 侧的同一信息（`-NRedStageMark` 时生效）：崩溃发生在编排之后也能取回阶段位图
+    StageMark::markHex("seq-done", stages);
 }
 
 // init 覆写：先走基类 init（super chain：原版 init → isDCN → initDCNRegOffs 经 vft slot 0 分发到本类），
@@ -384,13 +388,18 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
 bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* const _self, void* const hwInterface,
                                                void* const fbParams)
 {
-    if (!superInit(_self, hwInterface, fbParams)) { return false; }
+    StageMark::mark("disp-init-enter");
+    if (!superInit(_self, hwInterface, fbParams)) {
+        StageMark::mark("disp-init-basefail");
+        return false;
+    }
 
     if (!sDisplayInitSeqApplied) {
         sDisplayInitSeqApplied = true;
         applyInitialDisplaySequence(static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self));
     }
 
+    StageMark::mark("disp-init-ok");
     return true;
 }
 

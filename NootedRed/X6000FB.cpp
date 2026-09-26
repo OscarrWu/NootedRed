@@ -18,6 +18,7 @@
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
+#include <StageMark.hpp>
 #include <kern/debug.h>    // panic() 声明（Probe D1 v2 崩溃出口注入）
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOTypes.h>
@@ -260,6 +261,19 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                 SYSLOG("X6000FB", "observe P2: failed to route handleCriticalError (symbol may differ on 13.6)");
             } else {
                 DBGLOG("X6000FB", "observe P2: routed handleCriticalError");
+            }
+        }
+
+        // 第八步观测：hook AmdDalHelper::powerUp —— 入口读崩溃链上的指针并写 NVRAM
+        //   （仅在 boot-arg `-NRedStageMark` 存在时写；route 失败只记日志，不影响引导）
+        {
+            KernelPatcher::RouteRequest dhRequest{
+                "__ZN27AMDRadeonX6000_AmdDalHelper7powerUpEv",
+                wrapDalHelperPowerUp, this->orgDalHelperPowerUp};
+            if (!patcher.routeMultiple(id, &dhRequest, 1, slide, size)) {
+                SYSLOG("X6000FB", "stage-mark: failed to route AmdDalHelper::powerUp");
+            } else {
+                DBGLOG("X6000FB", "stage-mark: routed AmdDalHelper::powerUp");
             }
         }
 
@@ -629,8 +643,56 @@ IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType,
 // 诊断：探针消息原始响应（文件作用域，供 wrapHandleCriticalError 的 panic 消息打印）
 static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 
+// ─── 第八步观测探针：AmdDalHelper::powerUp ───────────────────────────────────
+//  目的：读崩溃链上的指针实际取值（`dalHelper->f48->f58->f30` 及 `f30+0x118`），
+//        写进 NVRAM（`StageMark`），使"崩溃即发生"的引导也能把状态带回来。
+//  依据：第八步第 1 批次的真机崩溃点在 Apple 的 `dc_clk_mgr_create` 路径上，
+//        形如 `[[X+0x58]+0x30]+0x118`，而该链在 `AmdDalHelper::powerUp` 内部被使用；
+//        入口处读到的值即崩溃时刻的值（该函数内部未再改写 `f48->f58`）。
+//  安全：只在 boot-arg `-NRedStageMark` 存在时生效；解引用前做内核地址范围校验，
+//        探针自身绝不 panic（失败即静默）。
+UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
+{
+    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+    auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+        return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+    };
+
+    if (StageMark::enabled() && isKernelPtr(reinterpret_cast<UInt64>(self))) {
+        const UInt64 selfAddr = reinterpret_cast<UInt64>(self);
+        UInt64 p48 = 0;
+        if (isKernelPtr(load64(selfAddr, 0x48))) {
+            p48 = load64(selfAddr, 0x48);
+        }
+        UInt64 p58 = 0;
+        if (p48 != 0 && isKernelPtr(load64(p48, 0x58))) {
+            p58 = load64(p48, 0x58);
+        }
+        UInt64 p30 = 0;
+        if (p58 != 0 && isKernelPtr(load64(p58, 0x30))) {
+            p30 = load64(p58, 0x30);
+        }
+
+        StageMark::mark("dh-enter");
+        StageMark::markHex("dh-self", selfAddr);
+        StageMark::markHex("dh-f48", p48);
+        StageMark::markHex("dh-f58", p58);
+        StageMark::markHex("dh-f30", p30);
+        if (p30 != 0) {
+            StageMark::markHex("dh-b118", *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(p30) + 0x118));
+        }
+    }
+
+    const auto ret = FunctionCast(wrapDalHelperPowerUp, singleton().orgDalHelperPowerUp)(self);
+    if (StageMark::enabled()) {
+        StageMark::markHex("dh-ret", ret);
+    }
+    return ret;
+}
+
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
+    StageMark::mark("powerUp-enter");
     auto& m_flags  = getMember<UInt8>(self, 0x5F18);
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
@@ -717,6 +779,10 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto ret       = FunctionCast(wrapControllerPowerUp, singleton().orgControllerPowerUp)(self);
     SYSLOG("X6000FB", "D3: controller::powerUp returned 0x%X (isPhoenix=%s)", ret,
            NRed::singleton().getAttributes().isPhoenix() ? "true" : "false");
+    if (StageMark::enabled()) {
+        // 观测：powerUp 是否**返回**（若在内部 panic，则本条不会出现）
+        StageMark::markHex("powerUp-ret", ret);
+    }
     if (send) { singleton().orgMessageAccelerator(self, IOFBRequestControllerEnabled, nullptr, nullptr, nullptr); }
     return ret;
 }
