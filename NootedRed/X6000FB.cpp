@@ -933,11 +933,27 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     //   处置：本旁路属**实验性探针**，不是显示点亮的必需路径——显示时钟走
     //   VBIOSSMC（67/83/91），与 PMFW（66/82/90）是两条独立通道（见交接文档 §6.4）。
     //   故改为 boot-arg `-NRedSmuBypass` 显式启用；默认不注入，保持系统可自动重启。
-    if (checkKernelArgument("-NRedSmuBypass") && NRed::singleton().getAttributes().isPhoenix()) {
+    // ─── 第 4 批次（2026-09-26）：旁路拆成**三段独立门控**（风险递增）───────────
+    //  背景：第 3 批次实测——关掉 D3 后系统能启动到 WindowServer/用户态，失败点收敛为
+    //  「Failed to send PPLIB IRI to Accelerator」+ BGM 事件错误（`SW_IP_CLIENT_ID__BGM`,
+    //  hw_id=0）⇒ 需要**唤醒 BGM**（根因三）。前人的"真修"方案就是本旁路。
+    //  但全量旁路会让"panic 后无法自动重启"（第 24 次真机；机制 = 驱动表被 PMFW 接管）。
+    //  ⇒ 据此按**风险递增**拆成三段，可单独启用：
+    //     · `-NRedSmuBypassProbe`：只发最基础的只读类消息（TestMessage / GetPmfwVersion /
+    //        GetDriverIfVersion + 三个对照）——不改变固件状态，**不会导致挂死**；
+    //     · `-NRedSmuBypassImu`  ：PowerUpVcn / PowerUpJpeg / **EnableGfxImu**——唤醒图形管理单元；
+    //     · `-NRedSmuBypassTable`：驱动表地址 + TransferTable——**最危险**（PMFW 改用我们的表）；
+    //     · `-NRedSmuBypass`     ：等价于三段全开（向后兼容）。**全部默认关闭**。
+    const auto bypAll   = checkKernelArgument("-NRedSmuBypass");
+    const auto bypProbe = bypAll || checkKernelArgument("-NRedSmuBypassProbe");
+    const auto bypImu   = bypAll || checkKernelArgument("-NRedSmuBypassImu");
+    const auto bypTable = bypAll || checkKernelArgument("-NRedSmuBypassTable");
+
+    if (NRed::singleton().getAttributes().isPhoenix() && (bypProbe || bypImu || bypTable)) {
         // ⭐ 探针三连（§16.39）：TestMessage(0x01) / GetPmfwVersion(0x02) / GetDriverIfVersion(0x03)
         //    目的：判定 PMFW 消息端口是否开着——这三条是最基础的消息，任何固件都应响应。
         //    全静默 → 消息端口未开；有响应 → 通道通，问题在消息内容/时序。
-        {
+        if (bypProbe) {
             UInt32 pr[3] = {0, 0, 0};
             X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &pr[0]);
             X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion, 0, &pr[1]);
@@ -960,6 +976,7 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             gProbeResp[4] = X5000HWLibs::smu13SendMsgDirect(0xFF, 0, nullptr) == kCAILResultOK ? 1 : 0;  // C2
             gProbeResp[5] = X5000HWLibs::smu13ProbeRegRW();       // C3
         }
+        if (bypImu) {
         // ⚠️ 顺序对齐 Linux（amdgpu_smu.c）：EnableGfxImu 在 smu_start_smc_engine 之后、
         // driver 表地址设置/TransferTable 之前发送（查证 §16.20）——先前顺序（Imu 在 Transfer 后）
         // 导致 Imu NoResponse（Transfer 失败后 PMFW 消息环状态异常）。
@@ -979,7 +996,9 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             NRed::singleton().orSmu13ProbeState(1ULL << 25);
             NRed::singleton().orSmu13ProbeState(static_cast<UInt64>(rImu & 0xFF) << 40);
         }
+        }
 
+        if (bypTable) {
         // ② 再驱动表地址 + Transfer（Linux 在 hw_setup 阶段做）
         const auto rSetup = X5000HWLibs::smu13SetupDriverTableAndTransfer();
         if (rSetup == kCAILResultOK) {
@@ -988,6 +1007,7 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         else {
             NRed::singleton().orSmu13ProbeState(1ULL << 24);
             NRed::singleton().orSmu13ProbeState(static_cast<UInt64>(rSetup & 0xFF) << 32);
+        }
         }
     }
 
