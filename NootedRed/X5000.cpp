@@ -20,6 +20,7 @@
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <PenguinWizardry/PatcherPlus.hpp>
 #include <X5000.hpp>
+#include <kern/debug.h>    // panic()（第八步加速器 start 探针）
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSObject.h>
 #include <mach/i386/vm_param.h>
@@ -195,6 +196,23 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     };
     PANIC_COND(!PenguinWizardry::PatternRouteRequest::routeAll(patcher, id, requests, slide, size), "X5000",
                "Failed to route symbols");
+
+    // 第八步观测（第 7 批次）：hook 加速器的 `start`（**出口**），读注册链的前置字段。
+    //  依据（2026-09-26 离线取证）：`AMDGraphicsAccelerator::start`（VM 0x1290）中，只有
+    //  `this+0x1f40`（= framebuffer 服务，由 `configureDevice` 按 "ATIFramebuffer" /
+    //  "IOFramebuffer" 查得）非空时，才会用 `OSSymbol("SpecialAMDKey")`（`this+0x1f48`）向
+    //  controller 发 selector = 0 的注册调用（`call *(controller)->vtable[0x6b8]`）；
+    //  为 0 则整段跳过 ⇒ `controller+0x7960` 永远为空。
+    //  仅 `-NRedAccelProbe` 时安装（默认零影响）；与其它探针互斥使用（先触发者先 panic）。
+    if (checkKernelArgument("-NRedAccelProbe")) {
+        PenguinWizardry::PatternRouteRequest accelStartReq{
+            "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator5startEP9IOService", wrapAccelStart, this->orgAccelStart};
+        if (!accelStartReq.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "accel-probe: failed to route AMDGraphicsAccelerator::start");
+        } else {
+            DBGLOG("X5000", "accel-probe: routed AMDGraphicsAccelerator::start");
+        }
+    }
 
     if (currentKernelVersion() >= MACOS_11) {
         PenguinWizardry::PatternSolveRequest solveRequest{"__ZN30AMDRadeonX5000_AMDGFX9Hardware15notifyGfxAccessEv",
@@ -794,4 +812,35 @@ void X5000::fixedGetSurfaceInfo(AMDRadeonX5000_AMDHWAlignManager* const self, AM
         pStruct->outHeight     = static_cast<UInt16>(output.height);
         pStruct->outTilingMode = input.swizzleMode;    // I think AMD forgot this, albeit seemingly unused
     }
+}
+
+// ─── 第八步观测探针：加速器 `start` 的出口（注册链前置字段）──────────────────
+//  读 `this+0x1f40`（framebuffer 服务）/ `+0x1f48`（`OSSymbol("SpecialAMDKey")`）/
+//  `+0x1f58`（AMDRadeonServiceManager 客户端）/ `+0x1f60`（电源服务管理对象）。
+//  判读：
+//   · `f140 == 0` ⇒ 加速器找不到 framebuffer ⇒ **注册整段被跳过**（`controller+0x7960` 必空）；
+//   · `f140 != 0` ⇒ 注册已被发起（此时同门控的 `callPlatformFunctionFromDrvr` 探针会先 panic，
+//     本行不会出现）；`f148` 应是一个有效 OSSymbol 指针（可由真机读数反查）。
+//  安全：只读对象字段，不调用任何 Apple 方法；门控 `-NRedAccelProbe`（默认不安装本 hook）。
+bool X5000::wrapAccelStart(void* const self, void* const provider)
+{
+    const auto ret = FunctionCast(wrapAccelStart, singleton().orgAccelStart)(self, provider);
+
+    const UInt64 s = reinterpret_cast<UInt64>(self);
+    UInt64       f140 = 0, f148 = 0, f158 = 0, f160 = 0;
+    if (s >= 0xffffff7f80000000ULL) {
+        auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+        f140 = load64(s, 0x1F40);
+        f148 = load64(s, 0x1F48);
+        f158 = load64(s, 0x1F58);
+        f160 = load64(s, 0x1F60);
+    }
+    const UInt64 vRet  = ret ? 1 : 0;
+    const UInt64 vProv = reinterpret_cast<UInt64>(provider);
+    panic("NRed accel start probe: self=%llx provider=%llx ret=%llu | f140=%llx f148=%llx f158=%llx f160=%llx", s,
+          vProv, vRet, f140, f148, f158, f160);
+
+    return ret;
 }

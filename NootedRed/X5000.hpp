@@ -40,6 +40,7 @@ class X5000
     mach_vm_address_t              orgObtainAccelChannelGroup{0};
     mach_vm_address_t              orgHwlConvertChipFamily{0};
     mach_vm_address_t              orgPM4SubmitCommandBuffer{0};
+    mach_vm_address_t              orgAccelStart{0};    // 第八步观测：AMDGraphicsAccelerator::start（注册链前置）
     void                           (*notifyGfxAccess)(void*){nullptr};
 
 public:
@@ -61,6 +62,7 @@ private:
     static void*  wrapObtainAccelChannelGroup1304(void* self, UInt32 priority, void* task);
     static UInt32 wrapHwlConvertChipFamily(void* self, UInt32 family, UInt32 revision);
     static UInt32 computeSubmitCommandBuffer(void* self, void* info);
+    static bool   wrapAccelStart(void* self, void* provider);   // 第八步观测探针（注册链前置）
     static bool   fixedGetDisplayInfo(AMDRadeonX5000_AMDHWDisplay* self, UInt32 fbIndex, bool isCRTEnabled,
                                       bool ignoreCRTOffsetCheck, IOFramebuffer* fb, FramebufferInfo* fbInfo);
     static void   fixedGetSurfaceInfo(AMDRadeonX5000_AMDHWAlignManager* self, AMD_SURFACE_INFO_STRUCT* pStruct);
