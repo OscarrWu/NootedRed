@@ -15,122 +15,32 @@
 #include <PenguinWizardry/RuntimeVFT.hpp>
 #include <Regs/DCN314.hpp>
 #include <DisplaySeq/Dcn314ClkMgr.hpp>
+#include <DisplaySeq/Dcn314DccgSeq.hpp>
+#include <PixelDiv/PixelDiv.hpp>
 #include <GPUDriversAMD/CAIL/HWBlock.hpp>
 #include <IOKit/IOLib.h>
 #include <DisplaySeq/Dcn314OdmSeq.hpp>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSMetaClass.h>
 
-// -----------------------------------------------------------------------------
-// 纯策略函数: dc_is_*_signal 纯 helper (移植自 Linux signal_types.h)
-// -----------------------------------------------------------------------------
-static inline bool dc_is_hdmi_tmds_signal(enum signal_type signal)
-{
-    return (signal == SIGNAL_TYPE_HDMI_TYPE_A);
-}
-
-static inline bool dc_is_hdmi_frl_signal(enum signal_type signal)
-{
-    return (signal == SIGNAL_TYPE_HDMI_FRL);
-}
-
-static inline bool dc_is_hdmi_signal(enum signal_type signal)
-{
-    return (dc_is_hdmi_tmds_signal(signal) || dc_is_hdmi_frl_signal(signal));
-}
-
-static inline bool dc_is_dp_signal(enum signal_type signal)
-{
-    return (signal == SIGNAL_TYPE_DISPLAY_PORT ||
-            signal == SIGNAL_TYPE_EDP ||
-            signal == SIGNAL_TYPE_DISPLAY_PORT_MST);
-}
-
-static inline bool dc_is_dvi_signal(enum signal_type signal)
-{
-    switch (signal) {
-    case SIGNAL_TYPE_DVI_SINGLE_LINK:
-    case SIGNAL_TYPE_DVI_DUAL_LINK:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static inline bool dc_is_virtual_signal(enum signal_type signal)
-{
-    return (signal == SIGNAL_TYPE_VIRTUAL);
-}
+// ⚠️ 此处原先有两份"像素分频纯策略函数"的手写实现（`dcn314_calc_k1_k2_values` /
+//    `dcn314_calc_pix_rate_divider`）与一组 `dc_is_*_signal` helper，均**无调用者**。
+//    第七步（集成）把它们删除，改为复用 `PixelDiv/PixelDiv.hpp` 的正式实现 ——
+//    依据路线图 §3.2：「三者必须共用同一份生成器，**不能有第二份手写实现**」。
+//    （PixelDiv/ 是 TDD 落地的版本，含 15 组断言；本文件那份既重复又无人调用。）
 
 // -----------------------------------------------------------------------------
-// 纯策略函数 1: dcn314_calc_k1_k2_values
-//   移植自 dcn314_calculate_dccg_k1_k2_values (dcn314_hwseq.c L329)
-//   去寄存器化: 所有 vtable/资源遍历输入由 dcn314_k1k2_inputs 预解析提供
-// -----------------------------------------------------------------------------
-static unsigned int dcn314_calc_k1_k2_values(const struct dcn314_k1k2_inputs *in,
-                                              unsigned int *k1_div,
-                                              unsigned int *k2_div)
-{
-    unsigned int odm_combine_factor = in->odm_combine_factor;
-    bool two_pix_per_container = in->two_pix_per_container;
-
-    *k1_div = PIXEL_RATE_DIV_NA;
-    *k2_div = PIXEL_RATE_DIV_NA;
-
-    if (dc_is_hdmi_frl_signal(in->signal) ||
-        in->is_128b_132b_signal) {
-        *k1_div = PIXEL_RATE_DIV_BY_1;
-        *k2_div = PIXEL_RATE_DIV_BY_1;
-    } else if (dc_is_hdmi_tmds_signal(in->signal) ||
-               dc_is_dvi_signal(in->signal)) {
-        *k1_div = PIXEL_RATE_DIV_BY_1;
-        if (in->pixel_encoding == PIXEL_ENCODING_YCBCR420)
-            *k2_div = PIXEL_RATE_DIV_BY_2;
-        else
-            *k2_div = PIXEL_RATE_DIV_BY_4;
-    } else if (dc_is_dp_signal(in->signal) ||
-               dc_is_virtual_signal(in->signal)) {
-        if (two_pix_per_container) {
-            *k1_div = PIXEL_RATE_DIV_BY_1;
-            *k2_div = PIXEL_RATE_DIV_BY_2;
-        } else {
-            *k1_div = PIXEL_RATE_DIV_BY_1;
-            *k2_div = PIXEL_RATE_DIV_BY_4;
-            if (odm_combine_factor == 2)
-                *k2_div = PIXEL_RATE_DIV_BY_2;
-        }
-    }
-
-    return odm_combine_factor;
-}
-
-// -----------------------------------------------------------------------------
-// 纯策略函数 2: dcn314_calc_pix_rate_divider
-//   移植自 dcn314_calculate_pix_rate_divider (dcn314_hwseq.c L366)
-//   去寄存器化: 资源查找由调用方完成, 直接接收已解析的 inputs
-// -----------------------------------------------------------------------------
-static void dcn314_calc_pix_rate_divider(struct pixel_rate_divider *out,
-                                          const struct dcn314_k1k2_inputs *in)
-{
-    unsigned int k1_div = PIXEL_RATE_DIV_NA;
-    unsigned int k2_div = PIXEL_RATE_DIV_NA;
-
-    dcn314_calc_k1_k2_values(in, &k1_div, &k2_div);
-
-    out->div_factor1 = k1_div;
-    out->div_factor2 = k2_div;
-}
-
-// -----------------------------------------------------------------------------
-// update_odm / resync_fifo 调用点 (方案: audit-odm-resync-wiring.md)
-//   - init()                     : 基类 init（含 initDCNRegOffs）完成后、首次 flip 前 → update_odm_direct
-//   - setCurrentDisplayOffset()  : HW 取走 flip 后（基类 isFlipPending 等待结束）→ resync_fifo_dccg_dio_direct
-//   守卫: 文件级静态标志，保证每次驱动生命周期只执行一次，绝不进入 per-frame flip 路径。
+// 调用点（第七步·集成后只有**一个**入口）
+//   init() : 基类 init（含 initDCNRegOffs）完成后、首次 flip 前 →
+//            一次完整的显示初始化编排（时钟 → 像素率分频 → ODM → FIFO resync），
+//            见 applyInitialDisplaySequence()。
+//   守卫: 文件级静态标志 sDisplayInitSeqApplied，保证每次驱动生命周期只执行一次，
+//         绝不进入 per-frame flip 路径。
+//   （第七步移除了原先挂在 `setCurrentDisplayOffset` 上的 resync 覆写：该 vft 槽在
+//     目标系统 Ventura 13.6 上不安装，是死代码；resync 已并入上面的编排。）
 // -----------------------------------------------------------------------------
 static bool (*superInit)(AMDRadeonX5000_AMDHWDisplay*, void*, void*)                   = nullptr;
-static void (*superSetCurrentDisplayOffset)(AMDRadeonX5000_AMDHWDisplay*, UInt32, UInt64) = nullptr;
-static bool sUpdateOdmApplied  = false;
-static bool sResyncFifoApplied = false;
+static bool sDisplayInitSeqApplied = false;
 
 PWDefineRuntimeMC(AMDRadeonX5000_AMDGFX9DCN314Display, Constructor)
 
@@ -155,17 +65,13 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::resolve(const char* const kext)
     // 覆写 getFlipOption：dcn314 返回 DCN3（基类硬编码 DCN2）
     constants.vftGetFlipOption(vft.inner()) = getFlipOption;
 
-    // 覆写 init：基类 init（含 initDCNRegOffs）之后补 update_odm_direct（先保存基类实现作 super 调用）
+    // 覆写 init：基类 init（含 initDCNRegOffs）之后执行一次完整的显示初始化编排（先保存基类实现作 super 调用）。
+    //   注：原先还在 `setCurrentDisplayOffset`（macOS ≤ 10.14 同步提交路径）上挂 resync_fifo 覆写，
+    //   第七步已移除 —— 该 vft 槽在目标系统（Ventura 13.6，≥ macOS 13）上**不安装**
+    //   （三个守卫一致：本类 resolve、基类 populateVFT、HWDisplay.hpp 的 Constants()），
+    //   即那段代码在目标系统上是死代码；resync 已并入下面的统一编排（见 applyInitialDisplaySequence）。
     superInit = constants.vftInit(vft.inner());
     constants.vftInit(vft.inner()) = init;
-
-    // 覆写 setCurrentDisplayOffset（仅 < macOS 13，与基类 populateVFT 的守卫一致）：
-    // HW 取走 flip 后补 resync_fifo_dccg_dio_direct（先保存基类实现作 super 调用）
-    if (currentKernelVersion() < MACOS_13) {
-        superSetCurrentDisplayOffset = constants.vftSetCurrentDisplayOffset(vft.inner());
-        constants.vftSetCurrentDisplayOffset(vft.inner()) = setCurrentDisplayOffset;
-    }
-
     PenguinWizardry::RuntimeMCManager::singleton().registerMC(gRTMetaClass, kext,
                                                               AMDRadeonX5000_AMDGFX9DCNDisplay::gRTMetaClass);
 
@@ -222,7 +128,6 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::initDCNRegOffs(AMDRadeonX5000_AMDGFX9D
 //   来决定 dp_dto_source_clock；本驱动当前只接 MP1 通道，故该项未实现（不影响内置屏点亮）。
 // ═════════════════════════════════════════════════════════════════════════════
 
-static bool                        sClocksApplied = false;
 static display::dcn314_clk::ClkMgr sClkMgr;
 
 // 构造 VBIOSSMC 邮箱所在的寄存器通道（MP1 段）。
@@ -306,56 +211,183 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::updateDisplayClocks(AMDRadeonX5000_AMD
 AMDFlipOption AMDRadeonX5000_AMDGFX9DCN314Display::getFlipOption(AMDRadeonX5000_AMDHWDisplay*)
 { return AMDFlipOption::DCN3; }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// 显示初始化编排（路线图第七步·集成）
+//
+// 把第五步（时钟）、第七步（像素率分频）、第六步（ODM、FIFO resync）四个功能块串成
+// **一条**调用链，落在一个入口上。顺序依据 Linux 源码（逐条出处如下）：
+//
+//   dcn31_init_hw                       (hwss/dcn31/dcn31_hwseq.c:124-125)   ← ① init_clocks
+//   dcn20_enable_stream_timing          (hwss/dcn20/dcn20_hwseq.c:846-847)   ← ② set_pixel_rate_div
+//   dcn20_apply_single_controller_ctx   (hwss/dcn20/dcn20_hwseq.c:1954)      ← ③ update_odm
+//   dce110_apply_ctx_to_hw              (hwss/dce110/dce110_hwseq.c:2737)    ← ④ resync_fifo
+//
+// 为什么四个阶段"各自独立、互不中断"：Linux 里它们分属不同的调用点，任一段失败不会阻止
+// 后续段（例如 set_pixel_rate_div 拒绝 NA 值后，ODM 照常配置）。本编排保持同一语义：
+// 每阶段独立判定成功/失败，失败只记日志、不回滚、不中断。
+//
+// 可观测标记（路线图第七步·子步骤 2）：每阶段前后各留一条固定前缀的日志，并用一个位图
+// 汇总"哪些阶段走到了"，便于真机取回日志后一眼定位断点。**不占用 panic 消息**（铁律 5）。
+// ═════════════════════════════════════════════════════════════════════════════
+
+// 阶段位图（仅供日志汇总；不是探针位，不进 panic 消息）
+enum DisplayInitStage : UInt32 {
+    kStageClocks     = 1u << 0,
+    kStagePixelRate  = 1u << 1,
+    kStageOdm        = 1u << 2,
+    kStageFifoResync = 1u << 3,
+};
+
+// 像素率分频：Linux `dccg314_set_pixel_rate_div`（dccg/dcn314/dcn314_dccg.c:101-146）
+//
+// 与 Linux 的三个门逐条对应：
+//   门① NA 拒绝 —— 由生成器 `generateSetPixelRateDiv` 返回 false 实现（见 Dcn314DccgSeq.hpp）；
+//   门② 与当前值相同则跳过 —— 在本函数里：先读回、提取字段、比对，相同则不下发；
+//   门③ `REG_UPDATE_2(OTG_PIXEL_RATE_DIV, OTGn_K1, k1, OTGn_K2, k2)` —— 生成器合并为一次 Update。
+void AMDRadeonX5000_AMDGFX9DCN314Display::applyPixelRateDiv(AMDRadeonX5000_AMDHWRegisters& regs,
+                                                            const UInt32                    otgInst)
+{
+    // ── 输入（点亮阶段）────────────────────────────────────────────────────────
+    // Linux 的输入来自 pipe_ctx/stream/timing；本驱动没有该对象模型（路线图 §3.1），
+    // 故按"内置屏点亮"这一确定场景给出输入，每条都有判据：
+    //   · signal            = SIGNAL_TYPE_EDP —— ThinkBook 14+ 2023 的屏是 eDP；eDP 属 DP 信号族
+    //                         （PixelDiv/PixelDiv.hpp 的 isDpSignal 含 SIGNAL_TYPE_EDP）。
+    //   · pixelEncoding     = PIXEL_ENCODING_RGB —— 点亮阶段未启用 YCbCr 压缩。
+    //   · is128b132bSignal  = false —— 非 128b/132b 压缩链路（该场景仅 DSC/特定 DP 链路使用）。
+    //   · twoPixPerContainer= false —— 判据同第六步：真值里 `OTG_H_TIMING_DIV_MODE` 字段读=写。
+    //   · odmCombineFactor  = 1 —— 初始拓扑是 bypass（与同批的 update_odm_direct 传 opp_cnt=1 一致）。
+    // 这些输入若将来随模式变更而变，应由模式设置路径重新调用本函数（不在点亮范围内）。
+    pixdiv::K1K2Inputs in{};
+    in.signal             = pixdiv::SIGNAL_TYPE_EDP;
+    in.pixelEncoding      = pixdiv::PIXEL_ENCODING_RGB;
+    in.is128b132bSignal   = false;
+    in.twoPixPerContainer = false;
+    in.odmCombineFactor   = 1;
+
+    // K1/K2 决策：复用 `PixelDiv/`（TDD 落地版，零寄存器依赖）——绝不写第二份实现。
+    const pixdiv::K1K2Result r = pixdiv::calculateDccgK1K2Values(in);
+
+    display::RegChannel ch{};
+    makeDcnChannel(regs, &ch);
+
+    // 门②：先读回当前值（Linux `dccg314_get_pixel_rate_div`），相同时跳过下发。
+    {
+        static constexpr size_t kMaxOps = 4;
+        display::RegOp          rbuf[kMaxOps]{};
+        display::RegSeq         rseq(rbuf, kMaxOps);
+        display::dcn314_dccg::generateReadPixelRateDiv(rseq, DCN_SEG1_BASE, otgInst);
+
+        display::InjectedRegSink rsink(ch);
+        if (rsink.executeAll(rseq) == rseq.size()) {
+            const UInt32 cur = rsink.lastValue();
+            const UInt32 curK1 = display::dcn314_dccg::extractK1(otgInst, cur);
+            const UInt32 curK2 = display::dcn314_dccg::extractK2(otgInst, cur);
+            if (curK1 == r.k1Div && curK2 == r.k2Div) {
+                DBGLOG("GFX9DCN314Display", "pixel_rate_div: otg=%u 已是 K1=%u K2=%u，跳过下发（Linux 门②）",
+                       otgInst, r.k1Div, r.k2Div);
+                return;
+            }
+        } else {
+            // 读失败不阻断：按 Linux"读不到就照写"的更保守一档处理（写仍然安全：只改本实例的位域）
+            DBGLOG("GFX9DCN314Display", "pixel_rate_div: otg=%u 读回失败，按需直接下发", otgInst);
+        }
+    }
+
+    // 门①③：生成写序列并执行
+    {
+        static constexpr size_t kMaxOps = 4;
+        display::RegOp          buf[kMaxOps]{};
+        display::RegSeq         seq(buf, kMaxOps);
+        if (!display::dcn314_dccg::generateSetPixelRateDiv(seq, DCN_SEG1_BASE, otgInst, r.k1Div, r.k2Div)) {
+            // 门①（NA）或非法实例：与 Linux 的 BREAK_TO_DEBUGGER + return 同语义
+            SYSLOG("GFX9DCN314Display", "pixel_rate_div: otg=%u K1=%u K2=%u 被生成器拒绝（NA/非法实例），不下发",
+                   otgInst, r.k1Div, r.k2Div);
+            return;
+        }
+
+        display::InjectedRegSink sink(ch);
+        const size_t             done = sink.executeAll(seq);
+        if (done != seq.size()) {
+            SYSLOG("GFX9DCN314Display", "pixel_rate_div: 序列执行中断（done=%zu/%zu，otg=%u）", done, seq.size(),
+                   otgInst);
+            return;
+        }
+        DBGLOG("GFX9DCN314Display", "pixel_rate_div: otg=%u 下发 K1=%u K2=%u（%zu op，odmFactor=%u）", otgInst,
+               r.k1Div, r.k2Div, seq.size(), r.odmCombineFactor);
+    }
+}
+
+// 显示初始化编排入口：由 `init` 调用一次（守卫在 init 里）。
+void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX5000_AMDGFX9DCN314Display* const self)
+{
+    UInt32 stages = 0;
+
+    DBGLOG("GFX9DCN314Display", "display-init: sequence start");
+
+    // ① 显示时钟（第五步）：VBIOSSMC 完整主流程。
+    //    对应 Linux `dcn31_init_hw` 的第一步 `clk_mgr->funcs->init_clocks`（dcn31_hwseq.c:124-125）。
+    //    ⚠️ 顺序修正：原先 init 里是"先 ODM 后时钟"，与 Linux 相反（时钟是显示管线的前提，必须先上）。
+    if (applyInitialDisplayClocks()) {
+        stages |= kStageClocks;
+    } else {
+        SYSLOG("GFX9DCN314Display", "display-init: stage clocks FAILED");
+    }
+
+    auto* const regs = self->getHWRegisters();
+    if (regs == nullptr) {
+        SYSLOG("GFX9DCN314Display", "display-init: HW registers unavailable, stages 2-4 skipped (mask=0x%X)", stages);
+        return;
+    }
+
+    // ② 像素率分频（第七步新增）：Linux `dcn20_enable_stream_timing` 的首步（dcn20_hwseq.c:846-847）。
+    //    对全部 OTG 实例下发（Linux 逐 pipe 调用，本驱动没有 pipe 模型，按实例遍历）。
+    for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
+        applyPixelRateDiv(*regs, i);
+    }
+    stages |= kStagePixelRate;
+
+    // ③ ODM 拓扑（第六步）：Linux `dcn20_apply_single_controller_ctx_to_hw` 里的
+    //    `hws->funcs.update_odm`（dcn20_hwseq.c:1954）。
+    {
+        const UInt32 oppInst[1] = {0};
+        for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
+            update_odm_direct(*regs, i, oppInst, 1, 0);
+        }
+        DBGLOG("GFX9DCN314Display", "display-init: update_odm_direct (bypass) applied for %u OTG(s)",
+               MAX_SUPPORTED_DISPLAYS_RV);
+        stages |= kStageOdm;
+    }
+
+    // ④ FIFO 重同步（第六步）：Linux `dce110_apply_ctx_to_hw` 每 pipe 应用后调
+    //    `resync_fifo_dccg_dio`（dce110_hwseq.c:2737）→ `trigger_dio_fifo_resync`。
+    //    ⚠️ 挂接点迁移：原先挂在 `setCurrentDisplayOffset`（该 vft 槽在 Ventura 上**不安装**，
+    //    是死代码）；现并入本编排，使目标系统上确实会执行。
+    //    与 Linux 的时机差异（Linux 在 stream enable 之后，本驱动在 init 之后）见执行记录 §五。
+    resync_fifo_dccg_dio_direct(*regs);
+    DBGLOG("GFX9DCN314Display", "display-init: resync_fifo_dccg_dio_direct applied");
+    stages |= kStageFifoResync;
+
+    // 汇总标记：真机取回日志后，用这一行判断"编排走到哪一段"。
+    DBGLOG("GFX9DCN314Display",
+           "display-init: sequence done (stages=0x%X clocks=%u pixrate=%u odm=%u resync=%u)", stages,
+           (stages & kStageClocks) != 0, (stages & kStagePixelRate) != 0, (stages & kStageOdm) != 0,
+           (stages & kStageFifoResync) != 0);
+}
+
 // init 覆写：先走基类 init（super chain：原版 init → isDCN → initDCNRegOffs 经 vft slot 0 分发到本类），
-// 完成后（initDCNRegOffs 之后、首次 flip 之前）为全部 OTG 初始化 ODM bypass 拓扑。
-// 守卫: sUpdateOdmApplied 保证只执行一次（模式变更入口，勿随每帧 flip 重复）。
+// 完成后（initDCNRegOffs 之后、首次 flip 之前）执行**一次**完整的显示初始化编排。
+// 守卫: sDisplayInitSeqApplied 保证只执行一次（模式变更入口，勿随每帧 flip 重复）。
 bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* const _self, void* const hwInterface,
                                                void* const fbParams)
 {
     if (!superInit(_self, hwInterface, fbParams)) { return false; }
 
-    const auto self = static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self);
-    if (!sUpdateOdmApplied) {
-        sUpdateOdmApplied = true;
-        auto* const regs = self->getHWRegisters();
-        if (regs != nullptr) {
-            // 初始拓扑：全部 OTG 单管直通（bypass），不拼接（OPPC 拼接由后续模式设置决定）
-            const UInt32 oppInst[1] = {0};
-            for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
-                update_odm_direct(*regs, i, oppInst, 1, 0);
-            }
-            DBGLOG("GFX9DCN314Display", "init: update_odm_direct (bypass) applied for %u OTG(s)",
-                   MAX_SUPPORTED_DISPLAYS_RV);
-        }
-    }
-
-    // 显示时钟：初始化阶段一次性下发（对应 Linux `dcn314_clk_mgr_construct` + 首次 `update_clocks`）。
-    // 挂在 init 而不是每次 flip：时钟是模式级配置，随每帧重复下发既无必要也会抖。
-    if (!sClocksApplied) {
-        sClocksApplied = true;
-        applyInitialDisplayClocks();
+    if (!sDisplayInitSeqApplied) {
+        sDisplayInitSeqApplied = true;
+        applyInitialDisplaySequence(static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self));
     }
 
     return true;
-}
-
-// setCurrentDisplayOffset 覆写（macOS ≤ 10.14 同步提交路径）：基类写地址并等待 isFlipPending
-// 完成（HW 已取走 flip）之后补 resync_fifo_dccg_dio_direct（DENTIST WDIVIDER = RDIVIDER）。
-// 守卫: sResyncFifoApplied 保证只执行一次（模式变更应用后，勿随每帧 flip 重复）。
-void AMDRadeonX5000_AMDGFX9DCN314Display::setCurrentDisplayOffset(AMDRadeonX5000_AMDHWDisplay* const _self,
-                                                                  const UInt32 fbIndex, const UInt64 value)
-{
-    superSetCurrentDisplayOffset(_self, fbIndex, value);
-
-    const auto self = static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self);
-    if (!sResyncFifoApplied) {
-        sResyncFifoApplied = true;
-        auto* const regs = self->getHWRegisters();
-        if (regs != nullptr) {
-            resync_fifo_dccg_dio_direct(*regs);
-            DBGLOG("GFX9DCN314Display", "setCurrentDisplayOffset: resync_fifo_dccg_dio_direct applied");
-        }
-    }
 }
 
 // =============================================================================

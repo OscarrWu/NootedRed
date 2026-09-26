@@ -15,55 +15,14 @@
 #include <AMDGFX9DCNDisplay.hpp>
 
 // -----------------------------------------------------------------------------
-// 纯策略函数依赖类型 (Pure-strategy function dependency types)
-// 移植自 Linux amdgpu dcn314 (signal_types.h, dccg.h, dc_hw_types.h, core_types.h)
-// -----------------------------------------------------------------------------
-
-enum signal_type {
-    SIGNAL_TYPE_NONE            = 0L,
-    SIGNAL_TYPE_DVI_SINGLE_LINK = (1 << 0),
-    SIGNAL_TYPE_DVI_DUAL_LINK   = (1 << 1),
-    SIGNAL_TYPE_HDMI_TYPE_A     = (1 << 2),
-    SIGNAL_TYPE_LVDS            = (1 << 3),
-    SIGNAL_TYPE_RGB             = (1 << 4),
-    SIGNAL_TYPE_DISPLAY_PORT    = (1 << 5),
-    SIGNAL_TYPE_DISPLAY_PORT_MST = (1 << 6),
-    SIGNAL_TYPE_EDP             = (1 << 7),
-    SIGNAL_TYPE_HDMI_FRL        = (1 << 8),
-    SIGNAL_TYPE_VIRTUAL         = (1 << 9),
-};
-
-enum dc_pixel_encoding {
-    PIXEL_ENCODING_UNDEFINED,
-    PIXEL_ENCODING_RGB,
-    PIXEL_ENCODING_YCBCR422,
-    PIXEL_ENCODING_YCBCR444,
-    PIXEL_ENCODING_YCBCR420,
-    PIXEL_ENCODING_COUNT
-};
-
-enum pixel_rate_div {
-    PIXEL_RATE_DIV_BY_1 = 0,
-    PIXEL_RATE_DIV_BY_2 = 1,
-    PIXEL_RATE_DIV_BY_4 = 3,
-    PIXEL_RATE_DIV_NA   = 0xF
-};
-
-struct pixel_rate_divider {
-    UInt32 div_factor1;
-    UInt32 div_factor2;
-};
-
-struct dcn314_k1k2_inputs {
-    enum signal_type        signal;
-    enum dc_pixel_encoding  pixel_encoding;
-    bool                    is_128b_132b_signal;
-    bool                    two_pix_per_container;
-    UInt32                  odm_combine_factor;
-};
-
 // DCN 3.1.4 显示时钟请求 (VBIOSSMC 下发)：单位 kHz
-// 移植自 Linux dcn314_smu_set_dispclk / dcn314_clk_mgr_helper 的时钟请求结构
+//   移植自 Linux dcn314_smu_set_dispclk / dcn314_clk_mgr_helper 的时钟请求结构
+//
+// 注：像素分频的枚举与结构（`signal_type` / `dc_pixel_encoding` / `pixel_rate_div` /
+//     `pixel_rate_divider` / `dcn314_k1k2_inputs`）原先在本文件重复定义了一份，
+//     只服务于本文件里那两份无调用者的手写实现；第七步（集成）已一并删除，
+//     正式版本在 `PixelDiv/PixelDiv.hpp`（TDD 落地，零寄存器依赖）。
+// -----------------------------------------------------------------------------
 struct dcn314_display_clock_req {
     UInt32 dispclk_khz;              // 目标显示时钟
     UInt32 dppclk_khz;               // 目标 DPP 时钟
@@ -91,14 +50,24 @@ class AMDRadeonX5000_AMDGFX9DCN314Display : public AMDRadeonX5000_AMDGFX9DCNDisp
 
     static AMDFlipOption getFlipOption(AMDRadeonX5000_AMDHWDisplay*);
 
-    // ---- update_odm / resync_fifo 调用点覆写 (方案: audit-odm-resync-wiring.md) ----
-    // init 覆写: 走完基类 init (含 initDCNRegOffs) 之后、首次 flip 之前补 update_odm_direct，
-    //   每次显示初始化只执行一次（守卫: sOdmApplied）
+    // ---- 调用点覆写 ----
+    // init 覆写：走完基类 init（含 initDCNRegOffs）之后、首次 flip 之前，执行一次**完整的
+    //   显示初始化编排**（时钟 → 像素率分频 → ODM → FIFO resync，见 applyInitialDisplaySequence）；
+    //   每次显示初始化只执行一次（守卫: sDisplayInitSeqApplied）
     static bool init(AMDRadeonX5000_AMDHWDisplay* self, void* hwInterface, void* fbParams);
 
-    // setCurrentDisplayOffset 覆写 (macOS ≤ 10.14 同步提交路径): 基类写地址并等待
-    //   isFlipPending 完成之后（HW 已取走 flip）补 resync_fifo_dccg_dio_direct（守卫: sResyncApplied）
-    static void setCurrentDisplayOffset(AMDRadeonX5000_AMDHWDisplay* self, UInt32 fbIndex, UInt64 value);
+    // ---- 显示初始化编排（第七步·集成）----
+    // 顺序依据 Linux 源码（逐条出处见 .cpp 内实现）：
+    //   init_clocks（dcn31_hwseq.c:124）→ set_pixel_rate_div（dcn20_hwseq.c:846）
+    //   → update_odm（dcn20_hwseq.c:1954）→ resync_fifo（dce110_hwseq.c:2737）。
+    // 四个阶段各自独立、互不中断（与 Linux 一致：任一段失败不阻止后续段）。
+    static void applyInitialDisplaySequence(AMDRadeonX5000_AMDGFX9DCN314Display* self);
+
+    // 像素率分频（DCCG）：Linux `dccg314_set_pixel_rate_div`（dcn314_dccg.c:101-146）。
+    //   K1/K2 由 `PixelDiv/` 的纯策略函数算出（复用正式实现，不写第二份）；
+    //   写序列由 `DisplaySeq/Dcn314DccgSeq.hpp` 生成，两者都与离线影子运行同源。
+    //   门②（"与当前值相同则跳过"）在此实现：先读回、比对、再决定是否下发。
+    static void applyPixelRateDiv(AMDRadeonX5000_AMDHWRegisters& regs, UInt32 otgInst);
 
     // ---- update_odm / resync_fifo 寄存器级直译 (设计: updateodm-resync-directreg-design.md) ----
     // update_odm_direct: 展平 dcn314_update_odm -> set_odm_combine / set_odm_bypass + set_out_rate_control

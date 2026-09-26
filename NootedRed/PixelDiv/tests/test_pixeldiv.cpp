@@ -26,8 +26,8 @@
 
 #include "PixelDiv.hpp"
 
-#include <cassert>
-#include <cstdio>
+#include <assert.h>
+#include <stdio.h>
 
 using namespace pixdiv;
 
@@ -48,7 +48,7 @@ static void test_signal_type_values_match_linux() {
     assert(SIGNAL_TYPE_EDP == (1 << 7));
     assert(SIGNAL_TYPE_HDMI_FRL == (1 << 8));
     assert(SIGNAL_TYPE_VIRTUAL == (1 << 9));
-    std::puts("  [PASS] 0a signal_type 枚举值与 signal_types.h L36-48 一致");
+    puts("  [PASS] 0a signal_type 枚举值与 signal_types.h L36-48 一致");
 }
 
 // dccg.h L67-72：注意非连续（BY_2=1、BY_4=3、NA=0xF），寄存器域编码不可改动
@@ -57,7 +57,7 @@ static void test_pixel_rate_div_values_match_linux() {
     assert(PIXEL_RATE_DIV_BY_2 == 1);
     assert(PIXEL_RATE_DIV_BY_4 == 3);
     assert(PIXEL_RATE_DIV_NA == 0xF);
-    std::puts("  [PASS] 0b pixel_rate_div 枚举值与 dccg.h L67-72 一致（非连续值）");
+    puts("  [PASS] 0b pixel_rate_div 枚举值与 dccg.h L67-72 一致（非连续值）");
 }
 
 // dc_hw_types.h L805-812
@@ -68,7 +68,7 @@ static void test_pixel_encoding_values_match_linux() {
     assert(PIXEL_ENCODING_YCBCR444 == 3);
     assert(PIXEL_ENCODING_YCBCR420 == 4);
     assert(PIXEL_ENCODING_COUNT == 5);
-    std::puts("  [PASS] 0c dc_pixel_encoding 枚举值与 dc_hw_types.h L805-812 一致");
+    puts("  [PASS] 0c dc_pixel_encoding 枚举值与 dc_hw_types.h L805-812 一致");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -98,7 +98,7 @@ static void test_signal_helpers() {
     // L173-176 dc_is_virtual_signal
     assert(isVirtualSignal(SIGNAL_TYPE_VIRTUAL));
     assert(!isVirtualSignal(SIGNAL_TYPE_DISPLAY_PORT));
-    std::puts("  [PASS] 1  信号分类 helper 与 signal_types.h L81-176 一致");
+    puts("  [PASS] 1  信号分类 helper 与 signal_types.h L81-176 一致");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -143,7 +143,7 @@ static void test_branch1_frl_and_128b132b() {
         assert(r.k1Div == PIXEL_RATE_DIV_BY_1);
         assert(r.k2Div == PIXEL_RATE_DIV_BY_1);
     }
-    std::puts("  [PASS] 2  分支 1（L338-341）：FRL / 128b-132b → (BY_1, BY_1)");
+    puts("  [PASS] 2  分支 1（L338-341）：FRL / 128b-132b → (BY_1, BY_1)");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -220,7 +220,7 @@ static void test_branch2_hdmi_tmds_dvi() {
         assert(r.k1Div == PIXEL_RATE_DIV_BY_1);
         assert(r.k2Div == PIXEL_RATE_DIV_BY_1);
     }
-    std::puts("  [PASS] 3  分支 2（L342-347）：TMDS/DVI → k1=BY_1，420→BY_2 其余 BY_4");
+    puts("  [PASS] 3  分支 2（L342-347）：TMDS/DVI → k1=BY_1，420→BY_2 其余 BY_4");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -315,7 +315,7 @@ static void test_branch3_dp_virtual() {
         assert(r.k1Div == PIXEL_RATE_DIV_BY_1);
         assert(r.k2Div == PIXEL_RATE_DIV_BY_4);
     }
-    std::puts("  [PASS] 4  分支 3（L348-357）：DP/VIRTUAL 两像素容器与 ODM==2 语义");
+    puts("  [PASS] 4  分支 3（L348-357）：DP/VIRTUAL 两像素容器与 ODM==2 语义");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -338,7 +338,7 @@ static void test_unhandled_signal_yields_na() {
         assert(r.k2Div == PIXEL_RATE_DIV_NA);
         assert(r.odmCombineFactor == 2);      // L363：无条件返回 odm_combine_factor
     }
-    std::puts("  [PASS] 5  未覆盖信号（NONE/LVDS/RGB）→ (NA, NA)，对应 L360-361");
+    puts("  [PASS] 5  未覆盖信号（NONE/LVDS/RGB）→ (NA, NA)，对应 L360-361");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -363,7 +363,7 @@ static void test_return_value_is_odm_combine_factor() {
             assert(r.odmCombineFactor == odm);  // L363：任何分支都原样返回
         }
     }
-    std::puts("  [PASS] 6  返回 odm_combine_factor（L336/L363，1/2/4 段全分支）");
+    puts("  [PASS] 6  返回 odm_combine_factor（L336/L363，1/2/4 段全分支）");
 }
 
 // 6b. get_odm_config 纯化替代 helper：顶 pipe 的 next_odm_pipe 跳数 → 段数
@@ -379,7 +379,7 @@ static void test_odm_combine_factor_helper() {
     in.pixelEncoding = PIXEL_ENCODING_RGB;
     in.odmCombineFactor = odmCombineFactorFromNextPipes(1);
     assert(calculateDccgK1K2Values(in).k2Div == PIXEL_RATE_DIV_BY_2);
-    std::puts("  [PASS] 6b get_odm_config 纯化替代（L150-171）：跳数→段数并衔接分支 3");
+    puts("  [PASS] 6b get_odm_config 纯化替代（L150-171）：跳数→段数并衔接分支 3");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -445,7 +445,7 @@ static void test_pix_rate_divider_wrapper() {
         assert(out.divFactor1 == PIXEL_RATE_DIV_NA);
         assert(out.divFactor2 == PIXEL_RATE_DIV_NA);
     }
-    std::puts("  [PASS] 7  打包层（L366-385）：k1/k2 组合装入 PixelRateDivider");
+    puts("  [PASS] 7  打包层（L366-385）：k1/k2 组合装入 PixelRateDivider");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -479,20 +479,20 @@ static void test_pure_functions_are_constexpr() {
     };
     static_assert(calculateDccgK1K2Values(frl).k2Div == PIXEL_RATE_DIV_BY_1,
                   "FRL → k2=BY_1");
-    std::puts("  [PASS] 8  纯函数 constexpr 可求值（零副作用编译期证明）");
+    puts("  [PASS] 8  纯函数 constexpr 可求值（零副作用编译期证明）");
 }
 
 int main() {
-    std::puts("第二步验收测试：DCN314 像素分频纯策略函数");
-    std::puts("── 常量与 Linux 源一致 ──");
+    puts("第二步验收测试：DCN314 像素分频纯策略函数");
+    puts("── 常量与 Linux 源一致 ──");
     test_signal_type_values_match_linux();
     test_pixel_rate_div_values_match_linux();
     test_pixel_encoding_values_match_linux();
 
-    std::puts("── 信号分类 helper ──");
+    puts("── 信号分类 helper ──");
     test_signal_helpers();
 
-    std::puts("── 分支逻辑（dcn314_hwseq.c L329-364）──");
+    puts("── 分支逻辑（dcn314_hwseq.c L329-364）──");
     test_branch1_frl_and_128b132b();
     test_branch2_hdmi_tmds_dvi();
     test_branch3_dp_virtual();
@@ -500,10 +500,10 @@ int main() {
     test_return_value_is_odm_combine_factor();
     test_odm_combine_factor_helper();
 
-    std::puts("── 打包层与纯度 ──");
+    puts("── 打包层与纯度 ──");
     test_pix_rate_divider_wrapper();
     test_pure_functions_are_constexpr();
 
-    std::puts("全部通过。用户态可编译（判据 1）由本次编译本身证明。");
+    puts("全部通过。用户态可编译（判据 1）由本次编译本身证明。");
     return 0;
 }

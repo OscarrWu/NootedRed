@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[4]
 REF = ROOT / "oldfiles-handoff/reference/linux/drivers/gpu/drm/amd/include/asic_reg/dcn"
 OFF = (REF / "dcn_3_1_4_offset.h").read_text()
 MASK = (REF / "dcn_3_1_4_sh_mask.h").read_text()
+SEG = (ROOT / "oldfiles-handoff/reference/linux/drivers/gpu/drm/amd/include/yellow_carp_offset.h").read_text()
 
 
 def offval(macro: str) -> int:
@@ -29,6 +30,12 @@ def maskval(block: str, field: str) -> int:
 def shiftval(block: str, field: str) -> int:
     m = re.search(rf"^#define {block}__{field}__SHIFT\s+(0x[0-9a-fA-F]+)", MASK, re.M)
     assert m, f"sh_mask 头文件中找不到 {block}__{field}__SHIFT"
+    return int(m.group(1), 16)
+
+
+def segval(macro: str) -> int:
+    m = re.search(rf"^#define {macro}\s+(0x[0-9a-fA-F]+)", SEG, re.M)
+    assert m, f"yellow_carp_offset.h 中找不到 {macro}"
     return int(m.group(1), 16)
 
 
@@ -75,6 +82,9 @@ ENTRIES = {
     "DISPCLK_FREQ_CHANGE_CNTL": "regDISPCLK_FREQ_CHANGE_CNTL",
     "SYMCLK32_SE_CNTL": "regSYMCLK32_SE_CNTL",
     "OTG_PIXEL_RATE_CNTL": "regOTG0_PIXEL_RATE_CNTL",
+    "OTG1_PIXEL_RATE_CNTL": "regOTG1_PIXEL_RATE_CNTL",
+    "OTG2_PIXEL_RATE_CNTL": "regOTG2_PIXEL_RATE_CNTL",
+    "OTG3_PIXEL_RATE_CNTL": "regOTG3_PIXEL_RATE_CNTL",
     "DP_DTO_PHASE": "regDP_DTO0_PHASE",
     "PHYPLLA_PIXCLK_RESYNC_CNTL": "regPHYPLLA_PIXCLK_RESYNC_CNTL",
     "DIG_FE_CNTL": "regDIG0_DIG_FE_CNTL",
@@ -123,15 +133,36 @@ ENTRIES = {
     "HPD_CONTROL": "regHPD0_DC_HPD_CONTROL",
 }
 
+# 段基址类：yellow_carp_offset.h 的 DCN_BASE__INST0_SEGn（DCN314.hpp 的 DCN_SEG*_BASE）
+SEG_ENTRIES = {
+    "DCN_SEG0_BASE": "DCN_BASE__INST0_SEG0",
+    "DCN_SEG1_BASE": "DCN_BASE__INST0_SEG1",
+    "DCN_SEG2_BASE": "DCN_BASE__INST0_SEG2",
+    "DCN_SEG3_BASE": "DCN_BASE__INST0_SEG3",
+    "DCN_SEG4_BASE": "DCN_BASE__INST0_SEG4",
+}
+
 MASKS = {
     # DENTIST_DISPCLK_CNTL（补 CHG_MODE；WDIVIDER/RDIVIDER 既有）
     "DENTIST_DISPCLK_CHG_MODE_SHIFT": ("DENTIST_DISPCLK_CNTL", "DENTIST_DISPCLK_CHG_MODE", "SHIFT"),
     "DENTIST_DISPCLK_CHG_MODE_MASK": ("DENTIST_DISPCLK_CNTL", "DENTIST_DISPCLK_CHG_MODE", "MASK"),
-    # OTG_PIXEL_RATE_DIV（OTG0 段）
+    # OTG_PIXEL_RATE_DIV（OTG0..3 打包单寄存器）
     "OTG0_PIXEL_RATE_DIVK1_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG0_PIXEL_RATE_DIVK1", "SHIFT"),
     "OTG0_PIXEL_RATE_DIVK1_MASK": ("OTG_PIXEL_RATE_DIV", "OTG0_PIXEL_RATE_DIVK1", "MASK"),
     "OTG0_PIXEL_RATE_DIVK2_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG0_PIXEL_RATE_DIVK2", "SHIFT"),
     "OTG0_PIXEL_RATE_DIVK2_MASK": ("OTG_PIXEL_RATE_DIV", "OTG0_PIXEL_RATE_DIVK2", "MASK"),
+    "OTG1_PIXEL_RATE_DIVK1_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG1_PIXEL_RATE_DIVK1", "SHIFT"),
+    "OTG1_PIXEL_RATE_DIVK1_MASK": ("OTG_PIXEL_RATE_DIV", "OTG1_PIXEL_RATE_DIVK1", "MASK"),
+    "OTG1_PIXEL_RATE_DIVK2_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG1_PIXEL_RATE_DIVK2", "SHIFT"),
+    "OTG1_PIXEL_RATE_DIVK2_MASK": ("OTG_PIXEL_RATE_DIV", "OTG1_PIXEL_RATE_DIVK2", "MASK"),
+    "OTG2_PIXEL_RATE_DIVK1_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG2_PIXEL_RATE_DIVK1", "SHIFT"),
+    "OTG2_PIXEL_RATE_DIVK1_MASK": ("OTG_PIXEL_RATE_DIV", "OTG2_PIXEL_RATE_DIVK1", "MASK"),
+    "OTG2_PIXEL_RATE_DIVK2_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG2_PIXEL_RATE_DIVK2", "SHIFT"),
+    "OTG2_PIXEL_RATE_DIVK2_MASK": ("OTG_PIXEL_RATE_DIV", "OTG2_PIXEL_RATE_DIVK2", "MASK"),
+    "OTG3_PIXEL_RATE_DIVK1_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG3_PIXEL_RATE_DIVK1", "SHIFT"),
+    "OTG3_PIXEL_RATE_DIVK1_MASK": ("OTG_PIXEL_RATE_DIV", "OTG3_PIXEL_RATE_DIVK1", "MASK"),
+    "OTG3_PIXEL_RATE_DIVK2_SHIFT": ("OTG_PIXEL_RATE_DIV", "OTG3_PIXEL_RATE_DIVK2", "SHIFT"),
+    "OTG3_PIXEL_RATE_DIVK2_MASK": ("OTG_PIXEL_RATE_DIV", "OTG3_PIXEL_RATE_DIVK2", "MASK"),
     # DCCG_GATE_DISABLE_CNTL2（PHYxSYMCLK 门控）
     "PHYASYMCLK_GATE_DISABLE_SHIFT": ("DCCG_GATE_DISABLE_CNTL2", "PHYASYMCLK_GATE_DISABLE", "SHIFT"),
     "PHYASYMCLK_GATE_DISABLE_MASK": ("DCCG_GATE_DISABLE_CNTL2", "PHYASYMCLK_GATE_DISABLE", "MASK"),
@@ -344,6 +375,8 @@ MASKS = {
 def main() -> None:
     for name, macro in ENTRIES.items():
         print(f"{name}={offval(macro):X}")
+    for name, macro in SEG_ENTRIES.items():
+        print(f"{name}={segval(macro):X}")
     for name, (block, field, kind) in MASKS.items():
         v = shiftval(block, field) if kind == "SHIFT" else maskval(block, field)
         print(f"{name}={v:X}")

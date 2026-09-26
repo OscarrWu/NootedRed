@@ -52,7 +52,7 @@
 
 #pragma once
 
-#include <cstdint>
+#include <stdint.h>
 
 namespace pixdiv {
 
@@ -94,8 +94,8 @@ enum PixelEncoding {
 // ── struct pixel_rate_divider（core_types.h L437-440）──
 // 布局必须等价 Linux 侧两个 uint32（写入 pipe_ctx->pixel_rate_divider 的对应物）。
 struct PixelRateDivider {
-    std::uint32_t divFactor1;
-    std::uint32_t divFactor2;
+    uint32_t divFactor1;
+    uint32_t divFactor2;
 };
 
 // ── 信号分类 helper（signal_types.h L81-176 的忠实复制，纯函数 constexpr 化）──
@@ -144,7 +144,7 @@ constexpr bool isVirtualSignal(SignalType signal) {
 // （L164-168）。纯化后不遍历链表：调用方只传"顶 pipe 的 next_odm_pipe
 // 跳数"，数值语义与原函数完全一致：
 //   无 ODM 合并 → 0 跳 → 1；2 段合并（2:1）→ 1 跳 → 2；4 段合并（4:1）→ 3 跳 → 4
-constexpr std::uint32_t odmCombineFactorFromNextPipes(std::uint32_t nextOdmPipeHops) {
+constexpr uint32_t odmCombineFactorFromNextPipes(uint32_t nextOdmPipeHops) {
     return 1 + nextOdmPipeHops;
 }
 
@@ -154,16 +154,16 @@ struct K1K2Inputs {
     PixelEncoding pixelEncoding;          // L344: stream->timing.pixel_encoding
     bool is128b132bSignal = false;        // L339: dp_is_128b_132b_signal(pipe_ctx) 预解析
     bool twoPixPerContainer = false;      // L335: is_two_pixels_per_container(&timing) 预解析
-    std::uint32_t odmCombineFactor = 1;   // L336: get_odm_config(pipe_ctx, NULL)，默认无合并
+    uint32_t odmCombineFactor = 1;   // L336: get_odm_config(pipe_ctx, NULL)，默认无合并
 };
 
 // ── 策略函数 1 的返回载体 ──
 // 同时承载 Linux 原型的返回值（odm_combine_factor，L363）与两个出参
 // （*k1_div / *k2_div，L329），三者一次算出、一致返回。
 struct K1K2Result {
-    std::uint32_t odmCombineFactor;
-    std::uint32_t k1Div;
-    std::uint32_t k2Div;
+    uint32_t odmCombineFactor;
+    uint32_t k1Div;
+    uint32_t k2Div;
 };
 
 // 分支策略：dcn314_calculate_dccg_k1_k2_values（dcn314_hwseq.c L329-364）的
@@ -180,10 +180,10 @@ inline constexpr K1K2Result calculateDccgK1K2Values(const K1K2Inputs& in)
 {
     // L373-374：原实现依赖调用方先把 k1/k2 初始化为 NA；纯函数显式初始化，
     // 行为等价且对调用方更安全（未覆盖信号 → NA 原样可见）。
-    std::uint32_t k1_div = PIXEL_RATE_DIV_NA;
-    std::uint32_t k2_div = PIXEL_RATE_DIV_NA;
+    uint32_t k1_div = PIXEL_RATE_DIV_NA;
+    uint32_t k2_div = PIXEL_RATE_DIV_NA;
 
-    const std::uint32_t odm_combine_factor = in.odmCombineFactor;   // L332/L336
+    const uint32_t odm_combine_factor = in.odmCombineFactor;   // L332/L336
     const bool two_pix_per_container = in.twoPixPerContainer;       // L333/L335
 
     if (isHdmiFrlSignal(in.signal) ||                               // L338

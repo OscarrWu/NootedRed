@@ -22,17 +22,17 @@ namespace pixdiv {
 // ── 枚举宽度：Linux 侧为 C 枚举（LP64 上 4 字节）。底层类型名（int /
 //    unsigned int）由实现按枚举值域挑选（全非负值时 g++ 选 unsigned int），
 //    对 ABI 有意义的是 4 字节宽度，逐枚举断言之。──
-static_assert(sizeof(SignalType) == sizeof(std::uint32_t),
+static_assert(sizeof(SignalType) == sizeof(uint32_t),
               "SignalType 宽度必须与 Linux C 枚举一致 (4 字节)");
-static_assert(sizeof(PixelRateDiv) == sizeof(std::uint32_t),
+static_assert(sizeof(PixelRateDiv) == sizeof(uint32_t),
               "PixelRateDiv 宽度必须与 Linux C 枚举一致 (4 字节)");
-static_assert(sizeof(PixelEncoding) == sizeof(std::uint32_t),
+static_assert(sizeof(PixelEncoding) == sizeof(uint32_t),
               "PixelEncoding 宽度必须与 Linux C 枚举一致 (4 字节)");
 
 // ── 结构布局：对应 core_types.h L437-440 两个 uint32 与策略返回三元组 ──
-static_assert(sizeof(PixelRateDivider) == 2 * sizeof(std::uint32_t),
+static_assert(sizeof(PixelRateDivider) == 2 * sizeof(uint32_t),
               "PixelRateDivider 布局必须等价 Linux struct pixel_rate_divider");
-static_assert(sizeof(K1K2Result) == 3 * sizeof(std::uint32_t),
+static_assert(sizeof(K1K2Result) == 3 * sizeof(uint32_t),
               "K1K2Result 应为三个 32 位返回量");
 
 // ── 关键分支编译期抽查（与 tests/test_pixeldiv.cpp 运行时断言同源）──
