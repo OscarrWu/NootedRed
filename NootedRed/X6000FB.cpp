@@ -1120,9 +1120,11 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
         const bool allowWrite = checkKernelArgument("-NRedNvDiagWrite");
         const auto nvd = NvDiag::run(allowWrite);
         panic("NRed nvdiag: entry=%llx dtn=%llu cls=%llx rdlen=%llu rd0=%llx"
-              " wrC=%llu wrA=%llu sSafe=%llu sDone=%llu",
+              " wrC=%llu wrA=%llu sSafe=%llu sDone=%llu"
+              " mbp=%llx mbMagic=%llu mbSize=%llu mbBufx=%llu mbBufc=%llx",
               nvd.entry, nvd.isDtn, nvd.clsWord, nvd.rdLen, nvd.rd0,
-              nvd.wrCustom, nvd.wrApple, nvd.syncSafe, nvd.syncDone);
+              nvd.wrCustom, nvd.wrApple, nvd.syncSafe, nvd.syncDone,
+              nvd.mbPtr, nvd.mbMagic, nvd.mbSize, nvd.mbBufx, nvd.mbBufc);
     }
 
     // 诊断出口（boot-arg `-NRedStagePanic`）：用**已验证可靠**的 panic→efivarfs 通道把
