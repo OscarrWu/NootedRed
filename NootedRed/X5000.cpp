@@ -215,19 +215,10 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         }
     }
 
-    // 第八步观测（第 13 轮）：hook 加速器的 `probe`（**纯观测**：不改返回值、不改 score）。
-    //  目的：判定"加速器类为何零实例"——probe 若从未被调用 ⇒ personality 未参与匹配（上游问题）；
-    //        若被调用而返回 0 ⇒ 其前置判据不满足（离线已排除 `-amd_no_dgpu_accel` 与 `IOPCITunnelled`）。
-    //  入口/出口各记录一次，panic 前把 `score` 的进出值一并带出。门控 `-NRedAccelProbe2`（默认关闭）。
-    if (checkKernelArgument("-NRedAccelProbe2")) {
-        PenguinWizardry::PatternRouteRequest accelProbeReq{
-            "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator5probeEP9IOServicePi", wrapAccelProbe, this->orgAccelProbe};
-        if (!accelProbeReq.route(patcher, id, slide, size)) {
-            SYSLOG("X5000", "accel-probe2: failed to route AMDGraphicsAccelerator::probe");
-        } else {
-            DBGLOG("X5000", "accel-probe2: routed AMDGraphicsAccelerator::probe");
-        }
-    }
+    // 第八步观测（第 15 轮）：**已移除** `probe` 的 hook —— 第 14 轮实测它**有副作用**
+    //  （hook 后系统未再走到 PP 上电、直接跑到 userspace watchdog ⇒ 匹配阶段行为被改变）。
+    //  ⇒ 改为纯被动取证：`DriverInjector::wrapAddDrivers` 只记录"注入的 personality 是否在数组里"，
+    //     由 `AmdRadeonController::powerUp` 的 `-NRedAccelExist2` 探针统一输出。
 
     if (currentKernelVersion() >= MACOS_11) {
         PenguinWizardry::PatternSolveRequest solveRequest{"__ZN30AMDRadeonX5000_AMDGFX9Hardware15notifyGfxAccessEv",
