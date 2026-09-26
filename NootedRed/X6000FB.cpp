@@ -40,6 +40,13 @@
 #include <mach/i386/vm_types.h>
 #include <mach/kern_return.h>
 
+// 第八步观测：加速器 `probe` 的读数（由 X5000.cpp 记录、在此处【安全位置】输出）
+extern UInt64 gAccelProbeCalls;
+extern UInt64 gAccelProbeRet;
+extern UInt64 gAccelProbeScoreIn;
+extern UInt64 gAccelProbeScoreOut;
+extern UInt64 gAccelProbeProv;
+
 static const UInt8 kCailAsicCapsTablePattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                   0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                                                   0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
@@ -1170,10 +1177,16 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         }
         const UInt64 vAccel    = probeSvc("IOAccelerator");
         const UInt64 vAccelCls = probeSvc("AMDRadeonX5000_AMDVega10GraphicsAccelerator");
+        const UInt64 vPCalls   = gAccelProbeCalls;
+        const UInt64 vPRet     = gAccelProbeRet;
+        const UInt64 vPIn      = gAccelProbeScoreIn;
+        const UInt64 vPOut     = gAccelProbeScoreOut;
+        const UInt64 vPProv    = gAccelProbeProv;
         if (symCls != nullptr) { symCls->release(); }
         if (symBase != nullptr) { symBase->release(); }
-        panic("NRed accel exist2: metaCls=%llx metaBase=%llx accel=%llx accelCls=%llx c7960=%llx", metaCls, metaBase,
-              vAccel, vAccelCls, f7960);
+        panic("NRed accel exist2: metaCls=%llx metaBase=%llx accel=%llx accelCls=%llx c7960=%llx "
+              "| probe calls=%llu ret=%llx in=%llx out=%llx prov=%llx",
+              metaCls, metaBase, vAccel, vAccelCls, f7960, vPCalls, vPRet, vPIn, vPOut, vPProv);
     }
 
     // ─── 加速器实例存在性探针（门控 `-NRedAccelExist`，默认关闭）────────────────────

@@ -873,30 +873,37 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
     return ret;
 }
 
+// 第八步观测（第 14 轮）：`probe` 的结果**不在原地 panic**（第 13 轮实测：匹配阶段 panic 太早，
+// panic 通道未就绪 ⇒ 零分片、不自动重启），改为写入全局静态标量，由**安全位置**
+// （`AmdRadeonController::powerUp` 的 `-NRedAccelExist2` 探针）统一输出。
+UInt64 gAccelProbeCalls   = 0;    // probe 被调用次数
+UInt64 gAccelProbeRet     = 0;    // 最后一次返回对象指针
+UInt64 gAccelProbeScoreIn = 0;    // 入口 score
+UInt64 gAccelProbeScoreOut = 0;   // 出口 score（0xffffffff = *score 被置 -1 ⇒ 明确拒绝）
+UInt64 gAccelProbeProv    = 0;    // 最后一次 provider 指针
+
 // ─── 第八步观测探针：加速器 `probe`（**纯观测**，定位"零实例"之因）──────────────
-//  背景（2026-09-26 第 12 轮实测）：加速器 kext 已载入、类存在、注册表条件已放宽，
-//  但 `AMDRadeonX5000_AMDVega10GraphicsAccelerator` **零实例**。离线反汇编 `probe`
-//  （VM 0x1054）显示它只有两条拒绝路径（`-amd_no_dgpu_accel` / `IOPCITunnelled`），
-//  本机都不成立 ⇒ 需要判定 probe **是否被调用**、以及**返回了什么**。
-//  本 wrapper **不修改任何返回值/score**（不绕过匹配机制），只读入参、调用原函数、读出参后 panic。
-//  判读：
-//   · 未出现本行 ⇒ probe 从未被调用 ⇒ personality 未参与匹配（上游问题）；
-//   · `ret=0 scoreOut=ffffffff` ⇒ probe 明确拒绝（`*score = -1`）；
-//   · `ret=0 scoreOut=0` ⇒ probe 未接受也未拒绝（"not a match"）；
-//   · `ret!=0` ⇒ probe 接受（问题在更后面，例如 start/实例化）。
-//  门控 `-NRedAccelProbe2`（默认关闭）；格式串为**新开探针位**（不改已投产串）。
+//  背景：第 12 轮实测加速器类**零实例**；第 13 轮证明 `probe` **确实被调用**（该轮 panic 太早、
+//  零分片）。离线反汇编 `probe`（VM 0x1054）显示其拒绝路径只有 `-amd_no_dgpu_accel` 与
+//  `IOPCITunnelled`（本机都不成立）⇒ 需要看清它的返回值与 score。
+//  本 wrapper **不修改任何返回值/score**（不绕过匹配机制），只记录到全局标量。
+//  判读（读数在 `powerUp` 处输出）：
+//   · `calls = 0` ⇒ probe 从未被调用；
+//   · `ret = 0 且 scoreOut = 0xffffffff` ⇒ probe 明确拒绝（`*score = -1`）；
+//   · `ret = 0 且 scoreOut = 0` ⇒ 未接受也未拒绝（"not a match"）；
+//   · `ret != 0` ⇒ 接受（问题在更后面）。
+//  门控 `-NRedAccelProbe2`（默认关闭，仅记录、不 panic）。
 IOService* X5000::wrapAccelProbe(void* const self, void* const provider, SInt32* const score)
 {
     const SInt32 scoreIn = (score != nullptr) ? *score : 0x7FFFFFFF;
     auto*        ret     = FunctionCast(wrapAccelProbe, singleton().orgAccelProbe)(self, provider, score);
     const SInt32 scoreOut = (score != nullptr) ? *score : 0x7FFFFFFF;
 
-    const UInt64 vSelf = reinterpret_cast<UInt64>(self);
-    const UInt64 vProv = reinterpret_cast<UInt64>(provider);
-    const UInt64 vRet  = reinterpret_cast<UInt64>(ret);
-    const UInt64 vIn   = static_cast<UInt64>(static_cast<UInt32>(scoreIn));
-    const UInt64 vOut  = static_cast<UInt64>(static_cast<UInt32>(scoreOut));
-    panic("NRed accel probe2: self=%llx prov=%llx ret=%llx scoreIn=%llx scoreOut=%llx", vSelf, vProv, vRet, vIn, vOut);
+    gAccelProbeCalls += 1;
+    gAccelProbeRet = reinterpret_cast<UInt64>(ret);
+    gAccelProbeScoreIn = static_cast<UInt64>(static_cast<UInt32>(scoreIn));
+    gAccelProbeScoreOut = static_cast<UInt64>(static_cast<UInt32>(scoreOut));
+    gAccelProbeProv = reinterpret_cast<UInt64>(provider);
 
     return ret;
 }
