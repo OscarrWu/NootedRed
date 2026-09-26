@@ -853,6 +853,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         UInt64 o20 = 0, o50 = 0, vt20 = 0, vt50 = 0, a00 = 0, s850 = 0;
         UInt64 c7960 = 0, s670 = 0, s6b8 = 0;
         UInt64 pci = 0, lHws = 0, lCtl = 0, lAcc = 0;   // 加速器探针：provider 上的三个加载属性
+        UInt64 hsD8 = 0;                                // 加速器探针：HWServices 的 TTL 接口字段（+0xd8）
         // vtable 自证字段（第 5 批次补充）：若 vt 真的是 vtable，则 +0x0(offset-to-top)=0、
         //   +0x8(typeinfo) 与 +0x10(第一个虚函数) 应非 0；再读 +0x118（PP helper 会用它做 isReady）。
         UInt64 v0_0 = 0, v0_8 = 0, v0_10 = 0, v0_118 = 0;
@@ -926,6 +927,10 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                     lCtl = readBool("LoadController");
                     lAcc = readBool("LoadAccelerator");
                 }
+                // 顺带（零额外真机成本）：读 HWServices 实例的 TTL 接口字段（+0xd8）。ROADMAP
+                //  §2.9 任务 4 待查"该字段是否被 createTtlInterface 填上"——若为 0，则
+                //  `powerUp` 取 TTL Interface（vtable[0x850]）必然拿到空，是**另一条**独立阻塞。
+                if (isKernelPtr(o50)) { hsD8 = load64(o50, 0xD8); }
             }
         }
 
@@ -983,10 +988,10 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         //     若注册**被发起过**，那一侧的探针会先 panic，本轮就不会看到本行）。
         if (wantAccelProbe) {
             const UInt64 vCtl = o20, vPci = pci, vLhws = lHws, vLctl = lCtl, vLacc = lAcc;
-            const UInt64 v7960 = c7960, vMagic = magicRead;
+            const UInt64 v7960 = c7960, vMagic = magicRead, vD8 = hsD8;
             panic("NRed accel probe: ctl=%llx pci=%llx LoadHwSvc=%llu LoadCtl=%llu LoadAccel=%llu "
-                  "| c7960=%llx | READCHK magic=%llx[exp=a5a5a5a512345678]",
-                  vCtl, vPci, vLhws, vLctl, vLacc, v7960, vMagic);
+                  "| c7960=%llx hsD8=%llx | READCHK magic=%llx[exp=a5a5a5a512345678]",
+                  vCtl, vPci, vLhws, vLctl, vLacc, v7960, vD8, vMagic);
         }
     }
 
