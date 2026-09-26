@@ -1111,22 +1111,6 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
         }
     }
 
-    // ─── NVRAM 写入能力诊断（门控 `-NRedNvDiagRead` / `-NRedNvDiagWrite`，默认关闭）──────
-    //  目的：一次真机引导取回 `/options` 节点的类名、读通道是否工作、两种 GUID 的写结果、
-    //        safeToSync/sync 返回值 —— 用于定位 `NVStorage::write` 返回 false 的确切环节。
-    //  依据：docs/NVRAM观测通道方案与风险评估.md §3.3；kb/re/AppleEFINVRAM写入判据报告.md
-    //  安全：`-NRedNvDiagRead` 全程只读；`-NRedNvDiagWrite` 才写 2 个小变量。两者不要同时开。
-    if (checkKernelArgument("-NRedNvDiagRead") || checkKernelArgument("-NRedNvDiagWrite")) {
-        const bool allowWrite = checkKernelArgument("-NRedNvDiagWrite");
-        const auto nvd = NvDiag::run(allowWrite);
-        panic("NRed nvdiag: entry=%llx dtn=%llu cls=%llx rdlen=%llu rd0=%llx"
-              " wrC=%llu wrA=%llu sSafe=%llu sDone=%llu"
-              " mbp=%llx mbMagic=%llu mbSize=%llu mbBufx=%llu mbBufc=%llx",
-              nvd.entry, nvd.isDtn, nvd.clsWord, nvd.rdLen, nvd.rd0,
-              nvd.wrCustom, nvd.wrApple, nvd.syncSafe, nvd.syncDone,
-              nvd.mbPtr, nvd.mbMagic, nvd.mbSize, nvd.mbBufx, nvd.mbBufc);
-    }
-
     // 诊断出口（boot-arg `-NRedStagePanic`）：用**已验证可靠**的 panic→efivarfs 通道把
     //   上面读到的指针值带出去。依据：本函数返回后必然发生 page fault（第八步第 1/2 批次
     //   实测：0x1319FD），此处只是把崩溃提前几毫秒，不改变最终结果。
@@ -1153,6 +1137,25 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
+
+    // ─── NVRAM 写入能力诊断（门控 `-NRedNvDiagRead` / `-NRedNvDiagWrite`，默认关闭）──────
+    //  位置说明（2026-09-27 第 1 轮实测教训）：必须放在 `AmdRadeonController::powerUp` **入口**——
+    //    实测调用顺序是 `AmdPowerPlayHelper::powerUp`(+0x17e) **先于** `AmdDalHelper::powerUp`(+0x2a4)；
+    //    挂在 DalHelper 上时，未抑制 PP 的引导会在 PP 处 panic，永远走不到探针（第 1 轮实测）。
+    //  目的：一次真机引导取回 `/options` 节点的类名、读通道是否工作、两种 GUID 的写结果、
+    //        safeToSync 返回值，以及 `msgbufp` 弱引用是否解析成功。
+    //  依据：docs/NVRAM观测通道方案与风险评估.md §3.3；kb/re/AppleEFINVRAM写入判据报告.md
+    //  安全：`-NRedNvDiagRead` 全程只读；`-NRedNvDiagWrite` 才写 2 个小变量。两者不要同时开。
+    if (checkKernelArgument("-NRedNvDiagRead") || checkKernelArgument("-NRedNvDiagWrite")) {
+        const bool allowWrite = checkKernelArgument("-NRedNvDiagWrite");
+        const auto nvd = NvDiag::run(allowWrite);
+        panic("NRed nvdiag: entry=%llx dtn=%llu cls=%llx rdlen=%llu rd0=%llx"
+              " wrC=%llu wrA=%llu sSafe=%llu sDone=%llu"
+              " mbp=%llx mbMagic=%llu mbSize=%llu mbBufx=%llu mbBufc=%llx",
+              nvd.entry, nvd.isDtn, nvd.clsWord, nvd.rdLen, nvd.rd0,
+              nvd.wrCustom, nvd.wrApple, nvd.syncSafe, nvd.syncDone,
+              nvd.mbPtr, nvd.mbMagic, nvd.mbSize, nvd.mbBufx, nvd.mbBufc);
+    }
 
     // ─── `probe` 所需属性名探针（门控 `-NRedAccelExist3`，默认关闭）─────────────────
     //  动机（第 16 轮读数）：加速器类**已注册**（`metaCls != 0`）却**零实例**；离线反汇编
