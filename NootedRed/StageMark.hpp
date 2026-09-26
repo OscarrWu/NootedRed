@@ -27,24 +27,35 @@
 
 #include <Headers/kern_nvram.hpp>
 #include <Headers/kern_util.hpp>
+#include <libkern/libkern.h>
 
 namespace StageMark {
+	// ⚠️ 内核态约束（CI run #78 实测）：**函数内的静态对象需要 guard variable，kext 不支持**。
+	//    故这里用"命名空间作用域的静态实例 + 标量标志位"：
+	//    · 实例是文件级静态对象（内部链接，每个 TU 各一份），由 kext 的 module init 正常构造；
+	//    · 标志位都是标量（常量初始化），不需要 guard。
+	static NVStorage gStorage {};
+
 	// 探针总开关：只认 boot-arg `-NRedStageMark`
 	inline bool enabled() {
-		static bool value = checkKernelArgument("-NRedStageMark");
+		static bool checked = false;
+		static bool value   = false;
+		if (!checked) {
+			checked = true;
+			value   = checkKernelArgument("-NRedStageMark");
+		}
 		return value;
 	}
 
 	// 惰性初始化 NVStorage（早期阶段可能失败；失败则静默降级，绝不影响引导）
 	inline NVStorage *storage() {
-		static NVStorage instance {};
 		static bool tried = false;
-		static bool ok = false;
+		static bool ok    = false;
 		if (!tried) {
 			tried = true;
-			ok = instance.init();
+			ok    = gStorage.init();
 		}
-		return ok ? &instance : nullptr;
+		return ok ? &gStorage : nullptr;
 	}
 
 	// 追加一个标记并把 NVRAM 同步到 flash
@@ -57,7 +68,8 @@ namespace StageMark {
 			return;
 
 		// macOS 的 NVRAM 键名 = "<GUID>:<名字>"；Linux efivarfs 侧对应 "NRedStage-<guid 小写>"
-		static char key[] = NVRAM_PREFIX(LILU_VENDOR_GUID, "NRedStage");
+		// （不用 static 数组：避免任何静态存储需求，47 字节的局部拷贝可忽略）
+		char key[] = NVRAM_PREFIX(LILU_VENDOR_GUID, "NRedStage");
 
 		char buf[256];
 		uint32_t have = 0;
