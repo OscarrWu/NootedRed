@@ -1204,28 +1204,12 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 mxAH8Rc = nred.smu13Resp[5];
         // 第 3 批次：D3 计数（判别性对照的判据——关掉 D3 后 dummy 应为 0；iri 恒 0 则 D3 从未拦到 IRI）
         const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
-        // 第 6 批次：**补注册是否真的写入**的直接判据（不再依赖 pp_smu 的下游后果）。
-        //   `self` 是 AmdPowerPlayHelper，`self+0x20` 是 controller；
-        //   `controller+0x7960` 就是 `messageAccelerator` 转发 IRI 的目标对象。
-        //   只读 + 地址校验（探针自身绝不崩）；判据：注册后该值应等于 `self+0x50`。
-        const UInt64 kMinPtr = 0xffffff7f80000000ULL;
-        const UInt64 selfH = reinterpret_cast<UInt64>(self);
-        UInt64 ctlH = 0, s7960 = 0, s50H = 0;
-        if (selfH >= kMinPtr) {
-            s50H = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(selfH) + 0x50);
-            ctlH = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(selfH) + 0x20);
-            if (ctlH >= kMinPtr) {
-                s7960 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(ctlH) + 0x7960);
-            }
-        }
-        const UInt64 vCtlH = ctlH, v7960r = s7960, vHs50 = s50H;
 
         panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
               "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
               "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x bar0=%llx | "
               "RESP hi=%x lo=%x xfer=%x | "
               "ma calls=%llu iri=%llu dummy=%llu | "
-              "REGCHK ctl=%llx ctl7960=%llx hs50=%llx "
               "orig1:%s | orig2:%s | orig3:%s",
             probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
             rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
@@ -1234,7 +1218,6 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
             rFbC0, rFbC1, rFbC2, rFbC3, rBar0,
             respHi, respLo, respXfer,
             vCalls, vIri, vDummy,
-            vCtlH, v7960r, vHs50,
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
