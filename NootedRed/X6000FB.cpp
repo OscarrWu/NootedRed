@@ -1175,25 +1175,9 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         if (ctlAddr2 >= 0xffffff7f80000000ULL) {
             f7960 = *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(self) + 0x7960);
         }
-        // 顺带（ROADMAP §2.9 任务 4，**从未实测过**）：HWServices 实例的 TTL 接口字段 `+0xd8`。
-        //  取值路径与 `powerUp` 一致：`controller->vtable[0xa08]()` = `findHwServices()`（纯查询）。
-        //  ROADMAP 把这条列为"可能更短的独立路径"：若 `+0xd8` 非 0，Apple 的 TTL 路径可用。
-        UInt64 hsInst = 0, hsD8 = 0;
-        const UInt64 vt = *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(self));
-        if (vt >= 0xffffff7f80000000ULL) {
-            auto findHwSvc = reinterpret_cast<void* (*)(void*)>(
-                *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(vt) + 0xA08));
-            if (findHwSvc != nullptr) {
-                auto* hs = findHwSvc(self);
-                if (hs != nullptr) {
-                    hsInst = reinterpret_cast<UInt64>(hs);
-                    const UInt64 hsv = *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(hs));
-                    if (hsv >= 0xffffff7f80000000ULL) {
-                        hsD8 = *reinterpret_cast<volatile UInt64*>(reinterpret_cast<UInt8*>(hs) + 0xD8);
-                    }
-                }
-            }
-        }
+        // 注（2026-09-26 教训）：**探针里禁止调用 Apple 的方法**（第 14/15 轮实测：
+        //  hook `probe` 与调用 `findHwServices()` 都会改变系统行为/造成卡顿）。
+        //  `hsD8`（HWServices 的 TTL 接口）改回 PPH 探针读取——那里持有实例指针 `o50`，只读字段。
         const UInt64 vAccel    = probeSvc("IOAccelerator");
         const UInt64 vAccelCls = probeSvc("AMDRadeonX5000_AMDVega10GraphicsAccelerator");
         const UInt64 vPCalls   = gAccelProbeCalls;
@@ -1204,8 +1188,8 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         if (symCls != nullptr) { symCls->release(); }
         if (symBase != nullptr) { symBase->release(); }
         panic("NRed accel exist2: metaCls=%llx metaBase=%llx accel=%llx accelCls=%llx c7960=%llx "
-              "| hsInst=%llx hsD8=%llx | probe calls=%llu ret=%llx in=%llx out=%llx prov=%llx",
-              metaCls, metaBase, vAccel, vAccelCls, f7960, hsInst, hsD8, vPCalls, vPRet, vPIn, vPOut, vPProv);
+              "| probe calls=%llu ret=%llx in=%llx out=%llx prov=%llx",
+              metaCls, metaBase, vAccel, vAccelCls, f7960, vPCalls, vPRet, vPIn, vPOut, vPProv);
     }
 
     // ─── 加速器实例存在性探针（门控 `-NRedAccelExist`，默认关闭）────────────────────
