@@ -13,6 +13,12 @@
 //    读取（Manjaro 侧；注意跳过前 4 字节 EFI 属性头）：
 //      sudo cat /sys/firmware/efi/efivars/NRedStage-4d1fda02-38c7-4a6a-9cc6-4bcca8b30102 | tail -c +5
 //
+//  ⛔ **实测结论（2026-09-26 第 2 批次真机）：本通道不可用**——`NVStorage::init` 成功但
+//     `write` 失败（自检位 `nvram init=1 write=0 sync=0`，即 `IODTNVRAM::setProperty` 在
+//     早期启动阶段不生效），重启后变量不存在。**实际观测请用 panic 通道**：
+//     `X6000FB::wrapDalHelperPowerUp`（`-NRedStagePanic`）与 `X6000FB::wrapDcClkMgrCreate`
+//     （`-NRedStagePanic2`）。本文件保留作为"通道自检"与未来复测之用。
+//
 //  设计要点
 //    · 追加式写入（值形如 `|nred-init|disp-init-enter|seq-start|...`），保留完整路径而非只留最后一步；
 //    · 只使用 NVStorage 的 OptRaw，不压缩/不加密/不加头 → Linux 侧可直接读明文；
