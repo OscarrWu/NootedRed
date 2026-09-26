@@ -322,6 +322,27 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyPixelRateDiv(AMDRadeonX5000_AMDHW
     }
 }
 
+// ─── 编排分阶段探针（第八步第 3 批次）────────────────────────────────────────
+//  用途：`-NRedSeqPanicN` 存在时，在第 N 段**完成之后**立刻 panic，把"编排走到哪一段"
+//        经已验证可靠的 panic→efivarfs 通道带出来。
+//  为什么需要：若系统在编排期间**卡住**（不 panic、不崩溃），调用栈取不到任何证据；
+//        分阶段 panic 能把"卡在哪一段"变成可判读文本（且 panic 后仍能自动重启，不挂死）。
+//  铁律：实参只能是已求值的局部变量；默认不生效（boot-arg 门控）。
+static void seqStageProbe(UInt32 stage, UInt32 stages)
+{
+    bool want = false;
+    switch (stage) {
+        case 1: want = checkKernelArgument("-NRedSeqPanic1"); break;
+        case 2: want = checkKernelArgument("-NRedSeqPanic2"); break;
+        case 3: want = checkKernelArgument("-NRedSeqPanic3"); break;
+        case 4: want = checkKernelArgument("-NRedSeqPanic4"); break;
+        default: break;
+    }
+    if (!want) { return; }
+    const UInt64 vStage = stage, vStages = stages;
+    panic("NRed display-init probe: stage %llu done (stages=0x%llx)", vStage, vStages);
+}
+
 // 显示初始化编排入口：由 `init` 调用一次（守卫在 init 里）。
 void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX5000_AMDGFX9DCN314Display* const self)
 {
@@ -338,6 +359,7 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
     } else {
         SYSLOG("GFX9DCN314Display", "display-init: stage clocks FAILED");
     }
+    seqStageProbe(1, stages);
 
     auto* const regs = self->getHWRegisters();
     if (regs == nullptr) {
@@ -351,6 +373,7 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
         applyPixelRateDiv(*regs, i);
     }
     stages |= kStagePixelRate;
+    seqStageProbe(2, stages);
 
     // ③ ODM 拓扑（第六步）：Linux `dcn20_apply_single_controller_ctx_to_hw` 里的
     //    `hws->funcs.update_odm`（dcn20_hwseq.c:1954）。
@@ -363,6 +386,7 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
                MAX_SUPPORTED_DISPLAYS_RV);
         stages |= kStageOdm;
     }
+    seqStageProbe(3, stages);
 
     // ④ FIFO 重同步（第六步）：Linux `dce110_apply_ctx_to_hw` 每 pipe 应用后调
     //    `resync_fifo_dccg_dio`（dce110_hwseq.c:2737）→ `trigger_dio_fifo_resync`。
@@ -372,6 +396,7 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
     resync_fifo_dccg_dio_direct(*regs);
     DBGLOG("GFX9DCN314Display", "display-init: resync_fifo_dccg_dio_direct applied");
     stages |= kStageFifoResync;
+    seqStageProbe(4, stages);
 
     // 汇总标记：真机取回日志后，用这一行判断"编排走到哪一段"。
     DBGLOG("GFX9DCN314Display",
@@ -396,7 +421,16 @@ bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* cons
 
     if (!sDisplayInitSeqApplied) {
         sDisplayInitSeqApplied = true;
-        applyInitialDisplaySequence(static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self));
+        // 第 3 批次判别性对照（2026-09-26）：`-NRedNoDisplaySeq` 时**整段编排跳过**。
+        //   依据：引导 3/4 实测——关掉 D3 后系统能启动到用户态/存储栈（此前从未到达），
+        //   但整体**卡住**（watchdog 无 checkin / NVMe 命令超时）。本编排含四段真写硬件的
+        //   操作，是"卡住"的首要嫌疑；该门控用于把"编排"这一个变量单独摘掉做对照。
+        //   默认（无参数）行为完全不变。
+        if (checkKernelArgument("-NRedNoDisplaySeq")) {
+            SYSLOG("GFX9DCN314Display", "display-init: SKIPPED by -NRedNoDisplaySeq (control run)");
+        } else {
+            applyInitialDisplaySequence(static_cast<AMDRadeonX5000_AMDGFX9DCN314Display*>(_self));
+        }
     }
 
     StageMark::mark("disp-init-ok");
