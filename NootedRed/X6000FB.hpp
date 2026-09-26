@@ -33,6 +33,7 @@ class X6000FB
     mach_vm_address_t      orgHandleCriticalError{0};
     mach_vm_address_t      orgDalHelperPowerUp{0};   // 第八步观测：AmdDalHelper::powerUp（读崩溃链上的指针）
     mach_vm_address_t      orgDcClkMgrCreate{0};     // 第八步观测：dc_clk_mgr_create（模式定位，读 ctx/pp_smu）
+    mach_vm_address_t      orgPpSmuFill{0};          // 第八步观测：填充 pp_smu_funcs 的函数（模式定位）
     mach_vm_address_t      orgCreateObjectInfo{0};
     mach_vm_address_t      orgCreateVramInfo{0};
     mach_vm_address_t      orgGetVendorInfo{0};
@@ -63,6 +64,7 @@ private:
     static UInt32                           wrapControllerPowerUp(void* self);
     static UInt32                           wrapDalHelperPowerUp(void* self);   // 第八步观测探针（写 NVRAM）
     static void*                            wrapDcClkMgrCreate(void* ctx, void* ppSmu, void* dccg);   // 第八步观测探针
+    static void*                            wrapPpSmuFill(void* ctx, void* ppSmu);                     // 第八步观测探针
     static IOReturn                         wrapMessageAccelerator(void* self, UInt32 reqType, void* arg2, void* arg3, void* arg4);
     static UInt32                           wrapHandleCriticalError(void* self, const char* fmt1, const char* fmt2, const char* fmt3);
     static void*                            wrapCreateObjectInfo(void* helper, UInt32 tableOffset);

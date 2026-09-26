@@ -79,6 +79,14 @@ static const UInt8 kDcClkMgrCreatePattern[] = {
     0xFB, 0x8B, 0x47, 0x2C, 0x44, 0x8B, 0x6F, 0x34, 0x3D, 0x86, 0x00, 0x00, 0x00, 0x7E, 0x4A, 0x05,
     0x79, 0xFF, 0xFF, 0xFF, 0x83, 0xF8, 0x08, 0x0F, 0x87, 0x81, 0x01, 0x00, 0x00, 0x49, 0x89, 0xD4};
 
+// 填充 `pp_smu_funcs` 的函数（Apple 侧 `dm_pp_get_funcs` 的落地实现，未导出符号）入口模式。
+// 作用：它按"PP 能力标志"选择分支写入该结构的若干偏移；**标志不匹配则走断言路径、什么都不写**。
+// 唯一性：在 13.6 目标二进制中命中 1 处（12.5 基准未命中，故本探针仅按 13.6 设计）。
+static const UInt8 kPpSmuFillPattern[] = {
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48, 0x81, 0xEC, 0x90, 0x00,
+    0x00, 0x00, 0x48, 0x89, 0xF3, 0x4C, 0x8B, 0x77, 0x08, 0x4C, 0x89, 0xF7, 0xE8, 0xED, 0xC1, 0xFE,
+    0xFF, 0x48, 0x85, 0xDB, 0x0F, 0x84, 0x82, 0x01, 0x00, 0x00, 0x49, 0x89, 0xC7, 0x4C, 0x8D, 0xA5};
+
 static const UInt8      kCreateVramInfoCallPattern[]          = {0x48, 0x8B, 0x7B, 0x18, 0x48, 0x8B, 0x43, 0x20, 0x0F,
                                                                  0xB7, 0x70, 0x3C, 0xE8, 0x00, 0x00, 0x00, 0x00};
 static const UInt8      kCreateVramInfoCallPatternMask[]      = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -294,6 +302,19 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                 SYSLOG("X6000FB", "stage-mark: failed to route dc_clk_mgr_create (pattern miss)");
             } else {
                 DBGLOG("X6000FB", "stage-mark: routed dc_clk_mgr_create");
+            }
+        }
+
+        // 第八步观测（终局证据）：hook 填充 `pp_smu_funcs` 的函数（未导出 → 模式定位）。
+        //   ⚠️ **条件路由**：该函数的调用者依赖调用遗留的 ZF 标志，无条件 hook 会改变行为；
+        //      仅在 boot-arg `-NRedStagePanic3` 存在时才 route，保证默认路径零影响。
+        if (checkKernelArgument("-NRedStagePanic3")) {
+            PenguinWizardry::PatternRouteRequest ppFillRequest{"pp_smu_fill", wrapPpSmuFill,
+                                                               this->orgPpSmuFill, kPpSmuFillPattern};
+            if (!ppFillRequest.route(patcher, id, slide, size)) {
+                SYSLOG("X6000FB", "stage-mark: failed to route pp_smu fill (pattern miss)");
+            } else {
+                DBGLOG("X6000FB", "stage-mark: routed pp_smu fill");
             }
         }
 
@@ -707,6 +728,43 @@ void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* cons
     }
 
     return FunctionCast(wrapDcClkMgrCreate, singleton().orgDcClkMgrCreate)(ctx, ppSmu, dccg);
+}
+
+// ─── 第八步观测探针：填充 pp_smu_funcs 的函数（终局证据）──────────────────────
+//  目的：`dc_clk_mgr_create` 收到的 `pp_smu_funcs` 是**空结构**（第 2 批次实测：前 4 个字段全 0）。
+//        本探针在填充函数**返回之后**读同一结构，直接回答"它到底写了没有、写了什么"。
+//  注意：该函数的调用者依赖调用遗留的 ZF 标志，因此**仅在 `-NRedStagePanic3` 时才 route**
+//        （见 processKext 中的条件路由），保证默认启动路径零影响。
+void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
+{
+    auto ret = FunctionCast(wrapPpSmuFill, singleton().orgPpSmuFill)(ctx, ppSmu);
+
+    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+    auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+        return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+    };
+
+    const UInt64 c  = reinterpret_cast<UInt64>(ctx);
+    const UInt64 pp = reinterpret_cast<UInt64>(ppSmu);
+    UInt64 v0 = 0, v8 = 0, v18 = 0, v20 = 0, v28 = 0, v30 = 0, v40 = 0, v48 = 0, v60 = 0, v70 = 0;
+    if (isKernelPtr(pp)) {
+        v0  = load64(pp, 0x00);
+        v8  = load64(pp, 0x08);
+        v18 = load64(pp, 0x18);
+        v20 = load64(pp, 0x20);
+        v28 = load64(pp, 0x28);
+        v30 = load64(pp, 0x30);
+        v40 = load64(pp, 0x40);
+        v48 = load64(pp, 0x48);
+        v60 = load64(pp, 0x60);
+        v70 = load64(pp, 0x70);
+    }
+    const UInt64 rv = reinterpret_cast<UInt64>(ret);
+    panic("NRed pp_smu fill probe: ctx=%llx pp=%llx ret=%llx | [0]=%llx [8]=%llx [18]=%llx [20]=%llx "
+          "[28]=%llx [30]=%llx [40]=%llx [48]=%llx [60]=%llx [70]=%llx",
+          c, pp, rv, v0, v8, v18, v20, v28, v30, v40, v48, v60, v70);
+
+    return ret;
 }
 
 // ─── 第八步观测探针：AmdDalHelper::powerUp ───────────────────────────────────
