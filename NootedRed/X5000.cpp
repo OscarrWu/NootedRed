@@ -215,6 +215,20 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         }
     }
 
+    // 第八步观测（第 13 轮）：hook 加速器的 `probe`（**纯观测**：不改返回值、不改 score）。
+    //  目的：判定"加速器类为何零实例"——probe 若从未被调用 ⇒ personality 未参与匹配（上游问题）；
+    //        若被调用而返回 0 ⇒ 其前置判据不满足（离线已排除 `-amd_no_dgpu_accel` 与 `IOPCITunnelled`）。
+    //  入口/出口各记录一次，panic 前把 `score` 的进出值一并带出。门控 `-NRedAccelProbe2`（默认关闭）。
+    if (checkKernelArgument("-NRedAccelProbe2")) {
+        PenguinWizardry::PatternRouteRequest accelProbeReq{
+            "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator5probeEP9IOServicePi", wrapAccelProbe, this->orgAccelProbe};
+        if (!accelProbeReq.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "accel-probe2: failed to route AMDGraphicsAccelerator::probe");
+        } else {
+            DBGLOG("X5000", "accel-probe2: routed AMDGraphicsAccelerator::probe");
+        }
+    }
+
     if (currentKernelVersion() >= MACOS_11) {
         PenguinWizardry::PatternSolveRequest solveRequest{"__ZN30AMDRadeonX5000_AMDGFX9Hardware15notifyGfxAccessEv",
                                                           this->notifyGfxAccess};
@@ -855,6 +869,34 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
         panic("NRed accel start probe: self=%llx provider=%llx ret=%llu | f140=%llx f148=%llx f158=%llx f160=%llx", s,
               vProv, vRet, f140, f148, f158, f160);
     }
+
+    return ret;
+}
+
+// ─── 第八步观测探针：加速器 `probe`（**纯观测**，定位"零实例"之因）──────────────
+//  背景（2026-09-26 第 12 轮实测）：加速器 kext 已载入、类存在、注册表条件已放宽，
+//  但 `AMDRadeonX5000_AMDVega10GraphicsAccelerator` **零实例**。离线反汇编 `probe`
+//  （VM 0x1054）显示它只有两条拒绝路径（`-amd_no_dgpu_accel` / `IOPCITunnelled`），
+//  本机都不成立 ⇒ 需要判定 probe **是否被调用**、以及**返回了什么**。
+//  本 wrapper **不修改任何返回值/score**（不绕过匹配机制），只读入参、调用原函数、读出参后 panic。
+//  判读：
+//   · 未出现本行 ⇒ probe 从未被调用 ⇒ personality 未参与匹配（上游问题）；
+//   · `ret=0 scoreOut=ffffffff` ⇒ probe 明确拒绝（`*score = -1`）；
+//   · `ret=0 scoreOut=0` ⇒ probe 未接受也未拒绝（"not a match"）；
+//   · `ret!=0` ⇒ probe 接受（问题在更后面，例如 start/实例化）。
+//  门控 `-NRedAccelProbe2`（默认关闭）；格式串为**新开探针位**（不改已投产串）。
+IOService* X5000::wrapAccelProbe(void* const self, void* const provider, SInt32* const score)
+{
+    const SInt32 scoreIn = (score != nullptr) ? *score : 0x7FFFFFFF;
+    auto*        ret     = FunctionCast(wrapAccelProbe, singleton().orgAccelProbe)(self, provider, score);
+    const SInt32 scoreOut = (score != nullptr) ? *score : 0x7FFFFFFF;
+
+    const UInt64 vSelf = reinterpret_cast<UInt64>(self);
+    const UInt64 vProv = reinterpret_cast<UInt64>(provider);
+    const UInt64 vRet  = reinterpret_cast<UInt64>(ret);
+    const UInt64 vIn   = static_cast<UInt64>(static_cast<UInt32>(scoreIn));
+    const UInt64 vOut  = static_cast<UInt64>(static_cast<UInt32>(scoreOut));
+    panic("NRed accel probe2: self=%llx prov=%llx ret=%llx scoreIn=%llx scoreOut=%llx", vSelf, vProv, vRet, vIn, vOut);
 
     return ret;
 }
