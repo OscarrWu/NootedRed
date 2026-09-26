@@ -658,19 +658,22 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
         return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
     };
 
+    UInt64 selfAddr = 0;
+    UInt64 p48 = 0, p58 = 0, p30 = 0, b118 = 0xff;
+
     if (StageMark::enabled() && isKernelPtr(reinterpret_cast<UInt64>(self))) {
-        const UInt64 selfAddr = reinterpret_cast<UInt64>(self);
-        UInt64 p48 = 0;
+        selfAddr = reinterpret_cast<UInt64>(self);
         if (isKernelPtr(load64(selfAddr, 0x48))) {
             p48 = load64(selfAddr, 0x48);
         }
-        UInt64 p58 = 0;
         if (p48 != 0 && isKernelPtr(load64(p48, 0x58))) {
             p58 = load64(p48, 0x58);
         }
-        UInt64 p30 = 0;
         if (p58 != 0 && isKernelPtr(load64(p58, 0x30))) {
             p30 = load64(p58, 0x30);
+        }
+        if (p30 != 0) {
+            b118 = *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(p30) + 0x118);
         }
 
         StageMark::mark("dh-enter");
@@ -679,8 +682,24 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
         StageMark::markHex("dh-f58", p58);
         StageMark::markHex("dh-f30", p30);
         if (p30 != 0) {
-            StageMark::markHex("dh-b118", *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(p30) + 0x118));
+            StageMark::markHex("dh-b118", b118);
         }
+    }
+
+    // 诊断出口（boot-arg `-NRedStagePanic`）：用**已验证可靠**的 panic→efivarfs 通道把
+    //   上面读到的指针值带出去。依据：本函数返回后必然发生 page fault（第八步第 1/2 批次
+    //   实测：0x1319FD），此处只是把崩溃提前几毫秒，不改变最终结果。
+    //   铁律：panic 实参**只能**是已求值的局部变量（禁调可能加锁的函数）→ 全部预先求值。
+    if (checkKernelArgument("-NRedStagePanic")) {
+        const UInt32 stBits = StageMark::statusBits();
+        const UInt64 nvInit  = (stBits & StageMark::kStatusInitOk) ? 1 : 0;
+        const UInt64 nvWrite = (stBits & StageMark::kStatusWriteOk) ? 1 : 0;
+        const UInt64 nvSync  = (stBits & StageMark::kStatusSyncOk) ? 1 : 0;
+        const UInt64 nvUsed  = (stBits & StageMark::kStatusUsed) ? 1 : 0;
+        const UInt64 vSelf = selfAddr, v48 = p48, v58 = p58, v30 = p30, v118 = b118;
+        panic("NRed DalHelper probe: self=%llx f48=%llx f58=%llx f30=%llx b118=%llx "
+              "| nvram init=%llu write=%llu sync=%llu used=%llu",
+              vSelf, v48, v58, v30, v118, nvInit, nvWrite, nvSync, nvUsed);
     }
 
     const auto ret = FunctionCast(wrapDalHelperPowerUp, singleton().orgDalHelperPowerUp)(self);

@@ -36,6 +36,17 @@ namespace StageMark {
 	//    · 标志位都是标量（常量初始化），不需要 guard。
 	static NVStorage gStorage {};
 
+	// 通道自检位（供 panic 探针带出；均为标量，不需要 guard）
+	enum StatusBits : UInt32 {
+		kStatusInitOk  = 1u << 0,   // NVStorage::init 成功
+		kStatusWriteOk = 1u << 1,   // 最近一次 write 成功
+		kStatusSyncOk  = 1u << 2,   // 最近一次 sync 成功
+		kStatusUsed    = 1u << 3    // mark() 至少被调用过一次
+	};
+	static UInt32 gStatus = 0;
+
+	inline UInt32 statusBits() { return gStatus; }
+
 	// 探针总开关：只认 boot-arg `-NRedStageMark`
 	inline bool enabled() {
 		static bool checked = false;
@@ -54,6 +65,9 @@ namespace StageMark {
 		if (!tried) {
 			tried = true;
 			ok    = gStorage.init();
+			if (ok) {
+				gStatus |= kStatusInitOk;
+			}
 		}
 		return ok ? &gStorage : nullptr;
 	}
@@ -90,8 +104,13 @@ namespace StageMark {
 		lilu_os_memcpy(buf + have + 1, what, len);
 		have += static_cast<uint32_t>(len + 1);
 
-		nv->write(key, reinterpret_cast<const uint8_t *>(buf), have, NVStorage::OptRaw);
-		nv->sync();
+		gStatus |= kStatusUsed;
+		if (nv->write(key, reinterpret_cast<const uint8_t *>(buf), have, NVStorage::OptRaw)) {
+			gStatus |= kStatusWriteOk;
+		}
+		if (nv->sync()) {
+			gStatus |= kStatusSyncOk;
+		}
 	}
 
 	// 带一个 64 位十六进制值的标记（形如 `name=0x0123456789abcdef`）
