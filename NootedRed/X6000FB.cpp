@@ -318,6 +318,18 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
             }
         }
 
+        // 第八步观测（第 3 批次）：hook `AmdPowerPlayHelper::powerUp` 入口，读 PP 侧两个后端对象。
+        //   同样**条件路由**（仅在 `-NRedStagePanic6` 时），保证默认路径零影响。
+        if (checkKernelArgument("-NRedStagePanic6")) {
+            KernelPatcher::RouteRequest pphRequest{"__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv",
+                                                  wrapPpHelperPowerUp, this->orgPpHelperPowerUp};
+            if (!patcher.routeMultiple(id, &pphRequest, 1, slide, size)) {
+                SYSLOG("X6000FB", "stage-mark: failed to route AmdPowerPlayHelper::powerUp");
+            } else {
+                DBGLOG("X6000FB", "stage-mark: routed AmdPowerPlayHelper::powerUp");
+            }
+        }
+
         const PenguinWizardry::MaskedLookupPatch patches[] = {
             {&kextRadeonX6000Framebuffer, kControllerPowerUpOriginal, kControllerPowerUpOriginalMask,
              kControllerPowerUpReplace, kControllerPowerUpReplaceMask, 1},
@@ -669,13 +681,30 @@ IOReturn X6000FB::getTriageHardwareDataRN(void*, const UInt32 fbIndex, void* con
     return kIOReturnSuccess;
 }
 
+// ─── D3 门控与调用计数（第八步第 3 批次）────────────────────────────────────
+//  为什么加计数：D3 此前**恒开**（无任何门控），导致做不了"应该失败"的判别性对照
+//  （违反 roadmap §4.7）。计数与门控解决两件事：
+//    · `-NRedD3Off` 关闭 dummy 返回 → 可做"关掉 D3 后第一个错误是什么"的对照；
+//    · 三个计数**不论门控都计** → 直接回答"IRI 是否真的走 `AmdRadeonController::messageAccelerator`"
+//      （若 `iri` 恒为 0，则 D3 从未拦到 IRI，此前"D3 越过了 IRI"的归因不成立）。
+//  计数为标量（常量初始化），符合内核态约束（kern 不支持函数内静态对象的 guard variable）。
+static UInt32 gMaCalls = 0;   // messageAccelerator 被调用次数
+static UInt32 gMaIri   = 0;   // 命中 `isPhoenix && reqType == 3`（IRI）的次数
+static UInt32 gMaDummy = 0;   // 实际返回 dummy success 的次数（关掉 D3 后应为 0）
+
 // D3: route messageAccelerator, dummy IRI send (reqType=3) on Phoenix so powerUp
 // continues into its success path (TTL RTS / m_ppInitialized / FB_Boot_PPInitialized)
 IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType, void* arg2, void* arg3, void* arg4)
 {
+    gMaCalls++;
     if (NRed::singleton().getAttributes().isPhoenix() && reqType == 3) {
-        SYSLOG("X6000FB", "D3: messageAccelerator IRI (cmd=3) -> dummy success on Phoenix");
-        return kIOReturnSuccess;
+        gMaIri++;
+        // 门控（默认"开"＝维持既有行为）：`-NRedD3Off` 时透传原始实现
+        if (!checkKernelArgument("-NRedD3Off")) {
+            gMaDummy++;
+            SYSLOG("X6000FB", "D3: messageAccelerator IRI (cmd=3) -> dummy success on Phoenix");
+            return kIOReturnSuccess;
+        }
     }
     return FunctionCast(wrapMessageAccelerator,
                         reinterpret_cast<mach_vm_address_t>(singleton().orgMessageAccelerator))(self, reqType, arg2, arg3, arg4);
@@ -722,9 +751,11 @@ void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* cons
 
         const UInt64 d = reinterpret_cast<UInt64>(dccg);
         const UInt64 v58 = p58, v30 = p30, v118 = b118, v0 = pp0, v8 = pp8, v10 = pp10, v18 = pp18;
+        const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
         panic("NRed clk_mgr probe: ctx=%llx ctx58=%llx ctx58_30=%llx b118=%llx "
-              "| pp_smu=%llx [0]=%llx [8]=%llx [10]=%llx [18]=%llx | dccg=%llx",
-              c, v58, v30, v118, pp, v0, v8, v10, v18, d);
+              "| pp_smu=%llx [0]=%llx [8]=%llx [10]=%llx [18]=%llx | dccg=%llx "
+              "| ma calls=%llu iri=%llu dummy=%llu",
+              c, v58, v30, v118, pp, v0, v8, v10, v18, d, vCalls, vIri, vDummy);
     }
 
     return FunctionCast(wrapDcClkMgrCreate, singleton().orgDcClkMgrCreate)(ctx, ppSmu, dccg);
@@ -765,6 +796,51 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
           c, pp, rv, v0, v8, v18, v20, v28, v30, v40, v48, v60, v70);
 
     return ret;
+}
+
+// ─── 第八步观测探针：AmdPowerPlayHelper::powerUp（PP 侧后端对象身份）──────────
+//  要回答的问题（第 3 批次步骤 1 的判据）：13.6 的 `AmdPowerPlayHelper::powerUp` 里，
+//  IRI 发送走 `this+0x20` 对象的 `vtable[0xa00]`，TTL Interface / TTL RTS 取用走
+//  `this+0x50` 对象的 `vtable[0x850]` / `vtable[0x10]`（反汇编 0x10d90–0x10ecd）。
+//  探针在入口**只读**这三组指针——**绝不调用任何槽**（调用属"状态写"级别，可能挂死机器），
+//  仅用于判定：① 两个后端对象是否为空；② 其 vtable 槽是否非 0（槽是否存在）；
+//  ③ 间接印证「D3 hook 的 controller 是否就是 `this+0x20` 那个对象」。
+//  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic6`（与其它探针互斥使用）。
+UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
+{
+    if (checkKernelArgument("-NRedStagePanic6")) {
+        auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff8000000000ULL; };
+        auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+
+        const UInt64 s = reinterpret_cast<UInt64>(self);
+        UInt64 o20 = 0, o50 = 0, vt20 = 0, vt50 = 0, a00 = 0, s850 = 0, s10 = 0;
+        if (isKernelPtr(s)) {
+            o20 = load64(s, 0x20);
+            o50 = load64(s, 0x50);
+            if (isKernelPtr(o20)) {
+                vt20 = load64(o20, 0x00);
+                if (isKernelPtr(vt20)) { a00 = load64(vt20, 0xA00); }
+            }
+            if (isKernelPtr(o50)) {
+                vt50 = load64(o50, 0x00);
+                if (isKernelPtr(vt50)) {
+                    s850 = load64(vt50, 0x850);
+                    s10  = load64(vt50, 0x10);
+                }
+            }
+        }
+        // 铁律：panic 实参只能是已求值的局部变量
+        const UInt64 vS = s, v20 = o20, v50 = o50, vVt20 = vt20, vA00 = a00;
+        const UInt64 vVt50 = vt50, v850 = s850, v10 = s10;
+        const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
+        panic("NRed PPH probe: self=%llx o20=%llx o50=%llx | vt20=%llx a00=%llx | vt50=%llx s850=%llx s10=%llx "
+              "| ma calls=%llu iri=%llu dummy=%llu",
+              vS, v20, v50, vVt20, vA00, vVt50, v850, v10, vCalls, vIri, vDummy);
+    }
+
+    return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
 }
 
 // ─── 第八步观测探针：AmdDalHelper::powerUp ───────────────────────────────────
@@ -978,11 +1054,14 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 mxDifRc = nred.smu13Resp[3], mxDifArg = nred.smu13Resp[6];
         const UInt32 mxAH0Rc = nred.smu13Resp[4], mxAH0Arg = nred.smu13Resp[7];
         const UInt32 mxAH8Rc = nred.smu13Resp[5];
+        // 第 3 批次：D3 计数（判别性对照的判据——关掉 D3 后 dummy 应为 0；iri 恒 0 则 D3 从未拦到 IRI）
+        const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
 
         panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
               "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
               "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x bar0=%llx | "
               "RESP hi=%x lo=%x xfer=%x | "
+              "ma calls=%llu iri=%llu dummy=%llu | "
               "orig1:%s | orig2:%s | orig3:%s",
             probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
             rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
@@ -990,6 +1069,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
             gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6],
             rFbC0, rFbC1, rFbC2, rFbC3, rBar0,
             respHi, respLo, respXfer,
+            vCalls, vIri, vDummy,
             fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
         // panic 不返回
     }
