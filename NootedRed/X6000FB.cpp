@@ -327,7 +327,8 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
         //   ⚠️ 修正（2026-09-26，第 6 批次）：原条件**漏了 `-NRedRegisterHwSvc`** ⇒ 该门控
         //      从未真正安装 hook，"补注册"从未在真机执行过（第 5 批次对它的否定评价属**未实测的推断**）。
         if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")
-            || checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")) {
+            || checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")
+            || checkKernelArgument("-NRedAccelExist")) {
             KernelPatcher::RouteRequest pphRequest{"__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv",
                                                   wrapPpHelperPowerUp, this->orgPpHelperPowerUp};
             if (!patcher.routeMultiple(id, &pphRequest, 1, slide, size)) {
@@ -844,7 +845,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
     const bool wantAccelLog = checkKernelArgument("-NRedAccelLog");
 
-    if (wantProbe || wantRegister || wantAccelProbe || wantAccelLog) {
+    if (wantProbe || wantRegister || wantAccelProbe || wantAccelLog || checkKernelArgument("-NRedAccelExist")) {
         auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
@@ -996,6 +997,41 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             panic("NRed accel probe: ctl=%llx pci=%llx LoadHwSvc=%llu LoadCtl=%llu LoadAccel=%llu "
                   "| c7960=%llx hsD8=%llx | READCHK magic=%llx[exp=a5a5a5a512345678]",
                   vCtl, vPci, vLhws, vLctl, vLacc, v7960, vD8, vMagic);
+        }
+
+        // ─── 加速器实例存在性探针（门控 `-NRedAccelExist`，默认关闭）────────────────
+        //  动机（2026-09-26 第 6 轮实测）：补注册（`-NRedRegisterAccel`）后 `controller+0x7960`
+        //  仍为 0，说明**根本没有 `IOAccelerator` 实例可注册**。本探针一次性取回：
+        //   · accel   = 按名 `"IOAccelerator"` 匹配到的服务（0 ⇒ 无加速器实例）
+        //   · accelCls= 按类 `AMDRadeonX5000_AMDVega10GraphicsAccelerator` 匹配（NootedRed 注入的
+        //               personality 指定的 IOClass；0 ⇒ 该类没有实例）
+        //   · ctrl    = 按类 `AMDRadeonX6000_AmdRadeonControllerNavi10` 匹配（**对照**：应有实例）
+        //   · hwsvc   = 按类 `AMDRadeonX5000_AMDRadeonHWServicesVega` 匹配（**对照**：应有实例）
+        //   · kextIdx = `kextRadeonX5000.loadIndex`（加速器 kext 是否被 KernelPatcher 载入）
+        //  安全：只做 IOKit 只读匹配（与前一轮补注册同一位置、同一类调用，实测不崩）；
+        //        panic 实参全部预先求值，格式串为**新开探针位**（不改已投产串）。
+        if (checkKernelArgument("-NRedAccelExist")) {
+            auto probeSvc = [](const char* const cls) -> UInt64 {
+                auto* m = IOService::serviceMatching(cls);
+                UInt64 r = 0;
+                if (m != nullptr) {
+                    auto* s = IOService::copyMatchingService(m);
+                    m->release();
+                    if (s != nullptr) {
+                        r = reinterpret_cast<UInt64>(s);
+                        s->release();
+                    }
+                }
+                return r;
+            };
+            const UInt64 vAccel    = probeSvc("IOAccelerator");
+            const UInt64 vAccelCls = probeSvc("AMDRadeonX5000_AMDVega10GraphicsAccelerator");
+            const UInt64 vCtrl     = probeSvc("AMDRadeonX6000_AmdRadeonControllerNavi10");
+            const UInt64 vHwsvc    = probeSvc("AMDRadeonX5000_AMDRadeonHWServicesVega");
+            const UInt64 vKextIdx  = kextRadeonX5000.loadIndex;
+            const UInt64 v7960     = c7960;
+            panic("NRed accel exist: accel=%llx accelCls=%llx ctrl=%llx hwsvc=%llx kextIdx=%llu c7960=%llx", vAccel,
+                  vAccelCls, vCtrl, vHwsvc, vKextIdx, v7960);
         }
 
         // ─── 通道 A（**推荐**）：日志通道（门控 `-NRedAccelLog`，零挂死风险）────────
