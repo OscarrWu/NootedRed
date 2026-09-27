@@ -958,6 +958,23 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
     FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
 
     UInt64 ttl568 = 0, ttl570 = 0, ttl578 = 0, ttl580 = 0, ttl588 = 0, ttl590 = 0, ttl598 = 0, ttl5a0 = 0;
+    // 0x8b10e 的第一步 0x90d75 检查 `&TTL+0x50` 处的一个子结构（离线：`f0 >= 0x130`、
+    //  `f4 <= 9`、`f8/f10/f18` 非空）——失败则 status = 4。故读这几项定位不满足者。
+    UInt32 ttl50 = 0, ttl54 = 0;
+    UInt64 ttl58 = 0, ttl60 = 0, ttl68 = 0, ttl1a0 = 0, ttl4e0 = 0, ttl4a0 = 0;
+    if (isKernelPtr(f338)) {
+        auto load32 = [](UInt64 base, UInt64 off) -> UInt32 {
+            return *reinterpret_cast<const UInt32*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+        ttl50  = load32(f338, 0x50);
+        ttl54  = load32(f338, 0x54);
+        ttl58  = load64(f338, 0x58);
+        ttl60  = load64(f338, 0x60);
+        ttl68  = load64(f338, 0x68);
+        ttl1a0 = load64(f338, 0x1A0);
+        ttl4e0 = load64(f338, 0x4E0);
+        ttl4a0 = load64(f338, 0x4A0);
+    }
     if (isKernelPtr(f338)) {
         ttl568 = load64(f338, 0x568);
         ttl570 = load64(f338, 0x570);
@@ -973,7 +990,8 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
         SYSLOG("X5000",
                "ttl iface: self=%llx gart=%llx | vt=%llx f338=%llx f338vt=%llx slot30=%llx f528=%llx f530=%llx "
                "f20690=%llx | g0=%llx g8=%llx g10=%llx | ttl568=%llx ttl570=%llx ttl578=%llx ttl580=%llx ttl588=%llx "
-               "ttl590=%llx ttl598=%llx ttl5a0=%llx",
+               "ttl590=%llx ttl598=%llx ttl5a0=%llx | sub50=%x sub54=%x sub58=%llx sub60=%llx sub68=%llx t1a0=%llx "
+               "t4e0=%llx t4a0=%llx",
                static_cast<unsigned long long>(s), static_cast<unsigned long long>(g),
                static_cast<unsigned long long>(vt), static_cast<unsigned long long>(f338),
                static_cast<unsigned long long>(f338vt), static_cast<unsigned long long>(slot30),
@@ -983,7 +1001,11 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(ttl568), static_cast<unsigned long long>(ttl570),
                static_cast<unsigned long long>(ttl578), static_cast<unsigned long long>(ttl580),
                static_cast<unsigned long long>(ttl588), static_cast<unsigned long long>(ttl590),
-               static_cast<unsigned long long>(ttl598), static_cast<unsigned long long>(ttl5a0));
+               static_cast<unsigned long long>(ttl598), static_cast<unsigned long long>(ttl5a0),
+               static_cast<unsigned int>(ttl50), static_cast<unsigned int>(ttl54),
+               static_cast<unsigned long long>(ttl58), static_cast<unsigned long long>(ttl60),
+               static_cast<unsigned long long>(ttl68), static_cast<unsigned long long>(ttl1a0),
+               static_cast<unsigned long long>(ttl4e0), static_cast<unsigned long long>(ttl4a0));
     }
 }
 
