@@ -65,6 +65,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgTtlRegIface{0};  // 0x8b9a5 接口表注册（idx/值）
     mach_vm_address_t                                            orgTlsCreate{0};    // 0x93f76 TlsCreateInstance 判据
     mach_vm_address_t                                            orgTlsSwInit{0};    // 0x95e9f TlsSwInit 内部创建
+    mach_vm_address_t                                            kcSlide{0};         // 本 kext 运行时 slide（供探针换算内部全局地址）
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
     CAILResult (*smuCosWaitFor)(void* ctx, CosWaitForFunc* func, void* handle, UInt32 duration){nullptr};

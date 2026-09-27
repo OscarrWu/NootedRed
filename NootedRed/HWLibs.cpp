@@ -755,9 +755,16 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
             f0 = reinterpret_cast<UInt64*>(obj)[0];
             f8 = reinterpret_cast<UInt64*>(obj)[1];
         }
-        SYSLOG("HWLibs", "tls-swinit: obj=%llx f0=%llx f8=%llx ret=%llx", 
+        // provider 全局：`0x910e1` 读 `*(0x2241b60)`（查询函数）与 `*(0x2241b68)`（上下文），任一为 0 即失败。
+        UInt64 g60 = 0, g68 = 0;
+        if (singleton().kcSlide != 0) {
+            g60 = *reinterpret_cast<UInt64*>(singleton().kcSlide + 0x2241b60);
+            g68 = *reinterpret_cast<UInt64*>(singleton().kcSlide + 0x2241b68);
+        }
+        SYSLOG("HWLibs", "tls-swinit: obj=%llx f0=%llx f8=%llx g60=%llx g68=%llx ret=%llx",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                static_cast<unsigned long long>(f0), static_cast<unsigned long long>(f8),
+               static_cast<unsigned long long>(g60), static_cast<unsigned long long>(g68),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
     }
     return ret;
@@ -766,6 +773,7 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
+    singleton().kcSlide = slide;   // 第八步观测：供探针换算 HWLibs 内部全局的运行时地址
 
     NRed::singleton().hwLateInit();
 
