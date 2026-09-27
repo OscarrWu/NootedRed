@@ -25,6 +25,7 @@
 #include <IOKit/pci/IOPCIDevice.h>
 #include <Kexts.hpp>
 #include <NRed.hpp>
+#include <NvMsgBuf.hpp>
 #include <PenguinWizardry/RuntimeMC.hpp>
 #include <Regs/GC.hpp>
 #include <Regs/NBIO.hpp>
@@ -44,6 +45,14 @@ void NRed::init()
 {
     // 第八步观测：驱动初始化已进入（NVRAM 侧，`-NRedStageMark` 时生效；崩溃也能取回）
     StageMark::mark("nred-init");
+
+    // ─── 日志观测 L2：内核 console 持续落盘（门控 `-NRedObserveDisk`，默认关闭）────────
+    //  为什么放这里：这是**最早的安全位置**（kext 加载时、正常上下文）。落盘每 1 秒重试、
+    //  首次成功后持续写**增量** ⇒ 既不必猜"根文件系统何时挂载"，也不会因早期写失败而丢日志。
+    //  这正是所有者定的设计意图："不靠猜时间，靠等条件 + 重试"。
+    //  背景、根因与实测见 `NvMsgBuf.hpp` 头部；读取侧 `kb/tools/read-apfs-logs.sh`。
+    if (checkKernelArgument("-NRedObserveDisk"))
+        NvMsgBuf::scheduleDumps();
     SYSLOG("NRed", "|-----------------------------------------------------------------|");
     SYSLOG("NRed", "| Copyright 2022-2025 ChefKiss.                                   |");
     SYSLOG("NRed", "| If you've paid for this, you've been scammed. Ask for a refund! |");

@@ -1,48 +1,62 @@
 // =============================================================================
-//  NvMsgBuf.hpp —— 内核 console（msgbuf）快照：把内核日志取出来
+//  NvMsgBuf.hpp —— 内核 console（msgbuf）快照与**持续落盘**：把日志取出来
 //
 //  为什么需要它
-//    "把 Apple / 内核的日志拿到手"是本项目的观测目标。三条载体的实测结论：
+//    "把内核 console（我们的驱动日志 + Apple 驱动日志 + 内核消息）拿到手"是本项目的观测目标。
+//    三条载体的实测结论：
 //      · 写 NVRAM 变量 —— ⛔ 第 3 轮实测：调用线程长时间阻塞（系统 9 分钟后才以
 //        userspace watchdog 回落，`NRed*` 变量未落盘）⇒ **不可用**；
-//      · Lilu 日志文件 —— ⛔ 早已实测本机不产出（`liludump` 定时落盘，崩得早即无文件）；
-//      · **panic 通道 + msgbuf 快照 —— ✅ 实测可用**（本文档负责"读"，panic 由调用方做）。
+//      · **Lilu 日志文件（L1）—— ✅ 已打通**（`-liludbgall … liludump=30`），但它是
+//        Lilu **自己的缓冲**、上限固定 **125 834 B**（写满即覆盖早期），且**只含"经 Lilu 打印的"**
+//        ⇒ **看不到 Apple 驱动自己 `IOLog` 的内容**，日志量也不够开发使用；
+//      · **本文档（L2）—— 读内核 console 并持续落盘**：不受 L1 的 125 834 B 限制、可看到
+//        Apple 侧的 `IOLog`、且**不打断流程**（只读内存 + 写文件，绝不 panic）。
 //
 //  事实基础
 //    · 内核符号表存在 `_msgbufp`；kext 侧 `weak` 引用后**真机解析成功**（第 2 轮读数）。
 //    · `struct msgbuf`（XNU 13 `bsd/sys/msgbuf.h`）字段顺序（已用 kc 静态初值核对）：
 //        +0x00 int msg_magic (0x063061)  +0x04 int msg_size
-//        +0x08 int msg_bufx（写指针 = 下一个待写位置）
+//        +0x08 int msg_bufx（写指针 = 下一个待写位置，0..size 环形）
 //        +0x0c int msg_bufr（读指针）      +0x10 char *msg_bufc（缓冲基址，独立分配）
 //    · 默认缓冲 = `CONFIG_MSG_BSIZE` = **128 KB**；boot-arg `msgbuf=N` 会被 `log_setsize`
 //      以 `N > MAX_MSG_BSIZE(1MB)` 拒绝 ⇒ 现有 `msgbuf=4194304` 是**无效设置**（实际仍 128 KB）。
 //
-//  读取方式（无锁、容忍撕裂）
-//    `log_putc_locked` 是 `bufc[bufx++] = c`（到边界回 0）⇒ "尾部区间"就是 `[bufx-off-len, bufx-off)`
-//    这段环形区间。并发写入最多造成少数字节撕裂（文本快照可接受）；绝不去拿 `bsd_log_lock`。
+//  ⛔ L2 零产出的根因与更正（2026-09-27，离线定位）
+//    旧实现在 `X6000FB::wrapControllerPowerUp`（**≈48.7 s**，即 WindowServer 打开 framebuffer 时）
+//    里调用 `scheduleDumps()`，却安排 **20 / 40 / 60 秒之后**才写 ⇒ 三个落盘点分别落在
+//    **68.7 / 88.7 / 108.7 s**，**全部晚于 panic（48.7 s）** ⇒ 一个文件也不会产出。
+//    ⇒ 更正（也正是所有者定的设计意图——"**不靠猜时间，靠等条件 + 重试**"）：
+//      ① 调度点提前到**最早**（`NRed::init`，kext 加载时）；
+//      ② **每 1 秒重试**一次、最多 60 次（覆盖到 60 s > panic 的 48.7 s）；
+//      ③ **只写增量**（记住上次成功写出的 `bufx`）⇒ 无重复、随时间线性增长；
+//      ④ **写失败 ⇒ 不推进指针** ⇒ 下一拍重试**同一段**（这才是"等条件"，不猜挂载时刻）。
 //
-//  实测记录（2026-09-27，`AmdRadeonController::powerUp` 入口的探针）
+//  读取方式（无锁、容忍撕裂）
+//    `log_putc_locked` 是 `bufc[bufx++] = c`（到边界回 0）⇒ 可直接按 `bufx` 增量取。
+//    并发写入最多造成少数字节撕裂（文本快照可接受）；绝不去拿 `bsd_log_lock`。
+//
+//  实测记录（2026-09-27，panic 侧的 msgbuf 快照探针）
 //    · 512 B → 7 片 / 5726 B / 自动重启 75 s；
 //    · 1 KB  → 8 片 / 6242 B / 75 s；
 //    · 4 KB  → 11 片 / 9314 B / 75 s（★ 首次出现"分片名非十进制"：末片是
 //      `AAPL,PanicInfo000K` 而不是 `0010` ⇒ 取片必须按**实际变量名**列取，
-//      不能拿 `printf "%04d"` 拼名字，否则取到空文件使解码断言失败。见 tmp/fetch-panic.sh 注释）。
+//      不能拿 `printf "%04d"` 拼名字，否则取到空文件使解码断言失败。见 kb/tools/fetch-panic.sh）。
 //
 //  风险与取舍
 //    · 只读内存、不调用任何 Apple 方法 ⇒ 无锁/无分配风险；
-//    · 非可打印字节替换为 '.'、补 NUL ⇒ 可安全用 `%s` 交给 panic；
-//    · ⚠️ panic 文本越长，efivarfs 分片越多（历史上"文本变长⇒非确定性挂死"有先例）
-//      ⇒ 档位**递减起步**（512 → 1k → 4k → 8k → …），每档确认真能自动重启再加下一档。
+//    · 写文件走 `FileIO::writeBufferToFile`（Lilu 导出，内部 `vnode_open`+写），**每拍只写增量**，
+//      空闲拍（无新增）**不写文件** ⇒ 开销与日志产出成正比；
+//    · 总量与文件数都有上限 ⇒ 不会写爆卷；文件用完由所有者/分析机侧清理。
 // =============================================================================
 
 #ifndef NRed_NvMsgBuf_hpp
 #define NRed_NvMsgBuf_hpp
 
 #include <libkern/libkern.h>
-#include <kern/thread_call.h>      // thread_call_allocate / thread_call_enter_delayed（延迟落盘）
+#include <kern/thread_call.h>      // thread_call_allocate / thread_call_enter_delayed / free
 
-#include <Headers/kern_util.hpp>   // SYSLOG
-#include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（Lilu 导出的内核态写文件接口）
+#include <Headers/kern_util.hpp>   // SYSLOG（内部走 IOLog ⇒ 同时进内核 console 与 Lilu 日志）
+#include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态写文件）
 
 // 内核消息环形缓冲（XNU bsd/kern/subr_log.c）。弱引用：未解析则为空，运行期判空。
 extern "C" {
@@ -57,13 +71,14 @@ extern "C" {
 }
 
 namespace NvMsgBuf {
-	static constexpr int kMagic = 0x063061;
+	static constexpr int kMagic   = 0x063061;
 	static constexpr int kMaxDump = 32768;       // 单次最多 32 KB
 
-	// 命名空间作用域静态缓冲（内核不支持函数内静态对象——需 guard variable）
+	// ⚠️ 命名空间作用域静态数组：**只在 X6000FB.cpp 一个翻译单元里使用**。
+	//    若将来有第二个 .cpp 需要它，必须改为 `inline` 访问器（否则每个 TU 各持一份副本）。
 	static char gBuf[kMaxDump + 1];
 
-	// 注：长度/偏移的取值放在**调用方**（X6000FB.cpp），且用 **flag 档位**表达 ——
+	// ── 注：长度/偏移的取值放在**调用方**（X6000FB.cpp），且用 **flag 档位**表达 ——
 	//     刻意不使用数值 boot-arg：`PE_parse_boot_argn` 是 Apple 的 pexpert 函数，
 	//     在探针里调用它会导致 panic 流程无法完成（2026-09-27 第 9 轮实测）。
 
@@ -71,14 +86,12 @@ namespace NvMsgBuf {
 	//  ⛔ **不要在探针里调用 `checkKernelArgument`**：它内部就是 Apple 的 `PE_parse_boot_argn`
 	//     （Lilu `kern_util.hpp:432`，会拿锁/耗时）。实测：只要探针里做门控判断，就会出现
 	//     "panic 与快照都正常写出，但机器**不自动重启**"（第 8/9/11/12 轮；第 7 轮同样内容却成功）。
-	//  ✅ **正确姿势**：在 kext 早期、正常上下文里解析一次并存入下面两个标量；探针**只读标量**。
-	// 注：门控状态的**存储**放在单个 .cpp（`X6000FB.cpp` 的文件作用域静态），**不放在本头文件**——
-	//     头文件里的 `static` 会让每个包含它的翻译单元各持一份副本，造成读写不一致。
+	//  ✅ **正确姿势**：在 kext 早期、正常上下文里解析一次并存入标量；探针**只读标量**。
 
-	// 通道元信息（供 panic 头一并带出）：用于判断"缓冲是否被扩大（`msgbuf=` 是否生效）"与写指针位置。
+	// 通道元信息（供 panic 头一并带出）：判断"缓冲是否被扩大"与写指针位置。
 	struct ChannelInfo {
 		int ok;      // magic 校验是否通过
-		int size;    // msgbuf 当前容量（默认 128 KB；`msgbuf=1048576` 可扩到 1 MB）
+		int size;    // msgbuf 当前容量（默认 128 KB）
 		int bufx;    // 写指针当前值
 	};
 
@@ -136,47 +149,117 @@ namespace NvMsgBuf {
 		return len;
 	}
 
-	// ── 落盘（L2）：把 msgbuf 尾部快照写进 APFS 卷，供 Manjaro 侧只读读回 ─────────────
-	//  ⛔ 不 panic、不打断流程：只"读内存 + 写文件"。
-	//  ⚠️ 关键约束（2026-09-27 round14 实测）：**写文件的前提是根文件系统已挂载**；
-	//     `Controller::powerUp`（≈11.8 s）与 `liludump=10` 都**早于挂载** ⇒ 那次两者同时失败。
-	//  ⇒ 改为**延迟落盘**（与 Lilu 的 `debugDumpCall` 同款 `thread_call` 机制），并在**多个时间点
-	//     各写一个文件**，用**一次引导**定出"最早可行时刻"（文件存在 = 该时刻已可用）。
-	static constexpr int kDumpCount = 3;
-	static const char *kDumpPaths[kDumpCount] = {
-		"/private/var/log/NRedObserve-20s.txt",
-		"/private/var/log/NRedObserve-40s.txt",
-		"/private/var/log/NRedObserve-60s.txt",
-	};
-	static const UInt32 kDumpSecs[kDumpCount] = {20, 40, 60};
+	// ═══════════════════════════════════════════════════════════════════════════
+	//  L2：持续落盘（把内核 console 增量写进 APFS 卷，供 Manjaro 侧只读读回）
+	//  ⛔ 不 panic、不打断流程：只"读内存 + 写文件"，失败静默并下拍重试。
+	// ═══════════════════════════════════════════════════════════════════════════
+	static constexpr int kTickSecs  = 1;             // 重试周期（秒）
+	static constexpr int kMaxTicks  = 60;            // 最多 60 拍（覆盖到 60 s > panic 的 48.7 s）
+	static constexpr int kFirstTail = 32768;         // 首帧：取尾部 32 KB（含启动早期日志）
+	static constexpr int kChunkMax  = 32768;         // 单帧增量上限
+	static constexpr int kMaxTotal  = (4 << 20);     // 累计写出上限 4 MB（保护卷）
 
-	// 命名空间作用域静态（内核不支持函数内 static 对象）
-	static thread_call_t gDumpCalls[kDumpCount] = {nullptr, nullptr, nullptr};
+	// 状态一律用 **inline 函数内的静态标量**：C++ 保证全程序唯一（不会因多翻译单元各持一份，
+	// 且均为 POD、无需内核不支持的 guard variable）。
+	inline int           &stLastBufx()  { static int v = -1;    return v; }   // -1 = 尚未成功写出过
+	inline int           &stPendingEnd(){ static int v = 0;     return v; }   // 本帧写入后的 bufx
+	inline int           &stSeq()       { static int v = 0;     return v; }   // 已写文件数
+	inline int           &stTick()      { static int v = 0;     return v; }
+	inline int           &stTotal()     { static int v = 0;     return v; }   // 累计字节
+	inline int           &stFirstOkSec(){ static int v = -1;    return v; }   // 首次写成功发生在第几秒
+	inline thread_call_t &stCall()      { static thread_call_t v = nullptr; return v; }
 
-	// 单个时刻的落盘（由 thread_call 调度；**不在 panic 路径上、不阻塞调用者**）
-	inline void dumpAtTime(thread_call_param_t param0, thread_call_param_t) {
-		const int idx = static_cast<int>(reinterpret_cast<uintptr_t>(param0));
-		if (idx < 0 || idx >= kDumpCount) return;
-		const int n = dumpTail(8192, 0);   // 复用已实测的 8 KB 快照
-		if (n <= 0) return;                // 通道不可用 ⇒ 静默
-		const int err = FileIO::writeBufferToFile(kDumpPaths[idx], gBuf, static_cast<size_t>(n));
-		if (err != 0)
-			SYSLOG("NvMsgBuf", "dump@%us failed (%d)", kDumpSecs[idx], err);
+	// 计算"自上次成功写出之后新增的部分"，填充 gBuf；成功则把本帧终点记入 stPendingEnd。
+	// ⚠️ **不推进 stLastBufx**（推进由 commit 完成）⇒ 写失败时下拍重算同一段（自然重试）。
+	inline int dumpIncrement() {
+		auto p = msgbufp;
+		if (p == nullptr || p->magic != kMagic) return 0;
+		const int size = p->size;
+		const int bufx = p->bufx;
+		char *bufc = p->bufc;
+		if (size <= 0 || size > (64 << 20) || bufc == nullptr) return 0;
+		if (bufx < 0 || bufx > size) return 0;
+
+		const int last = stLastBufx();
+		if (last < 0) {                        // 首帧：取尾部快照（复用已验证的 dumpTail）
+			const int n = dumpTail(kFirstTail, 0);
+			if (n <= 0) return 0;
+			stPendingEnd() = bufx;
+			return n;
+		}
+		if (bufx == last) return 0;            // 无新增 ⇒ 本拍不写文件
+
+		int n = bufx - last;
+		if (n < 0) n += size;                  // 环形回绕
+		if (n > kChunkMax) n = kChunkMax;      // 单帧上限（剩余留下一帧，指针按增量推进）
+
+		int idx = last;
+		if (idx >= size) idx -= size;
+		for (int i = 0; i < n; i++) {
+			const char c = bufc[idx];
+			if (++idx >= size) idx = 0;
+			gBuf[i] = (c == '\n' || c == '\t' || (c >= 32 && c < 127)) ? c : '.';
+		}
+		gBuf[n] = '\0';
+		stPendingEnd() = (last + n) % size;
+		return n;
 	}
 
-	// 在"安全位置"调用一次：安排 20/40/60 秒三个落盘点（幂等）
-	inline void scheduleDumps() {
-		for (int i = 0; i < kDumpCount; i++) {
-			if (gDumpCalls[i] == nullptr)
-				gDumpCalls[i] = thread_call_allocate(dumpAtTime,
-				    reinterpret_cast<thread_call_param_t>(static_cast<uintptr_t>(i)));
-			if (gDumpCalls[i] != nullptr) {
-				const uint64_t ns = static_cast<uint64_t>(kDumpSecs[i]) * 1000000000ULL;
-				uint64_t abs = 0;
-				nanoseconds_to_absolutetime(ns, &abs);
-				thread_call_enter_delayed(gDumpCalls[i], mach_absolute_time() + abs);
+	// 把刚写成功的这一帧"提交"（推进读起点的指针）
+	inline void commitIncrement() {
+		stLastBufx() = stPendingEnd();
+	}
+
+	// 一拍：有增量就写一个文件；无论成败都排下一拍，直到用完 kMaxTicks 或写满 kMaxTotal。
+	// 由 thread_call 调用 ⇒ **独立线程上下文**（与 Lilu 的 debugDumpCall 同款），不在锁里、不阻塞调用者。
+	inline void dumpTick(thread_call_param_t, thread_call_param_t) {
+		int &tick = stTick();
+		const int sec = tick * kTickSecs;
+
+		if (tick < kMaxTicks && stTotal() < kMaxTotal) {
+			tick++;
+
+			const int n = dumpIncrement();
+			if (n > 0) {
+				char name[80];
+				snprintf(name, sizeof(name), "/var/log/NRedObserve-%03d-%03ds.txt", stSeq(), sec);
+				const int err = FileIO::writeBufferToFile(name, gBuf, static_cast<size_t>(n));
+				if (err == 0) {
+					commitIncrement();
+					stSeq()++;
+					stTotal() += n;
+					if (stFirstOkSec() < 0) stFirstOkSec() = sec;
+				} else {
+					// 写失败（最典型的原因：根文件系统尚未挂载）⇒ **不提交**，下一拍重试同一段
+					SYSLOG("NvMsgBuf", "L2 write@%ds failed (%d), will retry", sec, err);
+				}
 			}
+
+			// 排下一拍
+			uint64_t abs = 0;
+			nanoseconds_to_absolutetime(static_cast<uint64_t>(kTickSecs) * 1000000000ULL, &abs);
+			thread_call_enter_delayed(stCall(), mach_absolute_time() + abs);
+			return;
 		}
+
+		// 收尾：这条 SYSLOG 会进内核 console 与 Lilu 日志，作为"L2 本轮产出"的自证
+		SYSLOG("NvMsgBuf", "L2 done: firstOk=%ds files=%d bytes=%d ticks=%d",
+		    stFirstOkSec(), stSeq(), stTotal(), tick);
+		if (stCall() != nullptr) {
+			thread_call_free(stCall());
+			stCall() = nullptr;
+		}
+	}
+
+	// 在**最早的安全位置**（`NRed::init`）调用一次：启动周期落盘（幂等）。
+	inline void scheduleDumps() {
+		if (stCall() != nullptr) return;
+		stCall() = thread_call_allocate(dumpTick, nullptr);
+		if (stCall() == nullptr) return;
+
+		uint64_t abs = 0;
+		nanoseconds_to_absolutetime(static_cast<uint64_t>(kTickSecs) * 1000000000ULL, &abs);
+		thread_call_enter_delayed(stCall(), mach_absolute_time() + abs);
 	}
 }
 
