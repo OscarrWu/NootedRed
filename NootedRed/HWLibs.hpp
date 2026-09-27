@@ -62,6 +62,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgTtlAllocA{0};    // 0x93880
     mach_vm_address_t                                            orgTtlAllocB{0};    // 0x928f4
     mach_vm_address_t                                            orgTtlCheckD{0};    // 0xa285f
+    mach_vm_address_t                                            orgTtlRegIface{0};  // 0x8b9a5 接口表注册（idx/值）
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
     CAILResult (*smuCosWaitFor)(void* ctx, CosWaitForFunc* func, void* handle, UInt32 duration){nullptr};
@@ -96,6 +97,8 @@ private:
     static void* wrapTtlAllocA(void* ctx);
     static void* wrapTtlAllocB(void* ctx);
     static bool  wrapTtlCheckD(void* obj, void* param);
+    // 第八步观测（2026-09-28 第二十一轮）：接口表注册函数 `0x8b9a5(table, idx, obj, val)`（只读）
+    static void wrapTtlRegIface(void* table, UInt32 idx, void* obj, void* val);
     CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
     static CAILResult smuInternalSwInit(void* ctx, void* input, AMDSMUSWInitOutput* output);

@@ -297,6 +297,12 @@ static const UInt8 kTtlInitCheckDPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
                                                   0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+// 第八步观测（2026-09-28 第二十一轮）：接口表注册函数 `0x8b9a5(table, idx, obj, val)`
+//  —— 写 `table[idx] = {idx, val, obj}`。离线实测：全 kext 内只有**两处**调用它（idx = 1 与 2），
+//  而 `0x8bb9f(pool, 4)`（取 `pIpi`）要求表项 4 存在 ⇒ 需真机确认"表项 4 是否被注册"。
+static const UInt8 kTtlRegIfacePattern[] = {0x83, 0xFE, 0x16, 0x77, 0x18, 0x55, 0x48, 0x89, 0xE5, 0x89, 0xF0, 0x48,
+                                            0x8D, 0x04, 0x40, 0x89, 0x34, 0xC7, 0x48, 0x89, 0x4C, 0xC7, 0x08, 0x48};
+
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                                                         0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
@@ -673,6 +679,17 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
     return ret;
 }
 
+// 第八步观测（2026-09-28 第二十一轮）：接口表注册 `0x8b9a5(table, idx, obj, val)`（只读，仅记录索引与值）。
+void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* const obj, void* const val)
+{
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "ttl-reg: table=%llx idx=%u obj=%llx val=%llx", static_cast<unsigned long long>(reinterpret_cast<UInt64>(table)),
+               static_cast<unsigned>(idx), static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(val)));
+    }
+    FunctionCast(wrapTtlRegIface, singleton().orgTtlRegIface)(table, idx, obj, val);
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -913,6 +930,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("ttl-checkD", kTtlInitCheckDPattern, kTtlInitCheckDPatternMask,
                                            arrsize(kTtlInitCheckDPattern), 0xA285F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlCheckD, this->orgTtlCheckD}, "ttl-checkD");
+        }
+        if (const auto from = resolveProbe("ttl-reg", kTtlRegIfacePattern, nullptr, arrsize(kTtlRegIfacePattern),
+                                           0x8B9A5)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlRegIface, this->orgTtlRegIface}, "ttl-reg");
         }
     }
 
