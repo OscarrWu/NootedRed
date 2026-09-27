@@ -332,6 +332,10 @@ static const UInt8 kReadSelPattern[]   = {0x41, 0x89, 0xC9, 0x89, 0xD0, 0x83, 0x
 static const UInt8 kCfgReadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
                                         0x50, 0x49, 0x89, 0xCC, 0x49, 0x89, 0xD6, 0x48, 0x89, 0xF3, 0x49, 0x89, 0xFF,
                                         0x48, 0xF7, 0xC6, 0x00, 0x00, 0x00, 0x80};
+// `0x2ab00e`：`0x2aacbb`（模式 2）的尾段调用。二值判定——它是否被调用、返回什么，
+//  即可区分"失败在判据 ①/②"与"失败在尾段内部"。
+static const UInt8 kMode2TailPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                          0x53, 0x48, 0x83, 0xEC, 0x28, 0x45, 0x89, 0xC4, 0x49, 0x89, 0xF5, 0xC7};
 
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -886,6 +890,20 @@ UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const 
     return ret;
 }
 
+UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, void* const d, void* const e)
+{
+    const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "mode2-tail: a1=%llx a2=%llx a3=%llx a4=%llx a5=%llx ret=%u",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(c)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(d)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(e)), static_cast<unsigned>(ret));
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -1176,6 +1194,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("cfg-read", kCfgReadPattern, nullptr, arrsize(kCfgReadPattern),
                                            0x2AB398)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapCfgRead, this->orgCfgRead}, "cfg-read");
+        }
+        if (const auto from = resolveProbe("mode2-tail", kMode2TailPattern, nullptr, arrsize(kMode2TailPattern),
+                                           0x2AB00E)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode2Tail, this->orgMode2Tail}, "mode2-tail");
         }
     }
 
