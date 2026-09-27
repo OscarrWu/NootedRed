@@ -1045,6 +1045,7 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
     //  `f4 <= 9`、`f8/f10/f18` 非空）——失败则 status = 4。故读这几项定位不满足者。
     UInt32 ttl50 = 0, ttl54 = 0, ttl88 = 0;
     UInt64 ttl58 = 0, ttl60 = 0, ttl68 = 0, ttl1a0 = 0, ttl4e0 = 0, ttl4a0 = 0, ttla0 = 0;
+    UInt64 t48 = 0, t48_0 = 0, t48_40 = 0, t48_48 = 0;
     if (isKernelPtr(f338)) {
         auto load32 = [](UInt64 base, UInt64 off) -> UInt32 {
             return *reinterpret_cast<const UInt32*>(reinterpret_cast<const UInt8*>(base) + off);
@@ -1059,6 +1060,14 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
         ttl4a0 = load64(f338, 0x4A0);
         ttl88  = load32(f338, 0x88);
         ttla0  = load64(f338, 0xA0);
+        // 出口 4 判据（子 agent `TtlExits`）：`0xa285f(r14, config+0x28)` 要求 `*(config+0x28)` 的
+        //  +0x00 / +0x40 / +0x48 均非 0（`config` = `&TTL+0x20`，故 `config+0x28` = `&TTL+0x48`）。
+        t48 = load64(f338, 0x48);
+        if (isKernelPtr(t48)) {
+            t48_0  = load64(t48, 0x00);
+            t48_40 = load64(t48, 0x40);
+            t48_48 = load64(t48, 0x48);
+        }
     }
     if (isKernelPtr(f338)) {
         ttl568 = load64(f338, 0x568);
@@ -1093,6 +1102,9 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(ttl68), static_cast<unsigned long long>(ttl1a0),
                static_cast<unsigned long long>(ttl4e0), static_cast<unsigned long long>(ttl4a0),
                static_cast<unsigned int>(ttl88), static_cast<unsigned long long>(ttla0));
+        SYSLOG("X5000", "ttl exit4: t48=%llx t48_0=%llx t48_40=%llx t48_48=%llx", static_cast<unsigned long long>(t48),
+               static_cast<unsigned long long>(t48_0), static_cast<unsigned long long>(t48_40),
+               static_cast<unsigned long long>(t48_48));
     }
 }
 
