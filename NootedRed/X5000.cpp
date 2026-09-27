@@ -1096,12 +1096,43 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
     if (checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("X5000", "cfgdev enter: self=%llx provider=%llx", static_cast<unsigned long long>(s),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
-        // 定位 KASLR slide：**只读**实例 vptr 与驱动记录的 `gX5000Slide`（不外推地址）。
-        //  放在最前，减少被 msgbuf 环形缓冲覆盖的概率（L2 读 msgbuf，日志过密会互相冲掉）。
+        // 自动定 KASLR slide 并读 `configureDevice` 在 `0x360f` 检查的那个键（**只读**）：
+        //   实例 vptr 必指向 accelerator 家族的某个 vtable（其 kc 绝对已知）⇒ `slide = vptr - 该地址`
+        //   且必须**页对齐**（上一轮用基类 vtable 硬算得非页对齐 ⇒ 假设错，故此处遍历候选并校验）。
         if (s >= 0xffffff7f80000000ULL) {
             const UInt64 vptr = *reinterpret_cast<const UInt64*>(s);
-            SYSLOG("X5000", "cfgdev slide-probe: vptr=%llx gX5000Slide=%llx",
-                   static_cast<unsigned long long>(vptr), static_cast<unsigned long long>(gX5000Slide));
+            const UInt64 kCandidateVTables[] = {0x4D24B70ULL, 0x4D333B8ULL, 0x4D34028ULL, 0x4D34C98ULL, 0x4D35908ULL};
+            UInt64       slide = 0;
+            for (const UInt64 c : kCandidateVTables) {
+                const UInt64 diff = vptr - c;
+                if (diff != 0 && diff < 0x40000000ULL && (diff & 0xFFFULL) == 0) {
+                    slide = diff;
+                    break;
+                }
+            }
+            UInt64 got = 0, key = 0;
+            if (slide != 0) {
+                const UInt64 gotAbs = 0x4D24118ULL + slide;    // 0x1ED118 的 kc 绝对
+                got = *reinterpret_cast<const UInt64*>(gotAbs);
+                if (got >= 0xffffff8000000000ULL) {
+                    const UInt64 offs[] = {0x10ULL, 0x18ULL, 0x20ULL, 0x28ULL};
+                    for (const UInt64 o : offs) {
+                        const UInt64 cand = *reinterpret_cast<const UInt64*>(got + o);
+                        if (cand >= 0xffffff8000000000ULL) {
+                            key = cand;
+                            break;
+                        }
+                    }
+                }
+            }
+            SYSLOG("X5000", "cfgdev slide-probe: vptr=%llx slide=%llx gX5000Slide=%llx got=%llx keystr=%llx",
+                   static_cast<unsigned long long>(vptr), static_cast<unsigned long long>(slide),
+                   static_cast<unsigned long long>(gX5000Slide), static_cast<unsigned long long>(got),
+                   static_cast<unsigned long long>(key));
+            if (key != 0) {
+                // 限长打印（48 字节）以减少读到无 NUL 区域的风险
+                SYSLOG("X5000", "cfgdev key-name: %.48s", reinterpret_cast<const char*>(key));
+            }
         }
     }
 
