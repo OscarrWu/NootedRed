@@ -233,6 +233,24 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         }
     }
 
+    // 第八步观测（2026-09-28）：hook `configureDevice` 与 `initLinkToPeer`（**无条件安装**，
+    //  内部按 `-NRedAccelLog` 输出）。前者是 `this+0x1f40`（framebuffer 服务）的唯一设置者；
+    //  后者按名查 `"ATIFramebuffer"`/`"IOFramebuffer"`。
+    {
+        PenguinWizardry::PatternRouteRequest cfgReq{
+            "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator15configureDeviceEP11IOPCIDevice", wrapConfigureDevice,
+            this->orgConfigureDevice};
+        if (!cfgReq.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "cfgdev: failed to route configureDevice");
+        }
+        PenguinWizardry::PatternRouteRequest l2pReq{
+            "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator14initLinkToPeerEPKc", wrapInitLinkToPeer,
+            this->orgInitLinkToPeer};
+        if (!l2pReq.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "cfgdev: failed to route initLinkToPeer");
+        }
+    }
+
     // 第八步观测（第 15 轮）：**已移除** `probe` 的 hook —— 第 14 轮实测它**有副作用**
     //  （hook 后系统未再走到 PP 上电、直接跑到 userspace watchdog ⇒ 匹配阶段行为被改变）。
     //  ⇒ 改为纯被动取证：`DriverInjector::wrapAddDrivers` 只记录"注入的 personality 是否在数组里"，
@@ -851,10 +869,11 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
     // 入口读数（before）：`start` 会自行设置 `0x368`/`0x1e88` ⇒ 与出口对比可区分
     //  "从未设置"与"设置了又被清零"（真机出口 f368=0、f1e88 含 bit6 ⇒ 需 before 判定）。
     const UInt64 sBefore = reinterpret_cast<UInt64>(self);
-    UInt64       f368Before = 0, f1e88Before = 0;
+    UInt64       f368Before = 0, f1e88Before = 0, f140Before = 0;
     if (sBefore >= 0xffffff7f80000000ULL) {
         f368Before  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(sBefore) + 0x368);
         f1e88Before = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(sBefore) + 0x1E88);
+        f140Before  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(sBefore) + 0x1F40);
     }
 
     const auto ret = FunctionCast(wrapAccelStart, singleton().orgAccelStart)(self, provider);
@@ -889,11 +908,13 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
                static_cast<unsigned long long>(vRet), static_cast<unsigned long long>(f140),
                static_cast<unsigned long long>(f148), static_cast<unsigned long long>(f158),
                static_cast<unsigned long long>(f160));
-        SYSLOG("X5000", "accel start extra: f368=%llx f1e88=%llx f1e98=%llx f1ea0=%llx f1ea8=%llx | before f368=%llx f1e88=%llx",
+        SYSLOG("X5000",
+               "accel start extra: f368=%llx f1e88=%llx f1e98=%llx f1ea0=%llx f1ea8=%llx | before f368=%llx f1e88=%llx "
+               "f140=%llx",
                static_cast<unsigned long long>(f368), static_cast<unsigned long long>(f1e88),
                static_cast<unsigned long long>(f1e98), static_cast<unsigned long long>(f1ea0),
                static_cast<unsigned long long>(f1ea8), static_cast<unsigned long long>(f368Before),
-               static_cast<unsigned long long>(f1e88Before));
+               static_cast<unsigned long long>(f1e88Before), static_cast<unsigned long long>(f140Before));
     }
 
     // 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；高风险，慎用）。格式串未改（已投产）。
@@ -1050,6 +1071,53 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(ttl4e0), static_cast<unsigned long long>(ttl4a0),
                static_cast<unsigned int>(ttl88), static_cast<unsigned long long>(ttla0));
     }
+}
+
+// ─── 第八步观测（2026-09-28）：`configureDevice` 与 `initLinkToPeer` ────────────
+//  离线结论：`this+0x1f40`（framebuffer 服务）的**唯一设置者**是
+//  `AMDGraphicsAccelerator::configureDevice`（VM 0x3306）：它在 `0x338b`/`0x33a7` 调
+//  `initLinkToPeer`（VM 0x3dae）按名查 `"ATIFramebuffer"`，失败再查 `"IOFramebuffer"`，
+//  命中才写 `this+0x1f40`（0x3393/0x33ac）并 `orb $0x40,0x1e88`（0x33bd）。
+//  真机已证：`start` 入口/出口 `f140` 均为 0、且该对象 `f1e88` 入口为 0（首次 start）
+//  ⇒ `this+0x1f40` **从未被设置** ⇒ 注册段跳过 ⇒ `start` 返回失败。
+//  本组探针回答"configureDevice 是否被调用、initLinkToPeer 查到什么、返回值如何"。
+//  只读字段 + 记录入参/返回值；落盘通道（`-NRedAccelLog`），hook 无条件安装。
+UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
+{
+    const UInt64 s = reinterpret_cast<UInt64>(self);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("X5000", "cfgdev enter: self=%llx provider=%llx", static_cast<unsigned long long>(s),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
+    }
+
+    const UInt64 ret = FunctionCast(wrapConfigureDevice, singleton().orgConfigureDevice)(self, provider);
+
+    UInt64 f140 = 0, f1e88 = 0, f368 = 0;
+    if (s >= 0xffffff7f80000000ULL) {
+        auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+        f140  = load64(s, 0x1F40);
+        f1e88 = load64(s, 0x1E88);
+        f368  = load64(s, 0x368);
+    }
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("X5000", "cfgdev exit: ret=%llu f140=%llx f1e88=%llx f368=%llx",
+               static_cast<unsigned long long>(ret), static_cast<unsigned long long>(f140),
+               static_cast<unsigned long long>(f1e88), static_cast<unsigned long long>(f368));
+    }
+    return ret;
+}
+
+void* X5000::wrapInitLinkToPeer(void* const self, const char* const name)
+{
+    void* const ret = FunctionCast(wrapInitLinkToPeer, singleton().orgInitLinkToPeer)(self, name);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        // 名称为本 kext 内的字面量（"ATIFramebuffer"/"IOFramebuffer"）⇒ 打印是安全的。
+        SYSLOG("X5000", "link2peer: name=%s ret=%llx", (name != nullptr) ? name : "(null)",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
+    }
+    return ret;
 }
 
 // 第八步观测（第 14 轮）：`probe` 的结果**不在原地 panic**（第 13 轮实测：匹配阶段 panic 太早，
