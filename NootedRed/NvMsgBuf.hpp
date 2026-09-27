@@ -131,8 +131,8 @@ namespace NvMsgBuf {
 			if (++idx >= size) idx = 0;
 			gBuf[i] = (c == '\n' || c == '\t' || (c >= 32 && c < 127)) ? c : '.';
 		}
-		gBuf[n] = '\0';
-		return n;
+		gBuf[len] = '\0';
+		return len;
 	}
 
 	// ── 落盘（L2）：把 msgbuf 尾部快照写进 APFS 卷，供 Manjaro 侧只读读回 ─────────────
