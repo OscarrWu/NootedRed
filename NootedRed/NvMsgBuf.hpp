@@ -68,6 +68,16 @@ extern "C" {
 		char *bufc;
 	};
 	extern struct NvMsgBufMeta *msgbufp __attribute__((weak));
+
+	// ★ 根 vnode（XNU `bsd/sys/vnode.h`: `extern vnode_t rootvnode`）。
+	//   **落盘前的必备判据**：非空 ⇒ 根文件系统已挂载。
+	//   ⛔ 为什么必须有它（2026-09-27 实测，代价：一轮无效引导）：
+	//      `FileIO::writeBufferToFile` 在根 FS **尚未挂载**时被调用会让内核线程**阻塞**，
+	//      系统随后被 userspace watchdog 强制重启（**无 panic ⇒ 无 panic 分片**，表现为
+	//      "kext 像是让系统起不来"，实测耗时 3.6 分钟恰为 watchdog 超时）。
+	//      Lilu 之所以没这个问题，是因为它的 `liludump=N` 由用户给定较大的 N（如 30 秒），
+	//      那时根 FS 已挂载；而我们要在**最早**时刻起就周期尝试，故必须自带这个判据。
+	extern void *rootvnode __attribute__((weak));
 }
 
 namespace NvMsgBuf {
@@ -154,6 +164,7 @@ namespace NvMsgBuf {
 	//  ⛔ 不 panic、不打断流程：只"读内存 + 写文件"，失败静默并下拍重试。
 	// ═══════════════════════════════════════════════════════════════════════════
 	static constexpr int kTickSecs  = 1;             // 重试周期（秒）
+	static constexpr int kFirstDelay = 8;            // 首拍延迟：保守一点，避开最早期
 	static constexpr int kMaxTicks  = 60;            // 最多 60 拍（覆盖到 60 s > panic 的 48.7 s）
 	static constexpr int kFirstTail = 32768;         // 首帧：取尾部 32 KB（含启动早期日志）
 	static constexpr int kChunkMax  = 32768;         // 单帧增量上限
@@ -210,6 +221,13 @@ namespace NvMsgBuf {
 		stLastBufx() = stPendingEnd();
 	}
 
+	// 排下一拍（提取成小函数，多处复用）
+	inline void scheduleNextTick(int secs) {
+		uint64_t abs = 0;
+		nanoseconds_to_absolutetime(static_cast<uint64_t>(secs) * 1000000000ULL, &abs);
+		thread_call_enter_delayed(stCall(), mach_absolute_time() + abs);
+	}
+
 	// 一拍：有增量就写一个文件；无论成败都排下一拍，直到用完 kMaxTicks 或写满 kMaxTotal。
 	// 由 thread_call 调用 ⇒ **独立线程上下文**（与 Lilu 的 debugDumpCall 同款），不在锁里、不阻塞调用者。
 	inline void dumpTick(thread_call_param_t, thread_call_param_t) {
@@ -218,6 +236,14 @@ namespace NvMsgBuf {
 
 		if (tick < kMaxTicks && stTotal() < kMaxTotal) {
 			tick++;
+
+			// ★★ 根文件系统挂载判据（**本实现的核心安全措施**）：
+			//    `rootvnode == nullptr` ⇒ 根 FS 还没挂上 ⇒ **绝不碰文件系统**（否则内核线程会阻塞、
+			//    被 watchdog 强制重启且**不产生 panic 分片**）。只排下一拍继续等条件。
+			if (rootvnode == nullptr) {
+				scheduleNextTick(kTickSecs);
+				return;
+			}
 
 			const int n = dumpIncrement();
 			if (n > 0) {
@@ -230,15 +256,12 @@ namespace NvMsgBuf {
 					stTotal() += n;
 					if (stFirstOkSec() < 0) stFirstOkSec() = sec;
 				} else {
-					// 写失败（最典型的原因：根文件系统尚未挂载）⇒ **不提交**，下一拍重试同一段
+					// 写失败 ⇒ **不提交**，下一拍重试同一段
 					SYSLOG("NvMsgBuf", "L2 write@%ds failed (%d), will retry", sec, err);
 				}
 			}
 
-			// 排下一拍
-			uint64_t abs = 0;
-			nanoseconds_to_absolutetime(static_cast<uint64_t>(kTickSecs) * 1000000000ULL, &abs);
-			thread_call_enter_delayed(stCall(), mach_absolute_time() + abs);
+			scheduleNextTick(kTickSecs);
 			return;
 		}
 
@@ -256,10 +279,7 @@ namespace NvMsgBuf {
 		if (stCall() != nullptr) return;
 		stCall() = thread_call_allocate(dumpTick, nullptr);
 		if (stCall() == nullptr) return;
-
-		uint64_t abs = 0;
-		nanoseconds_to_absolutetime(static_cast<uint64_t>(kTickSecs) * 1000000000ULL, &abs);
-		thread_call_enter_delayed(stCall(), mach_absolute_time() + abs);
+		scheduleNextTick(kFirstDelay);
 	}
 }
 
