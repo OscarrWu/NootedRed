@@ -1148,13 +1148,17 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     if (checkKernelArgument("-NRedMsgDump") || checkKernelArgument("-NRedMsgDump1k") ||
         checkKernelArgument("-NRedMsgDump4k") || checkKernelArgument("-NRedMsgDump8k") ||
         checkKernelArgument("-NRedMsgDump16k") || checkKernelArgument("-NRedMsgDump32k")) {
-        const int want = checkKernelArgument("-NRedMsgDump32k") ? 32768
-                       : checkKernelArgument("-NRedMsgDump16k") ? 16384
-                       : checkKernelArgument("-NRedMsgDump8k")  ? 8192
-                       : checkKernelArgument("-NRedMsgDump4k")  ? 4096
-                       : checkKernelArgument("-NRedMsgDump1k")  ? 1024 : 512;
-        const int dn = NvMsgBuf::dumpTail(want, 0);
-        panic("NRed msgdump want=%d n=%d:\n%s", want, dn, NvMsgBuf::gBuf);
+        int want = checkKernelArgument("-NRedMsgDump32k") ? 32768
+                 : checkKernelArgument("-NRedMsgDump16k") ? 16384
+                 : checkKernelArgument("-NRedMsgDump8k")  ? 8192
+                 : checkKernelArgument("-NRedMsgDump4k")  ? 4096
+                 : checkKernelArgument("-NRedMsgDump1k")  ? 1024 : 512;
+        int off = 0;
+        // 允许用数值 boot-arg 覆盖（`nredmsg_len=<n>` / `nredmsg_off=<n>`，不带前导 '-'）：
+        // 由此可在**不重新构建**的前提下，用多次引导分段覆盖 128 KB 历史内核日志。
+        NvMsgBuf::applyBootArgs(want, off);
+        const int dn = NvMsgBuf::dumpTail(want, off);
+        panic("NRed msgdump len=%d off=%d n=%d:\n%s", want, off, dn, NvMsgBuf::gBuf);
     }
 
     // ─── `probe` 所需属性名探针（门控 `-NRedAccelExist3`，默认关闭）─────────────────

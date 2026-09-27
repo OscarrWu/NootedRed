@@ -59,6 +59,18 @@ namespace NvMsgBuf {
 	// 命名空间作用域静态缓冲（内核不支持函数内静态对象——需 guard variable）
 	static char gBuf[kMaxDump + 1];
 
+	// 用 boot-arg 覆盖"长度 / 偏移"（两者是同一引导内的独立变量，便于分段覆盖历史日志）：
+	//   nredmsg_len=<字节>   取多长（会被 kMaxDump 截断）
+	//   nredmsg_off=<字节>   从"距写指针多少字节"处开始往前取（0 = 紧贴尾部）
+	// 注意：boot-arg 名**不带**前导 '-'，形如 `nredmsg_off=16384`。
+	inline void applyBootArgs(int &len, int &off) {
+		extern "C" int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, unsigned int max_arg_size);
+		int v = 0;
+		if (PE_parse_boot_argn("nredmsg_len", &v, sizeof(v)) && v > 0) len = v;
+		v = 0;
+		if (PE_parse_boot_argn("nredmsg_off", &v, sizeof(v)) && v >= 0) off = v;
+	}
+
 	// 把 msgbuf 中"距写指针 off 字节、长度 len 字节"的区间拷进 gBuf：
 	//   环形重组 + **丢弃不完整首行** + 字符净化 + NUL 结尾。
 	// 返回实际拷贝字节数；0 表示通道不可用（符号未解析 / magic 不符 / 结构异常）。
