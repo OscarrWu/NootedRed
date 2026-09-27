@@ -145,6 +145,10 @@ X5000::X5000()
 // 第八步观测：保存 X5000 kext 的 slide，供探针在运行时定位其内部符号（如 probe 用的属性名 OSSymbol）
 UInt64 gX5000Slide = 0;
 
+// 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
+//  供 `start` 入口恢复（该值随后会被基类 `IOGraphicsAccelerator2::start` 的失败清理清空）。
+static UInt64 gLastF140 = 0;
+
 void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000.loadIndex != id) { return; }
@@ -1101,10 +1105,6 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 //  ⇒ `this+0x1f40` **从未被设置** ⇒ 注册段跳过 ⇒ `start` 返回失败。
 //  本组探针回答"configureDevice 是否被调用、initLinkToPeer 查到什么、返回值如何"。
 //  只读字段 + 记录入参/返回值；落盘通道（`-NRedAccelLog`），hook 无条件安装。
-// 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
-//  供 `start` 入口恢复（该值随后会被基类 `IOGraphicsAccelerator2::start` 的失败清理清空）。
-static UInt64 gLastF140 = 0;
-
 UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
 {
     const UInt64 s = reinterpret_cast<UInt64>(self);
