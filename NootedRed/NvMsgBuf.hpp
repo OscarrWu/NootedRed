@@ -59,12 +59,16 @@ namespace NvMsgBuf {
 	// 命名空间作用域静态缓冲（内核不支持函数内静态对象——需 guard variable）
 	static char gBuf[kMaxDump + 1];
 
+	// 数值型 boot-arg 解析（XNU 导出符号；仅声明，避免引入头文件依赖）
+	// ⚠️ 必须在 namespace 作用域声明：函数内的 `extern "C"` 声明会被 clang 拒绝
+	//    （CI run #116：`error: expected unqualified-id`）。
+	extern "C" int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, unsigned int max_arg_size);
+
 	// 用 boot-arg 覆盖"长度 / 偏移"（两者是同一引导内的独立变量，便于分段覆盖历史日志）：
 	//   nredmsg_len=<字节>   取多长（会被 kMaxDump 截断）
 	//   nredmsg_off=<字节>   从"距写指针多少字节"处开始往前取（0 = 紧贴尾部）
 	// 注意：boot-arg 名**不带**前导 '-'，形如 `nredmsg_off=16384`。
 	inline void applyBootArgs(int &len, int &off) {
-		extern "C" int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, unsigned int max_arg_size);
 		int v = 0;
 		if (PE_parse_boot_argn("nredmsg_len", &v, sizeof(v)) && v > 0) len = v;
 		v = 0;
