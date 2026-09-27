@@ -314,6 +314,17 @@ static const UInt8 kTlsSwInitPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0
 static const UInt8 kTlsSwInitPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                               0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00};
 
+// 第八步观测（2026-09-28 第二十五轮）：`bgm_create`(0x297830) 内层 4 步。
+//  真机错误码 `0xc00c0202` 出自 `0x297986`（`0x297968` 调 `0x2a9f0f` 返回非 0 时），故需判出是哪一步失败。
+static const UInt8 kBgmInitPattern[]   = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                           0x53, 0x48, 0x81, 0xEC, 0x08, 0x01, 0x00, 0x00, 0x4D, 0x89, 0xC4, 0x48};
+static const UInt8 kBgmStep1Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x48, 0x85, 0xFF,
+                                           0x74, 0x26, 0x48, 0x85, 0xC9, 0x74, 0x21, 0x48, 0x85, 0xD2, 0x74, 0x17};
+static const UInt8 kBgmQueryPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x87, 0x40, 0x01, 0x00, 0x00, 0x48,
+                                           0x8B, 0x78, 0x08, 0x48, 0x8B, 0x40, 0x40, 0x5D, 0xFF, 0xE0, 0x55, 0x48};
+static const UInt8 kBgmStep4Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x48, 0x89,
+                                           0xFB, 0x4C, 0x8D, 0x7D, 0xE4, 0x41, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00};
+
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                                                         0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
@@ -770,6 +781,46 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
     return ret;
 }
 
+// 第八步观测（2026-09-28 第二十五轮）：`bgm_create` 内层 4 步（只读，仅记录入参与返回值）。
+static void nredNoteBgmStep(const char* tag, UInt64 a1, UInt64 a2, UInt64 a3, UInt64 ret)
+{
+    if (!checkKernelArgument("-NRedAccelLog")) { return; }
+    SYSLOG("HWLibs", "%s: a1=%llx a2=%llx a3=%llx ret=%llx", tag, static_cast<unsigned long long>(a1),
+           static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
+           static_cast<unsigned long long>(ret));
+}
+
+UInt32 X5000HWLibs::wrapBgmInit(void* const a, void* const b, void* const c, void* const d, void* const e)
+{
+    const UInt32 ret = FunctionCast(wrapBgmInit, singleton().orgBgmInit)(a, b, c, d, e);
+    nredNoteBgmStep("bgm-init", reinterpret_cast<UInt64>(a), reinterpret_cast<UInt64>(b),
+                    reinterpret_cast<UInt64>(c), ret);
+    return ret;
+}
+
+UInt32 X5000HWLibs::wrapBgmStep1(void* const a, void* const b, void* const c, void* const d)
+{
+    const UInt32 ret = FunctionCast(wrapBgmStep1, singleton().orgBgmStep1)(a, b, c, d);
+    nredNoteBgmStep("bgm-step1", reinterpret_cast<UInt64>(a), reinterpret_cast<UInt64>(b),
+                    reinterpret_cast<UInt64>(c), ret);
+    return ret;
+}
+
+UInt32 X5000HWLibs::wrapBgmQuery(void* const a, void* const b, void* const c)
+{
+    const UInt32 ret = FunctionCast(wrapBgmQuery, singleton().orgBgmQuery)(a, b, c);
+    nredNoteBgmStep("bgm-query", reinterpret_cast<UInt64>(a), reinterpret_cast<UInt64>(b),
+                    reinterpret_cast<UInt64>(c), ret);
+    return ret;
+}
+
+UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
+{
+    const UInt32 ret = FunctionCast(wrapBgmStep4, singleton().orgBgmStep4)(a);
+    nredNoteBgmStep("bgm-step4", reinterpret_cast<UInt64>(a), 0, 0, ret);
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -1023,6 +1074,22 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("tls-swinit", kTlsSwInitPattern, kTlsSwInitPatternMask,
                                            arrsize(kTlsSwInitPattern), 0x95E9F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTlsSwInit, this->orgTlsSwInit}, "tls-swinit");
+        }
+        if (const auto from = resolveProbe("bgm-init", kBgmInitPattern, nullptr, arrsize(kBgmInitPattern),
+                                           0x2A9F0F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmInit, this->orgBgmInit}, "bgm-init");
+        }
+        if (const auto from = resolveProbe("bgm-step1", kBgmStep1Pattern, nullptr, arrsize(kBgmStep1Pattern),
+                                           0x29939F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmStep1, this->orgBgmStep1}, "bgm-step1");
+        }
+        if (const auto from = resolveProbe("bgm-query", kBgmQueryPattern, nullptr, arrsize(kBgmQueryPattern),
+                                           0x29A159)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmQuery, this->orgBgmQuery}, "bgm-query");
+        }
+        if (const auto from = resolveProbe("bgm-step4", kBgmStep4Pattern, nullptr, arrsize(kBgmStep4Pattern),
+                                           0x2AA5BC)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmStep4, this->orgBgmStep4}, "bgm-step4");
         }
     }
 

@@ -66,6 +66,11 @@ class X5000HWLibs
     mach_vm_address_t                                            orgTlsCreate{0};    // 0x93f76 TlsCreateInstance 判据
     mach_vm_address_t                                            orgTlsSwInit{0};    // 0x95e9f TlsSwInit 内部创建
     mach_vm_address_t                                            kcSlide{0};         // 本 kext 运行时 slide（供探针换算内部全局地址）
+    // 第八步观测（2026-09-28 第二十五轮）：`bgm_create` 内层步骤（只读）
+    mach_vm_address_t                                            orgBgmInit{0};      // 0x2a9f0f
+    mach_vm_address_t                                            orgBgmStep1{0};     // 0x29939f
+    mach_vm_address_t                                            orgBgmQuery{0};     // 0x29a159
+    mach_vm_address_t                                            orgBgmStep4{0};     // 0x2aa5bc
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
     CAILResult (*smuCosWaitFor)(void* ctx, CosWaitForFunc* func, void* handle, UInt32 duration){nullptr};
@@ -105,6 +110,11 @@ private:
     // 第八步观测（2026-09-28 第二十三轮）：TlsCreateInstance(0x93f76) 与 TlsSwInit 内部创建(0x95e9f)（只读）
     static bool  wrapTlsCreate(void* obj, void* slots);
     static void* wrapTlsSwInit(void* obj);
+    // 第八步观测（2026-09-28 第二十五轮）：`bgm_create` 内层 4 个步骤（只读）
+    static UInt32 wrapBgmInit(void* a, void* b, void* c, void* d, void* e);
+    static UInt32 wrapBgmStep1(void* a, void* b, void* c, void* d);
+    static UInt32 wrapBgmQuery(void* a, void* b, void* c);
+    static UInt32 wrapBgmStep4(void* a);
     CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
     static CAILResult smuInternalSwInit(void* ctx, void* input, AMDSMUSWInitOutput* output);
