@@ -119,5 +119,42 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
         }
     }
 
+    // ─── 补属性：`AAPL,aux-power-connected`（门控 `-NRedSetAuxPower`，默认关闭）────────────
+    //  依据（2026-09-28 离线 + 真机，见 📄 `kb/re/TTL-initialize失败根因报告.md` §11）：
+    //   · 加速器 `configureDevice`（X5000 VM `0x3306`）会读 **provider（PCI 设备）** 上的
+    //     `AAPL,aux-power-connected`，并按键 `*(0x1ed118)` 过滤条目、要求条目首字段非 0
+    //     （VM `0x35d6`–`0x3620`）；不满足 ⇒ 返回 false ⇒ 基类 `IOGraphicsAccelerator2::start`
+    //     判 "configureDevice failed" ⇒ 失败清理**清空 `this+0x1f40`** ⇒ `start` 的注册段被跳过。
+    //   · Apple 的 framebuffer 侧把该属性写成 **4 字节整数 1**（12.5 与 13.6 二进制一致）。
+    //  ⇒ 本段替 Apple 把这台显卡的该属性补上（值 1，4 字节），用于判明"属性缺失/形状不符"是否为
+    //    `configureDevice` 失败的原因。**不构造任何对象**。
+    //  安全：只对 `device-id == 0x15BF` 的一个 PCI 设备设一个 4 字节属性；只读遍历；门控默认关闭。
+    if (checkKernelArgument("-NRedSetAuxPower")) {
+        auto* iter = IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively);
+        if (iter == nullptr) {
+            SYSLOG("DriverInjector", "aux-power: failed to create registry iterator");
+        }
+        else {
+            UInt32       found = 0;
+            const UInt32 one   = 1;
+            auto*        val   = OSData::withBytes(&one, sizeof(one));
+            while (auto* entry = iter->getNextObject()) {
+                auto* dev = OSDynamicCast(IOPCIDevice, entry);
+                if (dev == nullptr) { continue; }
+                auto* did = OSDynamicCast(OSData, dev->getProperty("device-id"));
+                if (did == nullptr || did->getLength() < 4) { continue; }
+                const UInt32 id = *reinterpret_cast<const UInt32*>(did->getBytesNoCopy());
+                if (id != 0x15BF) { continue; }
+                dev->setProperty("AAPL,aux-power-connected", val);
+                found = 1;
+                SYSLOG("DriverInjector", "aux-power set on PCI device %s", dev->getName());
+                break;
+            }
+            if (val != nullptr) { val->release(); }
+            iter->release();
+            if (found == 0) { SYSLOG("DriverInjector", "aux-power: no 0x15BF PCI device found"); }
+        }
+    }
+
     return FunctionCast(wrapAddDrivers, singleton().orgAddDrivers)(self, array, doNubMatching);
 }
