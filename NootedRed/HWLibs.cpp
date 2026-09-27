@@ -327,6 +327,11 @@ static const UInt8 kBgmStep4Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 // `0x29a19e`：按 selector 读取（7/8 经 `0x29adb0`）。`0x2a9f0f` 用它做 selector=7 的读取 ⇒ 其返回值是判据之一。
 static const UInt8 kReadSelPattern[]   = {0x41, 0x89, 0xC9, 0x89, 0xD0, 0x83, 0xFE, 0x08, 0x74, 0x09, 0x83, 0xFE,
                                            0x07, 0x75, 0x13, 0x31, 0xF6, 0xEB, 0x05, 0xBE, 0x01, 0x00, 0x00, 0x00};
+// `0x2ab398(obj, id, out, flag)`：先按 id 的 bit31 写 selector 6/0，再读 selector 1 回填 `*out`。
+//  模式 2 的判据 ②（`*(UInt16*)(r13+4) == 1`）中的结构即由此函数填充 ⇒ 需观测它。
+static const UInt8 kCfgReadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53,
+                                        0x50, 0x49, 0x89, 0xCC, 0x49, 0x89, 0xD6, 0x48, 0x89, 0xF3, 0x49, 0x89, 0xFF,
+                                        0x48, 0xF7, 0xC6, 0x00, 0x00, 0x00, 0x80};
 
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -842,13 +847,29 @@ UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 
                                 const UInt32 a5)
 {
     const UInt32 ret = FunctionCast(wrapReadSel, singleton().orgReadSel)(obj, sel, a2, a3, buf, a5);
-    // 只记录 BGM 相关的 selector（7/8）；其余为热路径，静默通过（避免刷屏覆盖 L2 环形缓冲）。
-    if ((sel == 7 || sel == 8) && checkKernelArgument("-NRedAccelLog")) {
+    // 只记录 BGM 相关的 selector/id（其余为热路径，静默通过，避免刷屏覆盖 L2 环形缓冲）。
+    if ((sel == 7 || sel == 8 || a2 == 1 || a2 == 6 || a2 == 0xde5 || a2 == 0x16a00 || a2 == 0x16091) &&
+        checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("HWLibs", "read-sel: obj=%llx sel=%u a2=%u a3=%u buf=%llx a5=%u ret=%u",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)), static_cast<unsigned>(sel),
                static_cast<unsigned>(a2), static_cast<unsigned>(a3),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)), static_cast<unsigned>(a5),
                static_cast<unsigned>(ret));
+    }
+    return ret;
+}
+
+UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const out, UInt32* const flag)
+{
+    const UInt64 before = (out != nullptr) ? *out : 0;
+    const UInt32 ret = FunctionCast(wrapCfgRead, singleton().orgCfgRead)(obj, id, out, flag);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        const UInt64 after = (out != nullptr) ? *out : 0;
+        const UInt32 fl = (flag != nullptr) ? *flag : 0;
+        SYSLOG("HWLibs", "cfg-read: obj=%llx id=%x out=%llx before=%llx after=%llx flag=%u ret=%u",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)), static_cast<unsigned>(id),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(out)), static_cast<unsigned long long>(before),
+               static_cast<unsigned long long>(after), static_cast<unsigned>(fl), static_cast<unsigned>(ret));
     }
     return ret;
 }
@@ -1139,6 +1160,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         }
         if (const auto from = resolveProbe("read-sel", kReadSelPattern, nullptr, arrsize(kReadSelPattern), 0x29A19E)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapReadSel, this->orgReadSel}, "read-sel");
+        }
+        if (const auto from = resolveProbe("cfg-read", kCfgReadPattern, nullptr, arrsize(kCfgReadPattern),
+                                           0x2AB398)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapCfgRead, this->orgCfgRead}, "cfg-read");
         }
     }
 
