@@ -1102,24 +1102,25 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
         //  故 `kc 绝对 → 运行时 = gX5000Slide + (kc绝对 − 0x4B37000)`。
         if (s >= 0xffffff7f80000000ULL && gX5000Slide != 0) {
             const UInt64 gotAbs = gX5000Slide + 0x1ED118ULL;    // 0x1ED118 的归零 vm
-            UInt64       got = 0, key = 0;
+            UInt64       got = 0;
             got = *reinterpret_cast<const UInt64*>(gotAbs);
+            SYSLOG("X5000", "cfgdev key-probe: base=%llx gotAbs=%llx got=%llx",
+                   static_cast<unsigned long long>(gX5000Slide), static_cast<unsigned long long>(gotAbs),
+                   static_cast<unsigned long long>(got));
             if (got >= 0xffffff8000000000ULL) {
-                const UInt64 offs[] = {0x10ULL, 0x18ULL, 0x20ULL, 0x28ULL};
-                for (const UInt64 o : offs) {
-                    const UInt64 cand = *reinterpret_cast<const UInt64*>(got + o);
-                    if (cand >= 0xffffff8000000000ULL) {
-                        key = cand;
-                        break;
+                // `got` 是内核侧对象（上一轮读 `+0x18` 得垃圾 ⇒ 布局与预期不符）⇒ dump 前 6 个 qword，
+                //  并对"像内核指针"的项做**限长**字符串试读（%.32s，零外推、不调用任何 Apple 方法）。
+                UInt64 q[6] = {0, 0, 0, 0, 0, 0};
+                for (int i = 0; i < 6; ++i) { q[i] = *reinterpret_cast<const UInt64*>(got + static_cast<UInt64>(i) * 8); }
+                SYSLOG("X5000", "cfgdev key-q: %llx %llx %llx %llx %llx %llx",
+                       static_cast<unsigned long long>(q[0]), static_cast<unsigned long long>(q[1]),
+                       static_cast<unsigned long long>(q[2]), static_cast<unsigned long long>(q[3]),
+                       static_cast<unsigned long long>(q[4]), static_cast<unsigned long long>(q[5]));
+                for (int i = 0; i < 6; ++i) {
+                    if (q[i] >= 0xffffff8000000000ULL) {
+                        SYSLOG("X5000", "cfgdev key-str[%d]: %.32s", i, reinterpret_cast<const char*>(q[i]));
                     }
                 }
-            }
-            SYSLOG("X5000", "cfgdev key-probe: base=%llx gotAbs=%llx got=%llx keystr=%llx",
-                   static_cast<unsigned long long>(gX5000Slide), static_cast<unsigned long long>(gotAbs),
-                   static_cast<unsigned long long>(got), static_cast<unsigned long long>(key));
-            if (key != 0) {
-                // 限长打印（48 字节）以减少读到无 NUL 区域的风险
-                SYSLOG("X5000", "cfgdev key-name: %.48s", reinterpret_cast<const char*>(key));
             }
         }
     }
