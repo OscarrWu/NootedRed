@@ -1149,11 +1149,13 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     if (checkKernelArgument("-NRedNvDiagRead") || checkKernelArgument("-NRedNvDiagWrite")) {
         const bool allowWrite = checkKernelArgument("-NRedNvDiagWrite");
         const auto nvd = NvDiag::run(allowWrite);
-        panic("NRed nvdiag: entry=%llx dtn=%llu cls=%llx rdlen=%llu rd0=%llx"
-              " wrC=%llu wrA=%llu sSafe=%llu sDone=%llu"
+        panic("NRed nvdiag2: entry=%llx dtn=%llu clsObj=%llx clsWord=%llx"
+              " rd0Obj=%llx rd0Len=%llu rdgObj=%llx rdgLen=%llu"
+              " wrC=%llu wrA=%llu backObj=%llx backLen=%llu sSafe=%llu"
               " mbp=%llx mbMagic=%llu mbSize=%llu mbBufx=%llu mbBufc=%llx",
-              nvd.entry, nvd.isDtn, nvd.clsWord, nvd.rdLen, nvd.rd0,
-              nvd.wrCustom, nvd.wrApple, nvd.syncSafe, nvd.syncDone,
+              nvd.entry, nvd.isDtn, nvd.clsObj, nvd.clsWord,
+              nvd.rd0Obj, nvd.rd0Len, nvd.rdgObj, nvd.rdgLen,
+              nvd.wrCustom, nvd.wrApple, nvd.backObj, nvd.backLen, nvd.syncSafe,
               nvd.mbPtr, nvd.mbMagic, nvd.mbSize, nvd.mbBufx, nvd.mbBufc);
     }
 
