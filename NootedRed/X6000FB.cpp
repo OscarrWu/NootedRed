@@ -18,7 +18,7 @@
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
-#include <NvDiag.hpp>      // NVRAM 写入能力诊断探针（诊断用，见该文件头部注释）
+#include <NvMsgBuf.hpp>    // 内核 console（msgbuf）快照：把内核日志尾部取出来（见该文件头部注释）
 #include <StageMark.hpp>
 #include <kern/debug.h>    // panic() 声明（Probe D1 v2 崩溃出口注入）
 #include <IOKit/IOReturn.h>
@@ -1138,25 +1138,20 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
 
-    // ─── NVRAM 写入能力诊断（门控 `-NRedNvDiagRead` / `-NRedNvDiagWrite`，默认关闭）──────
-    //  位置说明（2026-09-27 第 1 轮实测教训）：必须放在 `AmdRadeonController::powerUp` **入口**——
-    //    实测调用顺序是 `AmdPowerPlayHelper::powerUp`(+0x17e) **先于** `AmdDalHelper::powerUp`(+0x2a4)；
-    //    挂在 DalHelper 上时，未抑制 PP 的引导会在 PP 处 panic，永远走不到探针（第 1 轮实测）。
-    //  目的：一次真机引导取回 `/options` 节点的类名、读通道是否工作、两种 GUID 的写结果、
-    //        safeToSync 返回值，以及 `msgbufp` 弱引用是否解析成功。
-    //  依据：docs/NVRAM观测通道方案与风险评估.md §3.3；kb/re/AppleEFINVRAM写入判据报告.md
-    //  安全：`-NRedNvDiagRead` 全程只读；`-NRedNvDiagWrite` 才写 2 个小变量。两者不要同时开。
-    if (checkKernelArgument("-NRedNvDiagRead") || checkKernelArgument("-NRedNvDiagWrite")) {
-        const bool allowWrite = checkKernelArgument("-NRedNvDiagWrite");
-        const auto nvd = NvDiag::run(allowWrite);
-        panic("NRed nvdiag2: entry=%llx dtn=%llu clsObj=%llx clsWord=%llx"
-              " rd0Obj=%llx rd0Len=%llu rdgObj=%llx rdgLen=%llu"
-              " wrC=%llu wrA=%llu backObj=%llx backLen=%llu sSafe=%llu"
-              " mbp=%llx mbMagic=%llu mbSize=%llu mbBufx=%llu mbBufc=%llx",
-              nvd.entry, nvd.isDtn, nvd.clsObj, nvd.clsWord,
-              nvd.rd0Obj, nvd.rd0Len, nvd.rdgObj, nvd.rdgLen,
-              nvd.wrCustom, nvd.wrApple, nvd.backObj, nvd.backLen, nvd.syncSafe,
-              nvd.mbPtr, nvd.mbMagic, nvd.mbSize, nvd.mbBufx, nvd.mbBufc);
+    // ─── 内核 console（msgbuf）快照探针（门控 `-NRedMsgDump` / `-NRedMsgDump1k` / `-NRedMsgDump4k`）──
+    //  目标：把 Apple/内核在我们崩溃前打印的日志（含本驱动的 DBGLOG）整段取回 —— 这在此前
+    //        只能靠"人工拍屏"才能看到。
+    //  载体选择（2026-09-27 实测）：写 NVRAM ⛔ 不可用（第 3 轮：调用线程长时间阻塞，系统 9 分钟
+    //        后才以 userspace watchdog 回落，且 NRed* 变量未落盘）⇒ 改用 **panic 通道**（已验证可靠）。
+    //  读取侧已在第 2 轮验证：msgbufp 弱引用解析成功、magic/size/bufx 均正常。
+    //  长度分档（512 → 1k → 4k）：panic 文本变长会改 efivarfs 分片布局，逐档验证后再加大。
+    //  安全：只读内存、不调用任何 Apple 方法、不写 NVRAM。
+    if (checkKernelArgument("-NRedMsgDump") || checkKernelArgument("-NRedMsgDump1k") ||
+        checkKernelArgument("-NRedMsgDump4k")) {
+        const int want = checkKernelArgument("-NRedMsgDump4k") ? 4096
+                       : (checkKernelArgument("-NRedMsgDump1k") ? 1024 : 512);
+        const int dn = NvMsgBuf::dumpTail(want);
+        panic("NRed msgdump want=%d n=%d:\n%s", want, dn, NvMsgBuf::gBuf);
     }
 
     // ─── `probe` 所需属性名探针（门控 `-NRedAccelExist3`，默认关闭）─────────────────
