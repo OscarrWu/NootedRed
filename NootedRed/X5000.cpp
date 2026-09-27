@@ -1100,7 +1100,7 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
 
     const UInt64 ret = FunctionCast(wrapConfigureDevice, singleton().orgConfigureDevice)(self, provider);
 
-    UInt64 f140 = 0, f1e88 = 0, f368 = 0;
+    UInt64 f140 = 0, f1e88 = 0, f368 = 0, f1f28 = 0, f1f30 = 0, f1a68 = 0, f1a40 = 0;
     if (s >= 0xffffff7f80000000ULL) {
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
@@ -1108,11 +1108,19 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
         f140  = load64(s, 0x1F40);
         f1e88 = load64(s, 0x1E88);
         f368  = load64(s, 0x368);
+        // configureDevice 的 `je 0x368b` 失败出口逐个读回：0x33ee→f1f28、0x342f→f1a68、0x344d→f1a40
+        f1f28 = load64(s, 0x1F28);
+        f1f30 = load64(s, 0x1F30);
+        f1a68 = load64(s, 0x1A68);
+        f1a40 = load64(s, 0x1A40);
     }
     if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("X5000", "cfgdev exit: ret=%llu f140=%llx f1e88=%llx f368=%llx",
+        SYSLOG("X5000",
+               "cfgdev exit: ret=%llu f140=%llx f1e88=%llx f368=%llx f1f28=%llx f1f30=%llx f1a68=%llx f1a40=%llx",
                static_cast<unsigned long long>(ret), static_cast<unsigned long long>(f140),
-               static_cast<unsigned long long>(f1e88), static_cast<unsigned long long>(f368));
+               static_cast<unsigned long long>(f1e88), static_cast<unsigned long long>(f368),
+               static_cast<unsigned long long>(f1f28), static_cast<unsigned long long>(f1f30),
+               static_cast<unsigned long long>(f1a68), static_cast<unsigned long long>(f1a40));
     }
     return ret;
 }
