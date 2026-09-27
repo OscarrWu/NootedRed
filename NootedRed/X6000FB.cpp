@@ -1138,40 +1138,34 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
 
-    // ─── 内核 console（msgbuf）快照探针（门控见下，默认关闭）────────────────────────
-    //  目标：把 Apple/内核在我们崩溃前打印的日志（含本驱动 DBGLOG）整段取回 —— 这在此前
-    //        只能靠"人工拍屏"才能看到。
-    //  载体（2026-09-27 实测）：写 NVRAM ⛔ 不可用（调用线程长时间阻塞）；改用 **panic 通道** ✅。
-    //  读取侧：msgbufp 弱引用已解析成功；档位 512/1k/4k 均已实测可用（见 NvMsgBuf.hpp 实测记录）。
-    //  档位递增策略：文本越长 ⇒ efivarfs 分片越多 ⇒ 逐档验证后再加大（4k 档 = 11 片仍能自动重启）。
-    //  安全：只读内存、不调用任何 Apple 方法、不写 NVRAM。
-    if (checkKernelArgument("-NRedMsgDump") || checkKernelArgument("-NRedMsgDump1k") ||
-        checkKernelArgument("-NRedMsgDump4k") || checkKernelArgument("-NRedMsgDump8k") ||
-        checkKernelArgument("-NRedMsgDump16k") || checkKernelArgument("-NRedMsgDump32k")) {
-        int want = checkKernelArgument("-NRedMsgDump32k") ? 32768
-                 : checkKernelArgument("-NRedMsgDump16k") ? 16384
-                 : checkKernelArgument("-NRedMsgDump8k")  ? 8192
-                 : checkKernelArgument("-NRedMsgDump4k")  ? 4096
-                 : checkKernelArgument("-NRedMsgDump1k")  ? 1024 : 512;
+    // ─── 内核 console（msgbuf）快照探针（门控 `-NRedMsgDump [-NRedMsgDump8k] [-NRedMsgOff1..3]`）──
+    //  目标/载体/读取侧依据见 NvMsgBuf.hpp 头部与 docs/子任务/第九步执行记录（观测通道与内核日志快照）。
+    //  ⚠️ 设计约束（2026-09-27 实测）：Lilu 的 `checkKernelArgument` 内部**就是** Apple 的
+    //     `PE_parse_boot_argn`（`src/Lilu/Lilu/Headers/kern_util.hpp:432`）⇒ **每次调用都是一次
+    //     Apple 函数调用**。故这里用"**单主开关 + 命中即停**"的写法，把调用次数压到最小
+    //     （未启用时仅 1 次；启用并按 8k 档时共 4 次，加一个偏移档为 5 次）。
+    if (checkKernelArgument("-NRedMsgDump")) {
+        int want = 512;
+        if (checkKernelArgument("-NRedMsgDump1k"))
+            want = 1024;
+        else if (checkKernelArgument("-NRedMsgDump4k"))
+            want = 4096;
+        else if (checkKernelArgument("-NRedMsgDump8k"))
+            want = 8192;
+        else if (checkKernelArgument("-NRedMsgDump16k"))
+            want = 16384;
+        else if (checkKernelArgument("-NRedMsgDump32k"))
+            want = 32768;
+
+        // 偏移档位（每档 8 KB，自尾部往前）：只保留 3 档以控制 Apple 函数调用次数
         int off = 0;
-        // 偏移用 **flag 档位**表达（每档 8 KB），**刻意不用数值 boot-arg**：
-        // ⛔ 原因（2026-09-27 第 9 轮实测）：`PE_parse_boot_argn` 是 Apple 的 pexpert 函数，
-        //    在探针里调用它 ⇒ 快照头正常但**机器不自动重启**（panic 流程无法完成）。
-        //    这与第 15 轮"探针里禁调 Apple 函数"同源 ⇒ 只用 Lilu 的 `checkKernelArgument`（读缓存的 boot-args）。
         if (checkKernelArgument("-NRedMsgOff1"))
             off = 8192;
         else if (checkKernelArgument("-NRedMsgOff2"))
             off = 16384;
         else if (checkKernelArgument("-NRedMsgOff3"))
             off = 24576;
-        else if (checkKernelArgument("-NRedMsgOff4"))
-            off = 32768;
-        else if (checkKernelArgument("-NRedMsgOff5"))
-            off = 40960;
-        else if (checkKernelArgument("-NRedMsgOff6"))
-            off = 49152;
-        else if (checkKernelArgument("-NRedMsgOff7"))
-            off = 57344;
+
         const auto ci = NvMsgBuf::channelInfo();
         const int dn = NvMsgBuf::dumpTail(want, off);
         panic("NRed msgdump ok=%d size=%d bufx=%d len=%d off=%d n=%d:\n%s",
