@@ -852,6 +852,7 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
 
     const UInt64 s = reinterpret_cast<UInt64>(self);
     UInt64       f140 = 0, f148 = 0, f158 = 0, f160 = 0, f368 = 0, f1e88 = 0;
+    UInt64       f1e98 = 0, f1ea0 = 0, f1ea8 = 0;
     if (s >= 0xffffff7f80000000ULL) {
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
@@ -863,6 +864,11 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
         // f140 的查找起点与"曾设置成功"标志（离线：`0x3dae(self+0x368, 名字)` 成功后才 `orb $0x40,0x1e88`）
         f368  = load64(s, 0x368);
         f1e88 = load64(s, 0x1E88);
+        // `start`（0x1290）按名查服务：`0x1e98`（provider）/`0x1ea0`（"Sleep/Wake"）/`0x1ea8`；
+        //  任一为 0 即跳失败出口 0x1635 ⇒ `start` 返回失败 ⇒ 之后 `0x368` 不会被置 1、注册段不执行。
+        f1e98 = load64(s, 0x1E98);
+        f1ea0 = load64(s, 0x1EA0);
+        f1ea8 = load64(s, 0x1EA8);
     }
     const UInt64 vRet  = ret ? 1 : 0;
     const UInt64 vProv = reinterpret_cast<UInt64>(provider);
@@ -874,8 +880,10 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
                static_cast<unsigned long long>(vRet), static_cast<unsigned long long>(f140),
                static_cast<unsigned long long>(f148), static_cast<unsigned long long>(f158),
                static_cast<unsigned long long>(f160));
-        SYSLOG("X5000", "accel start extra: f368=%llx f1e88=%llx", static_cast<unsigned long long>(f368),
-               static_cast<unsigned long long>(f1e88));
+        SYSLOG("X5000", "accel start extra: f368=%llx f1e88=%llx f1e98=%llx f1ea0=%llx f1ea8=%llx",
+               static_cast<unsigned long long>(f368), static_cast<unsigned long long>(f1e88),
+               static_cast<unsigned long long>(f1e98), static_cast<unsigned long long>(f1ea0),
+               static_cast<unsigned long long>(f1ea8));
     }
 
     // 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；高风险，慎用）。格式串未改（已投产）。
