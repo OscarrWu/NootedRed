@@ -661,9 +661,23 @@ void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
 {
     void* const ret = FunctionCast(wrapTtlAllocB, singleton().orgTtlAllocB)(ctx);
     if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "ttl-allocB: ctx=%llx ret=%llx (NULL -> exit 0x8b3cc)",
+        // 直接读"接口表"：`0x8bb9f(pool, idx)` = `*(pool)` 作表、表项 stride 0x18、字段 +0x10 = 对象。
+        UInt64 e4 = 0, e1 = 0, e2 = 0;
+        void*     tbl = nullptr;
+        if (ctx != nullptr) {
+            tbl = *reinterpret_cast<void**>(ctx);
+            if (tbl != nullptr) {
+                e4 = reinterpret_cast<UInt64*>(tbl)[4 * 3 + 2];
+                e1 = reinterpret_cast<UInt64*>(tbl)[1 * 3 + 2];
+                e2 = reinterpret_cast<UInt64*>(tbl)[2 * 3 + 2];
+            }
+        }
+        SYSLOG("HWLibs", "ttl-allocB: ctx=%llx ret=%llx tbl=%llx e1=%llx e2=%llx e4=%llx (NULL -> exit 0x8b3cc)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)),
+               static_cast<unsigned long long>(e1), static_cast<unsigned long long>(e2),
+               static_cast<unsigned long long>(e4));
     }
     return ret;
 }
@@ -672,9 +686,21 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 {
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
     if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "ttl-checkD: obj=%llx param=%llx ret=%d (false -> exit 0x8b3cc)",
+        // `obj` 此处即收集器（`0x8b10e` 的 r14）；同时读出它的接口表快照，判断 idx=4 是否已注册。
+        UInt64 e4 = 0, e1 = 0;
+        void*  tbl = nullptr;
+        if (obj != nullptr) {
+            tbl = *reinterpret_cast<void**>(obj);
+            if (tbl != nullptr) {
+                e4 = reinterpret_cast<UInt64*>(tbl)[4 * 3 + 2];
+                e1 = reinterpret_cast<UInt64*>(tbl)[1 * 3 + 2];
+            }
+        }
+        SYSLOG("HWLibs", "ttl-checkD: obj=%llx param=%llx ret=%d tbl=%llx e1=%llx e4=%llx (false -> exit 0x8b3cc)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)), ret ? 1 : 0);
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)), ret ? 1 : 0,
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)),
+               static_cast<unsigned long long>(e1), static_cast<unsigned long long>(e4));
     }
     return ret;
 }
