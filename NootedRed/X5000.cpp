@@ -892,6 +892,19 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
 //     ⇒ `TTL+0x578`（该表副本）保持 0、`TTL+0x5a0`（已初始化标志）保持 0。
 //  本探针**只读内存字段、不调用任何 Apple 方法**，且 hook 无条件安装、内部才按门控输出；
 //  观测走落盘通道（`-NRedTtlLog`）⇒ 不打断流程，一轮即可取回。
+// ─── 第八步诊断实验：TTL 的"第三张回调表"桩（门控 `-NRedTtlStub`）─────────────────
+//  用途见 `wrapInitializeTtl` 内的说明。表形态（离线反汇编 + 真机双向确证）为
+//  `{ void* ctx; IOReturn (*fn)(void* ctx, void* in, void** out); }`。
+static UInt64 gTtlStubTable[2] = {0, 0};
+
+static IOReturn ttlStubCallback(void* ctx, void* in, void** out)
+{
+    (void)ctx;
+    (void)in;
+    if (out != nullptr) { *out = nullptr; }
+    return kIOReturnSuccess;
+}
+
 void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 {
     auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
@@ -919,6 +932,27 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
         g0  = load64(g, 0x00);
         g8  = load64(g, 0x08);
         g10 = load64(g, 0x10);
+    }
+
+    // ── 判别性实验（门控 `-NRedTtlStub`，默认关闭）：补上 TTL 的"第三张回调表" ──
+    //  真机（`observe-20260928-0153-ttl2`）判读：`TTL::initialize` 在**非 Safe Boot** 下有两道门——
+    //   ① 入参 `+0x10` 非 0 ⇒ 直接返回 kIOReturnError（只有 safeboot 才继续）；
+    //   ② 入参 `+0x10` == 0 且 `this+0x578` == 0 ⇒ 直接返回 kIOReturnError。
+    //  本块在调用原函数**之前**把 `TTL+0x578` 写成本 kext 内的桩表 `{ctx, fn}`（`fn` 恒返回成功），
+    //  使第 ② 道门通过。**判据**：`ttl5a0`（已初始化标志）是否由 0 变 1；以及加速器 `start` 的
+    //  `f140` 是否变为非 0（注册段是否被走到）。
+    //  ⚠️ 这是**诊断实验**，不是修复：桩表不实现任何真实回调语义。
+    if (checkKernelArgument("-NRedTtlStub") && isKernelPtr(f338)) {
+        auto store64 = [](UInt64 base, UInt64 off, UInt64 v) {
+            *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base) + off) = v;
+        };
+        gTtlStubTable[0] = f338;
+        gTtlStubTable[1] = reinterpret_cast<UInt64>(&ttlStubCallback);
+        const UInt64 tableAddr = reinterpret_cast<UInt64>(&gTtlStubTable[0]);
+        store64(f338, 0x578, tableAddr);
+        SYSLOG("X5000", "ttl-stub: TTL=%llx TTL+0x578 <- %llx (fn=%llx)", static_cast<unsigned long long>(f338),
+               static_cast<unsigned long long>(tableAddr),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(&ttlStubCallback)));
     }
 
     FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
