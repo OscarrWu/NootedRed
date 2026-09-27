@@ -1,7 +1,7 @@
 # DisplaySeq —— 寄存器序列生成层
 
 > 本目录是「序列生成 / 寄存器写入分离」架构的落盘位置。
-> 依据：`docs/测试与验证设计.md` §5.1/§5.2。
+> 依据：`docs/离线验证设计.md` §5.1/§5.2。
 
 ---
 
@@ -136,7 +136,7 @@ python3 kb/tools/smctrans_diff.py /tmp/ours-clocks.json kb/sequences/linux-dcn31
 
 | # | 文献 | 位置 |
 |---|---|---|
-| [1] | 《780M 驱动项目 —— 验证与操作手册》§5.1 序列生成与寄存器写入必须分离、§5.2 建议的落地形态 | `docs/测试与验证设计.md` |
+| [1] | 《离线验证设计》§5.1 序列生成与寄存器写入必须分离、§5.2 建议的落地形态 | `docs/离线验证设计.md` |
 | [2] | Linux amdgpu —— VBIOSSMC 发送时序 | `oldfiles-handoff/reference/linux/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn314/dcn314_smu.c`（`wait_for_response` L96、`send_msg_with_param` L118） |
 | [3] | 本项目路线图 | `docs/ROADMAP.md` §3.2（序列生成架构）、第五步（时钟主流程） |
 
