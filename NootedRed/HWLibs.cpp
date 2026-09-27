@@ -898,7 +898,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             else { SYSLOG("HWLibs", "%s: route failed", tag); }
         };
 
-        if (const auto from = resolveProbe("ttl-coll", kTtlInitCollectPattern, kTtlInitCollectPatternMask,
+        if (const auto from = resolveProbe("ttl-coll", kTtlInitCollectPattern, nullptr,
                                            arrsize(kTtlInitCollectPattern), 0x8B5DE)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlCollect, this->orgTtlCollect}, "ttl-coll");
         }
