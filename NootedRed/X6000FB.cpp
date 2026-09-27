@@ -1138,19 +1138,22 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
 
-    // ─── 内核 console（msgbuf）快照探针（门控 `-NRedMsgDump` / `-NRedMsgDump1k` / `-NRedMsgDump4k`）──
-    //  目标：把 Apple/内核在我们崩溃前打印的日志（含本驱动的 DBGLOG）整段取回 —— 这在此前
+    // ─── 内核 console（msgbuf）快照探针（门控见下，默认关闭）────────────────────────
+    //  目标：把 Apple/内核在我们崩溃前打印的日志（含本驱动 DBGLOG）整段取回 —— 这在此前
     //        只能靠"人工拍屏"才能看到。
-    //  载体选择（2026-09-27 实测）：写 NVRAM ⛔ 不可用（第 3 轮：调用线程长时间阻塞，系统 9 分钟
-    //        后才以 userspace watchdog 回落，且 NRed* 变量未落盘）⇒ 改用 **panic 通道**（已验证可靠）。
-    //  读取侧已在第 2 轮验证：msgbufp 弱引用解析成功、magic/size/bufx 均正常。
-    //  长度分档（512 → 1k → 4k）：panic 文本变长会改 efivarfs 分片布局，逐档验证后再加大。
+    //  载体（2026-09-27 实测）：写 NVRAM ⛔ 不可用（调用线程长时间阻塞）；改用 **panic 通道** ✅。
+    //  读取侧：msgbufp 弱引用已解析成功；档位 512/1k/4k 均已实测可用（见 NvMsgBuf.hpp 实测记录）。
+    //  档位递增策略：文本越长 ⇒ efivarfs 分片越多 ⇒ 逐档验证后再加大（4k 档 = 11 片仍能自动重启）。
     //  安全：只读内存、不调用任何 Apple 方法、不写 NVRAM。
     if (checkKernelArgument("-NRedMsgDump") || checkKernelArgument("-NRedMsgDump1k") ||
-        checkKernelArgument("-NRedMsgDump4k")) {
-        const int want = checkKernelArgument("-NRedMsgDump4k") ? 4096
-                       : (checkKernelArgument("-NRedMsgDump1k") ? 1024 : 512);
-        const int dn = NvMsgBuf::dumpTail(want);
+        checkKernelArgument("-NRedMsgDump4k") || checkKernelArgument("-NRedMsgDump8k") ||
+        checkKernelArgument("-NRedMsgDump16k") || checkKernelArgument("-NRedMsgDump32k")) {
+        const int want = checkKernelArgument("-NRedMsgDump32k") ? 32768
+                       : checkKernelArgument("-NRedMsgDump16k") ? 16384
+                       : checkKernelArgument("-NRedMsgDump8k")  ? 8192
+                       : checkKernelArgument("-NRedMsgDump4k")  ? 4096
+                       : checkKernelArgument("-NRedMsgDump1k")  ? 1024 : 512;
+        const int dn = NvMsgBuf::dumpTail(want, 0);
         panic("NRed msgdump want=%d n=%d:\n%s", want, dn, NvMsgBuf::gBuf);
     }
 
