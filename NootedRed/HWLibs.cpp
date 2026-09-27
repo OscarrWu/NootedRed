@@ -324,6 +324,9 @@ static const UInt8 kBgmQueryPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x
                                            0x8B, 0x78, 0x08, 0x48, 0x8B, 0x40, 0x40, 0x5D, 0xFF, 0xE0, 0x55, 0x48};
 static const UInt8 kBgmStep4Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x48, 0x89,
                                            0xFB, 0x4C, 0x8D, 0x7D, 0xE4, 0x41, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00};
+// `0x29a19e`：按 selector 读取（7/8 经 `0x29adb0`）。`0x2a9f0f` 用它做 selector=7 的读取 ⇒ 其返回值是判据之一。
+static const UInt8 kReadSelPattern[]   = {0x41, 0x89, 0xC9, 0x89, 0xD0, 0x83, 0xFE, 0x08, 0x74, 0x09, 0x83, 0xFE,
+                                           0x07, 0x75, 0x13, 0x31, 0xF6, 0xEB, 0x05, 0xBE, 0x01, 0x00, 0x00, 0x00};
 
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -821,6 +824,21 @@ UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
     return ret;
 }
 
+UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 a2, const UInt32 a3, void* const buf,
+                                const UInt32 a5)
+{
+    const UInt32 ret = FunctionCast(wrapReadSel, singleton().orgReadSel)(obj, sel, a2, a3, buf, a5);
+    // 只记录 BGM 相关的 selector（7/8）；其余为热路径，静默通过（避免刷屏覆盖 L2 环形缓冲）。
+    if ((sel == 7 || sel == 8) && checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "read-sel: obj=%llx sel=%u a2=%u a3=%u buf=%llx a5=%u ret=%u",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)), static_cast<unsigned>(sel),
+               static_cast<unsigned>(a2), static_cast<unsigned>(a3),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)), static_cast<unsigned>(a5),
+               static_cast<unsigned>(ret));
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -1024,6 +1042,20 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         const auto resolveProbe = [&](const char* tag, const UInt8* pat, const UInt8* mask, const size_t n,
                                       const mach_vm_address_t want) -> mach_vm_address_t
         {
+            // ① 优先：按"预期偏移"直接校验字节（最可靠——模式可能在别处重复，导致扫描命中错误位置）
+            const auto* const at = reinterpret_cast<const UInt8*>(slide + want);
+            bool exact = true;
+            for (size_t k = 0; k < n; k += 1) {
+                if (mask != nullptr && mask[k] == 0) { continue; }
+                if (at[k] != pat[k]) { exact = false; break; }
+            }
+            if (exact) {
+                DBGLOG("HWLibs", "%s: verified at expected offset 0x%llx", tag,
+                       static_cast<unsigned long long>(want));
+                return slide + want;
+            }
+            SYSLOG("HWLibs", "%s: expected-offset bytes mismatch -> falling back to pattern scan", tag);
+            // ② 回退：全 kext 扫描，并要求命中偏移与预期一致（否则跳过，绝不 patch 错地方）
             size_t offset = 0;
             if (!KernelPatcher::findPattern(pat, mask, n, reinterpret_cast<const void*>(slide), size, &offset)) {
                 SYSLOG("HWLibs", "%s: pattern not found", tag);
@@ -1090,6 +1122,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("bgm-step4", kBgmStep4Pattern, nullptr, arrsize(kBgmStep4Pattern),
                                            0x2AA5BC)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmStep4, this->orgBgmStep4}, "bgm-step4");
+        }
+        if (const auto from = resolveProbe("read-sel", kReadSelPattern, nullptr, arrsize(kReadSelPattern), 0x29A19E)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapReadSel, this->orgReadSel}, "read-sel");
         }
     }
 

@@ -71,6 +71,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgBgmStep1{0};     // 0x29939f
     mach_vm_address_t                                            orgBgmQuery{0};     // 0x29a159
     mach_vm_address_t                                            orgBgmStep4{0};     // 0x2aa5bc
+    mach_vm_address_t                                            orgReadSel{0};      // 0x29a19e（selector 7/8 读取）
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
     CAILResult (*smuCosWaitFor)(void* ctx, CosWaitForFunc* func, void* handle, UInt32 duration){nullptr};
@@ -115,6 +116,7 @@ private:
     static UInt32 wrapBgmStep1(void* a, void* b, void* c, void* d);
     static UInt32 wrapBgmQuery(void* a, void* b, void* c);
     static UInt32 wrapBgmStep4(void* a);
+    static UInt32 wrapReadSel(void* obj, UInt32 sel, UInt32 a2, UInt32 a3, void* buf, UInt32 a5);
     CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
     static CAILResult smuInternalSwInit(void* ctx, void* input, AMDSMUSWInitOutput* output);
