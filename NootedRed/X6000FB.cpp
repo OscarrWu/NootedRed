@@ -1166,10 +1166,11 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         else if (checkKernelArgument("-NRedMsgOff3"))
             off = 24576;
 
-        const auto ci = NvMsgBuf::channelInfo();
+        // ⚠️ 格式串**刻意保持短小**（2 个数值 + 文本），与第 7 轮"已验证成功"的形态一致：
+        //   实测规律（2026-09-27）—— 2 字段（第 7 轮）正常自动重启；6 字段（第 8/9/11 轮）均
+        //   出现"快照头正常但机器不自动重启"。原因未查明前，一律用最小字段数。
         const int dn = NvMsgBuf::dumpTail(want, off);
-        panic("NRed msgdump ok=%d size=%d bufx=%d len=%d off=%d n=%d:\n%s",
-              ci.ok, ci.size, ci.bufx, want, off, dn, NvMsgBuf::gBuf);
+        panic("NRed msgdump off=%d n=%d:\n%s", off, dn, NvMsgBuf::gBuf);
     }
 
     // ─── `probe` 所需属性名探针（门控 `-NRedAccelExist3`，默认关闭）─────────────────
