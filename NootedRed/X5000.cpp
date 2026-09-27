@@ -1096,9 +1096,26 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
     if (checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("X5000", "cfgdev enter: self=%llx provider=%llx", static_cast<unsigned long long>(s),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
+        // 定位 KASLR slide：**只读**实例 vptr 与驱动记录的 `gX5000Slide`（不外推地址）。
+        //  放在最前，减少被 msgbuf 环形缓冲覆盖的概率（L2 读 msgbuf，日志过密会互相冲掉）。
+        if (s >= 0xffffff7f80000000ULL) {
+            const UInt64 vptr = *reinterpret_cast<const UInt64*>(s);
+            SYSLOG("X5000", "cfgdev slide-probe: vptr=%llx gX5000Slide=%llx",
+                   static_cast<unsigned long long>(vptr), static_cast<unsigned long long>(gX5000Slide));
+        }
     }
 
-    const UInt64 ret = FunctionCast(wrapConfigureDevice, singleton().orgConfigureDevice)(self, provider);
+    UInt64 ret = FunctionCast(wrapConfigureDevice, singleton().orgConfigureDevice)(self, provider);
+
+    // 判别性实验（门控 `-NRedCfgDevForce`，默认关闭）：`configureDevice` 在 `0x360f` 检查失败后
+    //  返回 false ⇒ 基类 `IOGraphicsAccelerator2::start` 判定 "configureDevice failed" ⇒ 失败退出
+    //  并**清空 `this+0x1f40`**（framebuffer 服务）⇒ 加速器注册段被跳过。本块把它强制改为"成功"，
+    //  用于判定"这一处检查是否为唯一阻塞"（判据：`f140` 是否保留、`start` 是否继续、注册是否发起）。
+    //  ⚠️ 诊断实验，不是修复。
+    if (ret == 0 && checkKernelArgument("-NRedCfgDevForce")) {
+        SYSLOG("X5000", "cfgdev: forcing success (original ret = 0)");
+        ret = 1;
+    }
 
     UInt64 f140 = 0, f1e88 = 0, f368 = 0, f1f28 = 0, f1f30 = 0, f1a68 = 0, f1a40 = 0;
     if (s >= 0xffffff7f80000000ULL) {
@@ -1121,13 +1138,6 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                static_cast<unsigned long long>(f1e88), static_cast<unsigned long long>(f368),
                static_cast<unsigned long long>(f1f28), static_cast<unsigned long long>(f1f30),
                static_cast<unsigned long long>(f1a68), static_cast<unsigned long long>(f1a40));
-        // 定位 KASLR slide：**只读**实例 vptr 与驱动记录的 `gX5000Slide`，不外推任何地址
-        //（上一轮用"基类 vtable 地址"推 slide 得非页对齐结果 ⇒ 假设不成立；改为离线比对 vptr）。
-        if (s >= 0xffffff7f80000000ULL) {
-            const UInt64 vptr = *reinterpret_cast<const UInt64*>(s);
-            SYSLOG("X5000", "cfgdev slide-probe: vptr=%llx gX5000Slide=%llx",
-                   static_cast<unsigned long long>(vptr), static_cast<unsigned long long>(gX5000Slide));
-        }
     }
     return ret;
 }
