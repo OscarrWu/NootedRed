@@ -1022,6 +1022,22 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(&ttlStubCallback)));
     }
 
+    // 判别实验（门控 `-NRedTtlStub48`，默认关闭）：真机已证 `*(TTL+0x48) = 0` ⇒ 命中出口 4
+    //  （`0xa285f` 要求 `*(TTL+0x48)` 的三个字段非 0）。`0xa285f` 只是**拷贝**这些字段
+    //  （`*(rcx+0x38/0x40/0x48) = 桩字段`），**不会把它们当函数调用** ⇒ 用自指的最小桩即可。
+    if (checkKernelArgument("-NRedTtlStub48") && isKernelPtr(f338)) {
+        auto store64 = [](UInt64 base, UInt64 off, UInt64 v) {
+            *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base) + off) = v;
+        };
+        const UInt64 stub = f338 + 0xB00;   // TTL 对象 0xb40 字节 ⇒ 用尾部空闲区
+        store64(stub, 0x00, stub);
+        store64(stub, 0x08, stub);
+        store64(stub, 0x10, stub);
+        store64(f338, 0x48, stub);
+        SYSLOG("X5000", "ttl-stub48: TTL=%llx TTL+0x48 <- %llx", static_cast<unsigned long long>(f338),
+               static_cast<unsigned long long>(stub));
+    }
+
     // 入口读数（与出口对比用）：`0x8b10e` 会**改写** `&TTL+0x50` 子结构 ⇒ 若某字段调用前后
     //  完全不变，说明"写它的那一步"没被走到，即可反推失败步。
     if (checkKernelArgument("-NRedTtlLog") && isKernelPtr(f338)) {
