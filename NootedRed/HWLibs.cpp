@@ -303,6 +303,17 @@ static const UInt8 kTtlInitCheckDPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
 static const UInt8 kTtlRegIfacePattern[] = {0x83, 0xFE, 0x16, 0x77, 0x18, 0x55, 0x48, 0x89, 0xE5, 0x89, 0xF0, 0x48,
                                             0x8D, 0x04, 0x40, 0x89, 0x34, 0xC7, 0x48, 0x89, 0x4C, 0xC7, 0x08, 0x48};
 
+// 第八步观测（2026-09-28 第二十三轮）：`TlsCreateInstance`(0x93f76) 与 `TlsSwInit` 内部创建(0x95e9f)。
+//  依据：`0x928f4`（出口 G）在 `0x9291c` 调用 `0x93f76`，其返回 false 即走 `0x9295f` 失败；
+//  真机日志的 `TlsCreateInstance` / `NULL != pInstance->pIpi` 正出自 `0x93f76` 的失败分支。
+static const UInt8 kTlsCreatePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54,
+                                          0x53, 0x48, 0x83, 0xEC, 0x10, 0x49, 0x89, 0xF6, 0x49, 0x89,
+                                          0xFF, 0x48, 0xC7, 0x45, 0xD8, 0x00, 0x00, 0x00};
+static const UInt8 kTlsSwInitPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48,
+                                           0x81, 0xEC, 0xF8, 0x01, 0x00, 0x00, 0x49, 0x89, 0xFE, 0x48, 0x8B, 0x05, 0x00, 0x00};
+static const UInt8 kTlsSwInitPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                              0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00};
+
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                                                         0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
@@ -716,6 +727,42 @@ void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* con
     FunctionCast(wrapTtlRegIface, singleton().orgTtlRegIface)(table, idx, obj, val);
 }
 
+// 第八步观测（2026-09-28 第二十三轮）：`TlsCreateInstance`(0x93f76) 与 `TlsSwInit` 内部创建(0x95e9f)（只读）。
+bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
+{
+    const bool ret = FunctionCast(wrapTlsCreate, singleton().orgTlsCreate)(obj, slots);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        UInt32 s0 = 0, s1 = 0, s2 = 0;
+        if (slots != nullptr) {
+            s0 = reinterpret_cast<UInt32*>(slots)[0];
+            s1 = reinterpret_cast<UInt32*>(slots)[1];
+            s2 = reinterpret_cast<UInt32*>(slots)[2];
+        }
+        SYSLOG("HWLibs", "tls-create: obj=%llx slots=%llx s0=%u s1=%u s2=%u ret=%d",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(slots)), static_cast<unsigned>(s0),
+               static_cast<unsigned>(s1), static_cast<unsigned>(s2), ret ? 1 : 0);
+    }
+    return ret;
+}
+
+void* X5000HWLibs::wrapTlsSwInit(void* const obj)
+{
+    void* const ret = FunctionCast(wrapTlsSwInit, singleton().orgTlsSwInit)(obj);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        UInt64 f0 = 0, f8 = 0;
+        if (obj != nullptr) {
+            f0 = reinterpret_cast<UInt64*>(obj)[0];
+            f8 = reinterpret_cast<UInt64*>(obj)[1];
+        }
+        SYSLOG("HWLibs", "tls-swinit: obj=%llx f0=%llx f8=%llx ret=%llx", 
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+               static_cast<unsigned long long>(f0), static_cast<unsigned long long>(f8),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -960,6 +1007,14 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("ttl-reg", kTtlRegIfacePattern, nullptr, arrsize(kTtlRegIfacePattern),
                                            0x8B9A5)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlRegIface, this->orgTtlRegIface}, "ttl-reg");
+        }
+        if (const auto from = resolveProbe("tls-create", kTlsCreatePattern, nullptr, arrsize(kTlsCreatePattern),
+                                           0x93F76)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTlsCreate, this->orgTlsCreate}, "tls-create");
+        }
+        if (const auto from = resolveProbe("tls-swinit", kTlsSwInitPattern, kTlsSwInitPatternMask,
+                                           arrsize(kTlsSwInitPattern), 0x95E9F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTlsSwInit, this->orgTlsSwInit}, "tls-swinit");
         }
     }
 
