@@ -820,7 +820,21 @@ UInt32 X5000HWLibs::wrapBgmQuery(void* const a, void* const b, void* const c)
 UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
 {
     const UInt32 ret = FunctionCast(wrapBgmStep4, singleton().orgBgmStep4)(a);
-    nredNoteBgmStep("bgm-step4", reinterpret_cast<UInt64>(a), 0, 0, ret);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        // `0x2aa5bc` 的判据：读 `*(UInt32*)(obj+0x14)` 作为"模式"，只接受 1/2/3，否则返回 1（失败）。
+        UInt32 mode = 0;
+        UInt64 inner = 0, f2fa8 = 0, f2fb8 = 0;
+        if (a != nullptr) {
+            mode = *reinterpret_cast<UInt32*>(reinterpret_cast<UInt8*>(a) + 0x14);
+            inner = *reinterpret_cast<UInt64*>(a);
+            f2fa8 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(a) + 0x2fa8);
+            f2fb8 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(a) + 0x2fb8);
+        }
+        SYSLOG("HWLibs", "bgm-step4: obj=%llx inner=%llx mode=%u f2fa8=%llx f2fb8=%llx ret=%u",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)), static_cast<unsigned long long>(inner),
+               static_cast<unsigned>(mode), static_cast<unsigned long long>(f2fa8),
+               static_cast<unsigned long long>(f2fb8), static_cast<unsigned>(ret));
+    }
     return ret;
 }
 
