@@ -39,6 +39,7 @@
 #define NRed_NvMsgBuf_hpp
 
 #include <libkern/libkern.h>
+#include <kern/thread_call.h>      // thread_call_allocate / thread_call_enter_delayed（延迟落盘）
 
 #include <Headers/kern_util.hpp>   // SYSLOG
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（Lilu 导出的内核态写文件接口）
@@ -136,21 +137,46 @@ namespace NvMsgBuf {
 	}
 
 	// ── 落盘（L2）：把 msgbuf 尾部快照写进 APFS 卷，供 Manjaro 侧只读读回 ─────────────
-	//  ⛔ 不 panic、不打断流程：只"读内存 + 写文件"。失败静默（仅 SYSLOG 一行）。
-	//  依赖：根文件系统已挂载（约启动 10 秒后）。
-	//  依据与审查：docs/NVRAM观测通道方案与风险评估.md §6.1（L2 实现细节 + 自审）。
-	static constexpr const char *kDumpPath = "/private/var/log/NRedObserve.txt";
+	//  ⛔ 不 panic、不打断流程：只"读内存 + 写文件"。
+	//  ⚠️ 关键约束（2026-09-27 round14 实测）：**写文件的前提是根文件系统已挂载**；
+	//     `Controller::powerUp`（≈11.8 s）与 `liludump=10` 都**早于挂载** ⇒ 那次两者同时失败。
+	//  ⇒ 改为**延迟落盘**（与 Lilu 的 `debugDumpCall` 同款 `thread_call` 机制），并在**多个时间点
+	//     各写一个文件**，用**一次引导**定出"最早可行时刻"（文件存在 = 该时刻已可用）。
+	static constexpr int kDumpCount = 3;
+	static const char *kDumpPaths[kDumpCount] = {
+		"/private/var/log/NRedObserve-20s.txt",
+		"/private/var/log/NRedObserve-40s.txt",
+		"/private/var/log/NRedObserve-60s.txt",
+	};
+	static const UInt32 kDumpSecs[kDumpCount] = {20, 40, 60};
 
-	// 返回是否写成功；调用方**不需要**处理失败（静默即可）。
-	inline bool flushToDisk() {
+	// 命名空间作用域静态（内核不支持函数内 static 对象）
+	static thread_call_t gDumpCalls[kDumpCount] = {nullptr, nullptr, nullptr};
+
+	// 单个时刻的落盘（由 thread_call 调度；**不在 panic 路径上、不阻塞调用者**）
+	inline void dumpAtTime(thread_call_param_t param0, thread_call_param_t) {
+		const int idx = static_cast<int>(reinterpret_cast<uintptr_t>(param0));
+		if (idx < 0 || idx >= kDumpCount) return;
 		const int n = dumpTail(8192, 0);   // 复用已实测的 8 KB 快照
-		if (n <= 0) return false;          // 通道不可用 ⇒ 静默返回
-		const int err = FileIO::writeBufferToFile(kDumpPath, gBuf, static_cast<size_t>(n));
-		if (err != 0) {
-			SYSLOG("NvMsgBuf", "flushToDisk failed (%d)", err);
-			return false;
+		if (n <= 0) return;                // 通道不可用 ⇒ 静默
+		const int err = FileIO::writeBufferToFile(kDumpPaths[idx], gBuf, static_cast<size_t>(n));
+		if (err != 0)
+			SYSLOG("NvMsgBuf", "dump@%us failed (%d)", kDumpSecs[idx], err);
+	}
+
+	// 在"安全位置"调用一次：安排 20/40/60 秒三个落盘点（幂等）
+	inline void scheduleDumps() {
+		for (int i = 0; i < kDumpCount; i++) {
+			if (gDumpCalls[i] == nullptr)
+				gDumpCalls[i] = thread_call_allocate(dumpAtTime,
+				    reinterpret_cast<thread_call_param_t>(static_cast<uintptr_t>(i)));
+			if (gDumpCalls[i] != nullptr) {
+				const uint64_t ns = static_cast<uint64_t>(kDumpSecs[i]) * 1000000000ULL;
+				uint64_t abs = 0;
+				nanoseconds_to_absolutetime(ns, &abs);
+				thread_call_enter_delayed(gDumpCalls[i], mach_absolute_time() + abs);
+			}
 		}
-		return true;
 	}
 }
 

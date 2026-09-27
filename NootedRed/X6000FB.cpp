@@ -1141,11 +1141,14 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     // ─── 静默落盘（门控 `-NRedObserveDisk`，默认关闭）─────────────────────────────
     //  目的：**不打断流程**地把内核 console（含我们驱动的 DBGLOG）落到 APFS 卷，Manjaro 侧用
     //        `apfs-fuse` 只读读回。它取代"主动 panic 取数"（后者会打断流程、掩盖成功）。
-    //  依据：docs/NVRAM观测通道方案与风险评估.md §6.1（L2）；红线见 docs/测试与验证设计.md §3.5。
-    //  安全：只"读内存 + 写文件"，**不 panic**、失败静默；写在苹果函数调用之前，故成功/失败都能留下文件。
+    //  实现：**延迟落盘**（`thread_call`，与 Lilu 的 `debugDumpCall` 同款）——因为在
+    //        `Controller::powerUp`（≈11.8 s）时**根文件系统往往尚未挂载**（round14 实测：该写点
+    //        与 `liludump=10` 同时失败）。这里安排 20/40/60 秒三个落盘点，用**一次引导**定出
+    //        "最早可行时刻"。
+    //  安全：只"读内存 + 写文件"，**不 panic**、不阻塞调用者、失败静默。
     //  ⚠️ 仅 1 次 Apple 函数调用（`checkKernelArgument` 内部即 `PE_parse_boot_argn`）。
     if (checkKernelArgument("-NRedObserveDisk"))
-        NvMsgBuf::flushToDisk();
+        NvMsgBuf::scheduleDumps();
 
     // ─── 内核 console（msgbuf）快照探针（门控 `-NRedMsgDump [-NRedMsgDump8k] [-NRedMsgOff1..3]`）──
     //  目标/载体/读取侧依据见 NvMsgBuf.hpp 头部与 docs/子任务/第九步执行记录（观测通道与内核日志快照）。
