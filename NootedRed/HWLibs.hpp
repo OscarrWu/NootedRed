@@ -56,6 +56,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgSmuInitFunctionPointerList{0};
     mach_vm_address_t                                            orgSmu90SendMessageWithParameter{0};
     mach_vm_address_t                                            orgGcSetFwEntryInfo{0};
+    mach_vm_address_t                                            orgTtlQuery{0};   // 第八步观测：TTL 的跨 kext 查询函数（HWLibs vm 0x90ddc）
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
     CAILResult (*smuCosWaitFor)(void* ctx, CosWaitForFunc* func, void* handle, UInt32 duration){nullptr};
@@ -84,6 +85,7 @@ private:
     static CAILResult pspSecurityFeatureCapsSet10(void* ctx);
     static CAILResult pspSecurityFeatureCapsSet12(void* ctx);
     static CAILResult wrapPspCmdKmSubmit(void* ctx, void* cmd, void* outData, void* outResponse);
+    static void*      wrapTtlQuery(void* buf, UInt32 id, UInt32 flags, UInt64* out);   // 第八步观测（TTL 查询）
     CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
     static CAILResult smuInternalSwInit(void* ctx, void* input, AMDSMUSWInitOutput* output);

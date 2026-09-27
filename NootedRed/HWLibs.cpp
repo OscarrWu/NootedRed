@@ -262,6 +262,12 @@ static const UInt8 kCreateFirmwarePatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 
 static const UInt8 kPutFirmwarePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x83, 0xFE, 0x08, 0x7F};
 
+// 第八步观测：TTL 的跨 kext 查询函数（HWLibs 归零 vm 0x90ddc；`0x8b5de` 内三次调用它 =
+//  失败出口 2 的判据）。入口字节：push rbp; mov rsp,rbp; push r15/r14/r13/r12/rbx; sub …
+static const UInt8 kTtlQueryPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
+                                         0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x38, 0x48, 0x85, 0xFF,
+                                         0x0F, 0x84, 0xBB, 0x00};
+
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                                                         0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
@@ -571,6 +577,21 @@ X5000HWLibs::X5000HWLibs()
     }
 }
 
+// 第八步观测（2026-09-28）：TTL 的跨 kext 查询函数（HWLibs 归零 vm `0x90ddc`）。
+//  依据（子 agent `TtlExits` 的逐出口分析）：`0x8b10e` 的失败出口 2 = "`0x8b5de` 内的三次
+//  `0x90ddc` 查询（ID = 0x228 / 0x320 / 8）返回 NULL"；真机该步以 `status = 4` 失败。
+//  本 wrapper **只记录入参 ID 与返回值**（不改变行为、不调用 Apple 方法）。
+void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 flags, UInt64* const out)
+{
+    void* const ret = FunctionCast(wrapTtlQuery, singleton().orgTtlQuery)(buf, id, flags, out);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "ttl query: id=%u flags=%u ret=%llx out=%llx", static_cast<unsigned>(id),
+               static_cast<unsigned>(flags), static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
+               static_cast<unsigned long long>((out != nullptr) ? *out : 0));
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -753,6 +774,18 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
 
     PANIC_COND(!patcher.routeMultiple(id, dmcuFwRequests, slide, size), "HWLibs",
                "Failed to route DMCU FW-related functions");
+
+    // 第八步观测（2026-09-28）：route TTL 的跨 kext 查询函数（无符号名 ⇒ 用 pattern）。
+    //  ⚠️ 失败**不 panic**（只记 SYSLOG）：pattern 失配不应打断启动。
+    {
+        PenguinWizardry::PatternRouteRequest ttlReq{"", wrapTtlQuery, this->orgTtlQuery, kTtlQueryPattern};
+        if (!ttlReq.route(patcher, id, slide, size)) {
+            SYSLOG("HWLibs", "ttl-query: failed to route (pattern miss)");
+        }
+        else {
+            DBGLOG("HWLibs", "ttl-query: routed");
+        }
+    }
 
     PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "HWLibs",
                "Failed to enable kernel writing");
