@@ -1150,6 +1150,8 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             want = 1024;
         else if (checkKernelArgument("-NRedMsgDump4k"))
             want = 4096;
+        else if (checkKernelArgument("-NRedMsgDump6k"))
+            want = 6144;   // ★ 留出分片余量（8 KB 会恰好占满 14 片，再多一点就要第 15 片 ⇒ 卡住）
         else if (checkKernelArgument("-NRedMsgDump8k"))
             want = 8192;
         else if (checkKernelArgument("-NRedMsgDump16k"))
