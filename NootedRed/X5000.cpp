@@ -1121,6 +1121,21 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                static_cast<unsigned long long>(f1e88), static_cast<unsigned long long>(f368),
                static_cast<unsigned long long>(f1f28), static_cast<unsigned long long>(f1f30),
                static_cast<unsigned long long>(f1a68), static_cast<unsigned long long>(f1a40));
+        // `configureDevice` 在 `0x360f` 检查"按 `*(0x1ed118)` 这个键查到的条目首字段 != 0"，
+        //  失败即 `0x3620: r15d = 0`（= 返回 false）。此处用已知 vtable 的链接地址推 KASLR slide，
+        //  **只读**该 __got 项与其指向对象的 C 字符串指针（不解引用字符串，零风险）。
+        if (s >= 0xffffff7f80000000ULL && *(reinterpret_cast<const UInt64*>(s)) >= 0xffffff7f80000000ULL) {
+            const UInt64 slide  = *reinterpret_cast<const UInt64*>(s) - 0x4D24B70ULL;    // accelerator vtable
+            const UInt64 gotAbs = 0x4D24118ULL + slide;                                  // 0x1ED118 的 kc 绝对
+            UInt64       got = 0, keyStr = 0;
+            if (gotAbs >= 0xffffff7f80000000ULL) {
+                got = *reinterpret_cast<const UInt64*>(gotAbs);
+                if (got >= 0xffffff8000000000ULL) { keyStr = *reinterpret_cast<const UInt64*>(got + 0x18); }
+            }
+            SYSLOG("X5000", "cfgdev key: slide=%llx gotAbs=%llx got=%llx keyStr=%llx",
+                   static_cast<unsigned long long>(slide), static_cast<unsigned long long>(gotAbs),
+                   static_cast<unsigned long long>(got), static_cast<unsigned long long>(keyStr));
+        }
     }
     return ret;
 }
