@@ -580,14 +580,19 @@ X5000HWLibs::X5000HWLibs()
 // 第八步观测（2026-09-28）：TTL 的跨 kext 查询函数（HWLibs 归零 vm `0x90ddc`）。
 //  依据（子 agent `TtlExits` 的逐出口分析）：`0x8b10e` 的失败出口 2 = "`0x8b5de` 内的三次
 //  `0x90ddc` 查询（ID = 0x228 / 0x320 / 8）返回 NULL"；真机该步以 `status = 4` 失败。
-//  本 wrapper **只记录入参 ID 与返回值**（不改变行为、不调用 Apple 方法）。
+//  本 wrapper **只记录入参 ID、返回值与 out 缓冲区内容**（不改变行为、不调用 Apple 方法）。
+//  2026-09-28 run149 实测：8 次调用（id=552/800/8/680/16/1992/168/104）**全部返回非空指针**，
+//  但 `ttl_initialize` 仍以 `status = 4` 失败 ⇒ 判决点在查询**之后** ⇒ 需看 out 里写回的数据是否有效。
 void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 flags, UInt64* const out)
 {
     void* const ret = FunctionCast(wrapTtlQuery, singleton().orgTtlQuery)(buf, id, flags, out);
     if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "ttl query: id=%u flags=%u ret=%llx out=%llx", static_cast<unsigned>(id),
+        UInt64 v0 = 0, v1 = 0;
+        if (out != nullptr) { v0 = out[0]; v1 = out[1]; }   // 实测各调用点的缓冲区间隔 0xE8 字节，读 16 字节安全
+        SYSLOG("HWLibs", "ttl query: id=%u flags=%u ret=%llx out=%llx v0=%llx v1=%llx", static_cast<unsigned>(id),
                static_cast<unsigned>(flags), static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
-               static_cast<unsigned long long>((out != nullptr) ? *out : 0));
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(out)), static_cast<unsigned long long>(v0),
+               static_cast<unsigned long long>(v1));
     }
     return ret;
 }
