@@ -59,9 +59,9 @@ namespace NvMsgBuf {
 	// 命名空间作用域静态缓冲（内核不支持函数内静态对象——需 guard variable）
 	static char gBuf[kMaxDump + 1];
 
-	// 注：数值型 boot-arg 的解析放在**调用方**（X6000FB.cpp）—— 那里已通过既有头文件
-	//     获得 `PE_parse_boot_argn` 的声明；在本文件自行声明会与之冲突（CI run #117：
-	//     `error: conflicting types for 'PE_parse_boot_argn'`）。
+	// 注：长度/偏移的取值放在**调用方**（X6000FB.cpp），且用 **flag 档位**表达 ——
+	//     刻意不使用数值 boot-arg：`PE_parse_boot_argn` 是 Apple 的 pexpert 函数，
+	//     在探针里调用它会导致 panic 流程无法完成（2026-09-27 第 9 轮实测）。
 
 	// 通道元信息（供 panic 头一并带出）：用于判断"缓冲是否被扩大（`msgbuf=` 是否生效）"与写指针位置。
 	struct ChannelInfo {

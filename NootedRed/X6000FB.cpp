@@ -1154,14 +1154,24 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
                  : checkKernelArgument("-NRedMsgDump4k")  ? 4096
                  : checkKernelArgument("-NRedMsgDump1k")  ? 1024 : 512;
         int off = 0;
-        // 允许用数值 boot-arg 覆盖（`nredmsg_len=<n>` / `nredmsg_off=<n>`，不带前导 '-'）：
-        // 由此可在**不重新构建**的前提下，用多次引导分段覆盖内核日志历史。
-        // 注：`PE_parse_boot_argn` 的声明由本文件已 include 的头文件提供（见 CI run #117），
-        //     不要在别处重复声明，否则类型冲突。
-        int arg = 0;
-        if (PE_parse_boot_argn("nredmsg_len", &arg, sizeof(arg)) && arg > 0) want = arg;
-        arg = 0;
-        if (PE_parse_boot_argn("nredmsg_off", &arg, sizeof(arg)) && arg >= 0) off = arg;
+        // 偏移用 **flag 档位**表达（每档 8 KB），**刻意不用数值 boot-arg**：
+        // ⛔ 原因（2026-09-27 第 9 轮实测）：`PE_parse_boot_argn` 是 Apple 的 pexpert 函数，
+        //    在探针里调用它 ⇒ 快照头正常但**机器不自动重启**（panic 流程无法完成）。
+        //    这与第 15 轮"探针里禁调 Apple 函数"同源 ⇒ 只用 Lilu 的 `checkKernelArgument`（读缓存的 boot-args）。
+        if (checkKernelArgument("-NRedMsgOff1"))
+            off = 8192;
+        else if (checkKernelArgument("-NRedMsgOff2"))
+            off = 16384;
+        else if (checkKernelArgument("-NRedMsgOff3"))
+            off = 24576;
+        else if (checkKernelArgument("-NRedMsgOff4"))
+            off = 32768;
+        else if (checkKernelArgument("-NRedMsgOff5"))
+            off = 40960;
+        else if (checkKernelArgument("-NRedMsgOff6"))
+            off = 49152;
+        else if (checkKernelArgument("-NRedMsgOff7"))
+            off = 57344;
         const auto ci = NvMsgBuf::channelInfo();
         const int dn = NvMsgBuf::dumpTail(want, off);
         panic("NRed msgdump ok=%d size=%d bufx=%d len=%d off=%d n=%d:\n%s",
