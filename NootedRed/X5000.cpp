@@ -877,6 +877,17 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
         f148Before  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(sBefore) + 0x1F48);
     }
 
+    // 诊断/修复实验（门控 `-NRedRestoreF140`，默认关闭）：基类 `IOGraphicsAccelerator2::start`
+    //  在 `configureDevice` 失败后会**清理** `this+0x1f40`（framebuffer 服务）；而该值此前已被
+    //  `configureDevice` 成功查到（真机非 0）⇒ 这里把它**恢复**回去，使 X5000 的 `start` 能走到
+    //  "注册段"（判据：`accel drvr probe` 是否出现 / `controller+0x7960` 是否非 0 / IRI 是否成功）。
+    //  ⚠️ 实验：写入的是 Apple 自己查到的指针（不构造对象、不调用任何 Apple 方法）。
+    if (checkKernelArgument("-NRedRestoreF140") && sBefore >= 0xffffff7f80000000ULL && f140Before == 0 &&
+        gLastF140 != 0) {
+        *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(sBefore) + 0x1F40) = gLastF140;
+        SYSLOG("X5000", "accel start: restored f140 = %llx", static_cast<unsigned long long>(gLastF140));
+    }
+
     const auto ret = FunctionCast(wrapAccelStart, singleton().orgAccelStart)(self, provider);
 
     const UInt64 s = reinterpret_cast<UInt64>(self);
@@ -1090,6 +1101,10 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 //  ⇒ `this+0x1f40` **从未被设置** ⇒ 注册段跳过 ⇒ `start` 返回失败。
 //  本组探针回答"configureDevice 是否被调用、initLinkToPeer 查到什么、返回值如何"。
 //  只读字段 + 记录入参/返回值；落盘通道（`-NRedAccelLog`），hook 无条件安装。
+// 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
+//  供 `start` 入口恢复（该值随后会被基类 `IOGraphicsAccelerator2::start` 的失败清理清空）。
+static UInt64 gLastF140 = 0;
+
 UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
 {
     const UInt64 s = reinterpret_cast<UInt64>(self);
@@ -1151,6 +1166,7 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
         f1a68 = load64(s, 0x1A68);
         f1a40 = load64(s, 0x1A40);
     }
+    if (f140 >= 0xffffff7f80000000ULL) { gLastF140 = f140; }   // 供 `start` 入口恢复
     if (checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("X5000",
                "cfgdev exit: ret=%llu f140=%llx f1e88=%llx f368=%llx f1f28=%llx f1f30=%llx f1a68=%llx f1a40=%llx",
