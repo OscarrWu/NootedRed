@@ -1155,10 +1155,17 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
                  : checkKernelArgument("-NRedMsgDump1k")  ? 1024 : 512;
         int off = 0;
         // 允许用数值 boot-arg 覆盖（`nredmsg_len=<n>` / `nredmsg_off=<n>`，不带前导 '-'）：
-        // 由此可在**不重新构建**的前提下，用多次引导分段覆盖 128 KB 历史内核日志。
-        NvMsgBuf::applyBootArgs(want, off);
+        // 由此可在**不重新构建**的前提下，用多次引导分段覆盖内核日志历史。
+        // 注：`PE_parse_boot_argn` 的声明由本文件已 include 的头文件提供（见 CI run #117），
+        //     不要在别处重复声明，否则类型冲突。
+        int arg = 0;
+        if (PE_parse_boot_argn("nredmsg_len", &arg, sizeof(arg)) && arg > 0) want = arg;
+        arg = 0;
+        if (PE_parse_boot_argn("nredmsg_off", &arg, sizeof(arg)) && arg >= 0) off = arg;
+        const auto ci = NvMsgBuf::channelInfo();
         const int dn = NvMsgBuf::dumpTail(want, off);
-        panic("NRed msgdump len=%d off=%d n=%d:\n%s", want, off, dn, NvMsgBuf::gBuf);
+        panic("NRed msgdump ok=%d size=%d bufx=%d len=%d off=%d n=%d:\n%s",
+              ci.ok, ci.size, ci.bufx, want, off, dn, NvMsgBuf::gBuf);
     }
 
     // ─── `probe` 所需属性名探针（门控 `-NRedAccelExist3`，默认关闭）─────────────────

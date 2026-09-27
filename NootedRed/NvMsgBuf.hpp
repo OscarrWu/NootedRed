@@ -59,20 +59,26 @@ namespace NvMsgBuf {
 	// 命名空间作用域静态缓冲（内核不支持函数内静态对象——需 guard variable）
 	static char gBuf[kMaxDump + 1];
 
-	// 数值型 boot-arg 解析（XNU 导出符号；仅声明，避免引入头文件依赖）
-	// ⚠️ 必须在 namespace 作用域声明：函数内的 `extern "C"` 声明会被 clang 拒绝
-	//    （CI run #116：`error: expected unqualified-id`）。
-	extern "C" int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, unsigned int max_arg_size);
+	// 注：数值型 boot-arg 的解析放在**调用方**（X6000FB.cpp）—— 那里已通过既有头文件
+	//     获得 `PE_parse_boot_argn` 的声明；在本文件自行声明会与之冲突（CI run #117：
+	//     `error: conflicting types for 'PE_parse_boot_argn'`）。
 
-	// 用 boot-arg 覆盖"长度 / 偏移"（两者是同一引导内的独立变量，便于分段覆盖历史日志）：
-	//   nredmsg_len=<字节>   取多长（会被 kMaxDump 截断）
-	//   nredmsg_off=<字节>   从"距写指针多少字节"处开始往前取（0 = 紧贴尾部）
-	// 注意：boot-arg 名**不带**前导 '-'，形如 `nredmsg_off=16384`。
-	inline void applyBootArgs(int &len, int &off) {
-		int v = 0;
-		if (PE_parse_boot_argn("nredmsg_len", &v, sizeof(v)) && v > 0) len = v;
-		v = 0;
-		if (PE_parse_boot_argn("nredmsg_off", &v, sizeof(v)) && v >= 0) off = v;
+	// 通道元信息（供 panic 头一并带出）：用于判断"缓冲是否被扩大（`msgbuf=` 是否生效）"与写指针位置。
+	struct ChannelInfo {
+		int ok;      // magic 校验是否通过
+		int size;    // msgbuf 当前容量（默认 128 KB；`msgbuf=1048576` 可扩到 1 MB）
+		int bufx;    // 写指针当前值
+	};
+
+	inline ChannelInfo channelInfo() {
+		ChannelInfo ci {};
+		auto p = msgbufp;
+		if (p != nullptr && p->magic == kMagic) {
+			ci.ok = 1;
+			ci.size = p->size;
+			ci.bufx = p->bufx;
+		}
+		return ci;
 	}
 
 	// 把 msgbuf 中"距写指针 off 字节、长度 len 字节"的区间拷进 gBuf：
