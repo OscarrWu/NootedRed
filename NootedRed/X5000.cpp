@@ -848,6 +848,15 @@ void X5000::fixedGetSurfaceInfo(AMDRadeonX5000_AMDHWAlignManager* const self, AM
 //  安全：只读对象字段，不调用任何 Apple 方法；门控 `-NRedAccelProbe`（默认不安装本 hook）。
 bool X5000::wrapAccelStart(void* const self, void* const provider)
 {
+    // 入口读数（before）：`start` 会自行设置 `0x368`/`0x1e88` ⇒ 与出口对比可区分
+    //  "从未设置"与"设置了又被清零"（真机出口 f368=0、f1e88 含 bit6 ⇒ 需 before 判定）。
+    const UInt64 sBefore = reinterpret_cast<UInt64>(self);
+    UInt64       f368Before = 0, f1e88Before = 0;
+    if (sBefore >= 0xffffff7f80000000ULL) {
+        f368Before  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(sBefore) + 0x368);
+        f1e88Before = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(sBefore) + 0x1E88);
+    }
+
     const auto ret = FunctionCast(wrapAccelStart, singleton().orgAccelStart)(self, provider);
 
     const UInt64 s = reinterpret_cast<UInt64>(self);
@@ -880,10 +889,11 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
                static_cast<unsigned long long>(vRet), static_cast<unsigned long long>(f140),
                static_cast<unsigned long long>(f148), static_cast<unsigned long long>(f158),
                static_cast<unsigned long long>(f160));
-        SYSLOG("X5000", "accel start extra: f368=%llx f1e88=%llx f1e98=%llx f1ea0=%llx f1ea8=%llx",
+        SYSLOG("X5000", "accel start extra: f368=%llx f1e88=%llx f1e98=%llx f1ea0=%llx f1ea8=%llx | before f368=%llx f1e88=%llx",
                static_cast<unsigned long long>(f368), static_cast<unsigned long long>(f1e88),
                static_cast<unsigned long long>(f1e98), static_cast<unsigned long long>(f1ea0),
-               static_cast<unsigned long long>(f1ea8));
+               static_cast<unsigned long long>(f1ea8), static_cast<unsigned long long>(f368Before),
+               static_cast<unsigned long long>(f1e88Before));
     }
 
     // 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；高风险，慎用）。格式串未改（已投产）。
