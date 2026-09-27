@@ -268,6 +268,35 @@ static const UInt8 kTtlQueryPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x4
                                          0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x38, 0x48, 0x85, 0xFF,
                                          0x0F, 0x84, 0xBB, 0x00};
 
+// 第八步观测（2026-09-28 第十九轮）：定位 TTL 初始化 `0x8b10e` 的失败出口。
+//  `0x8b10e` 共 6 条出口，离线已排除 A（`0x90d75` 校验失败⇒将不做任何查询，与实测的 8 次查询矛盾）
+//  与 B（`0x8b5de` 返回 NULL⇒但其内部的 3 次查询实测均成功）。剩余候选即下面 4 个函数：
+//    C: `0xa1c3c` 返回 NULL → 出口 `0x8b3d4`
+//    D: `0xa285f` 返回 false → 出口 `0x8b3cc`（校验 `arg1[0x30]+0x28`）
+//    F: `0x93880` 返回 NULL → 出口 `0x8b3cc`
+//    G: `0x928f4` 返回 NULL → 出口 `0x8b416` → `0x938a5` → 出口 `0x8b3cc`
+static const UInt8 kTtlInitCollectPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
+                                               0x48, 0x81, 0xEC, 0x30, 0x03, 0x00, 0x00, 0x49, 0x89, 0xFE, 0x48,
+                                               0x8D, 0xBD, 0xE0, 0xFD, 0xFF, 0xFF, 0xBE, 0xF0, 0x01, 0x00};
+static const UInt8 kTtlInitAllocAPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x53, 0x50, 0x48, 0x89, 0xFB, 0xE8, 0x00,
+                                               0x00, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x74, 0x03, 0x48, 0x89, 0x18,
+                                               0x48, 0x83, 0xC4, 0x08, 0x5B, 0x5D, 0xC3, 0x55, 0x48, 0x89};
+static const UInt8 kTtlInitAllocAPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+                                                  0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                                  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static const UInt8 kTtlInitAllocBPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x49,
+                                               0x89, 0xFE, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x48, 0x89, 0xC3, 0x48,
+                                               0x85, 0xC0, 0x74, 0x51, 0x49, 0x89, 0xC7, 0x48, 0x8B, 0x7B};
+static const UInt8 kTtlInitAllocBPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                                  0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+                                                  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static const UInt8 kTtlInitCheckDPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x53, 0x50, 0x48, 0x89, 0xF3, 0xE8, 0x00,
+                                               0x00, 0x00, 0x00, 0x48, 0x89, 0xC1, 0xB0, 0x01, 0x48, 0x85, 0xDB,
+                                               0x74, 0x2F, 0x48, 0x85, 0xC9, 0x74, 0x2A, 0x48, 0x8B, 0x53};
+static const UInt8 kTtlInitCheckDPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+                                                  0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                                  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                                                         0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
@@ -597,6 +626,53 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
     return ret;
 }
 
+// 第八步观测（2026-09-28 第十九轮）：`0x8b10e` 的 4 个候选失败出口判据函数（**只读**，仅记录返回值）。
+//  签名依据（离线反汇编）：C `0xa1c3c(void*) -> void*`；F `0x93880(void*) -> void*`；
+//  G `0x928f4(void*) -> void*`；D `0xa285f(void* obj, void* param) -> bool`。
+void* X5000HWLibs::wrapTtlCollect(void* const ctx)
+{
+    void* const ret = FunctionCast(wrapTtlCollect, singleton().orgTtlCollect)(ctx);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "ttl-coll: ctx=%llx ret=%llx (NULL would fail 0x8b10e)",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
+    }
+    return ret;
+}
+
+void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
+{
+    void* const ret = FunctionCast(wrapTtlAllocA, singleton().orgTtlAllocA)(ctx);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "ttl-allocA: ctx=%llx ret=%llx (NULL -> exit 0x8b3d4)",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
+    }
+    return ret;
+}
+
+void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
+{
+    void* const ret = FunctionCast(wrapTtlAllocB, singleton().orgTtlAllocB)(ctx);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "ttl-allocB: ctx=%llx ret=%llx (NULL -> exit 0x8b3cc)",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
+    }
+    return ret;
+}
+
+bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
+{
+    const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        SYSLOG("HWLibs", "ttl-checkD: obj=%llx param=%llx ret=%d (false -> exit 0x8b3cc)",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)), ret ? 1 : 0);
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -789,6 +865,54 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         }
         else {
             DBGLOG("HWLibs", "ttl-query: routed");
+        }
+    }
+
+    // 第八步观测（2026-09-28 第十九轮）：定位 TTL 初始化 `0x8b10e` 的失败出口（4 个候选判据函数）。
+    //  ⚠️ 安全策略：先用 `findPattern` 解出地址、**与预期偏移比对一致才挂 hook**——避免模式命中
+    //  错误位置而 patch 错函数；不一致只记日志、不挂（绝不影响启动）。
+    {
+        const auto resolveProbe = [&](const char* tag, const UInt8* pat, const UInt8* mask, const size_t n,
+                                      const mach_vm_address_t want) -> mach_vm_address_t
+        {
+            size_t offset = 0;
+            if (!KernelPatcher::findPattern(pat, mask, n, reinterpret_cast<const void*>(slide), size, &offset)) {
+                SYSLOG("HWLibs", "%s: pattern not found", tag);
+                return 0;
+            }
+            DBGLOG("HWLibs", "%s: pattern at offset 0x%zx (expected 0x%llx)", tag, offset,
+                   static_cast<unsigned long long>(want));
+            if (offset != want) {
+                SYSLOG("HWLibs", "%s: matched 0x%zx, expected 0x%llx -> skipped", tag, offset,
+                       static_cast<unsigned long long>(want));
+                return 0;
+            }
+            DBGLOG("HWLibs", "%s: resolved at expected offset", tag);
+            return slide + offset;
+        };
+        const auto hookProbe = [&](const mach_vm_address_t from, KernelPatcher::RouteRequest&& req,
+                                   const char* tag)
+        {
+            req.from = from;
+            if (patcher.routeMultiple(id, &req, 1, slide, size)) { DBGLOG("HWLibs", "%s: hooked", tag); }
+            else { SYSLOG("HWLibs", "%s: route failed", tag); }
+        };
+
+        if (const auto from = resolveProbe("ttl-coll", kTtlInitCollectPattern, kTtlInitCollectPatternMask,
+                                           arrsize(kTtlInitCollectPattern), 0x8B5DE)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlCollect, this->orgTtlCollect}, "ttl-coll");
+        }
+        if (const auto from = resolveProbe("ttl-allocA", kTtlInitAllocAPattern, kTtlInitAllocAPatternMask,
+                                           arrsize(kTtlInitAllocAPattern), 0x93880)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlAllocA, this->orgTtlAllocA}, "ttl-allocA");
+        }
+        if (const auto from = resolveProbe("ttl-allocB", kTtlInitAllocBPattern, kTtlInitAllocBPatternMask,
+                                           arrsize(kTtlInitAllocBPattern), 0x928F4)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlAllocB, this->orgTtlAllocB}, "ttl-allocB");
+        }
+        if (const auto from = resolveProbe("ttl-checkD", kTtlInitCheckDPattern, kTtlInitCheckDPatternMask,
+                                           arrsize(kTtlInitCheckDPattern), 0xA285F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlCheckD, this->orgTtlCheckD}, "ttl-checkD");
         }
     }
 
