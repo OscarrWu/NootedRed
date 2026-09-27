@@ -851,7 +851,7 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
     const auto ret = FunctionCast(wrapAccelStart, singleton().orgAccelStart)(self, provider);
 
     const UInt64 s = reinterpret_cast<UInt64>(self);
-    UInt64       f140 = 0, f148 = 0, f158 = 0, f160 = 0;
+    UInt64       f140 = 0, f148 = 0, f158 = 0, f160 = 0, f368 = 0, f1e88 = 0;
     if (s >= 0xffffff7f80000000ULL) {
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
             return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
@@ -860,6 +860,9 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
         f148 = load64(s, 0x1F48);
         f158 = load64(s, 0x1F58);
         f160 = load64(s, 0x1F60);
+        // f140 的查找起点与"曾设置成功"标志（离线：`0x3dae(self+0x368, 名字)` 成功后才 `orb $0x40,0x1e88`）
+        f368  = load64(s, 0x368);
+        f1e88 = load64(s, 0x1E88);
     }
     const UInt64 vRet  = ret ? 1 : 0;
     const UInt64 vProv = reinterpret_cast<UInt64>(provider);
@@ -871,6 +874,8 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
                static_cast<unsigned long long>(vRet), static_cast<unsigned long long>(f140),
                static_cast<unsigned long long>(f148), static_cast<unsigned long long>(f158),
                static_cast<unsigned long long>(f160));
+        SYSLOG("X5000", "accel start extra: f368=%llx f1e88=%llx", static_cast<unsigned long long>(f368),
+               static_cast<unsigned long long>(f1e88));
     }
 
     // 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；高风险，慎用）。格式串未改（已投产）。
@@ -953,6 +958,22 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
         SYSLOG("X5000", "ttl-stub: TTL=%llx TTL+0x578 <- %llx (fn=%llx)", static_cast<unsigned long long>(f338),
                static_cast<unsigned long long>(tableAddr),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(&ttlStubCallback)));
+    }
+
+    // 入口读数（与出口对比用）：`0x8b10e` 会**改写** `&TTL+0x50` 子结构 ⇒ 若某字段调用前后
+    //  完全不变，说明"写它的那一步"没被走到，即可反推失败步。
+    if (checkKernelArgument("-NRedTtlLog") && isKernelPtr(f338)) {
+        auto ld32 = [](UInt64 b, UInt64 o) -> UInt32 {
+            return *reinterpret_cast<const UInt32*>(reinterpret_cast<const UInt8*>(b) + o);
+        };
+        SYSLOG("X5000",
+               "ttl before: t50=%x t54=%x t58=%llx t60=%llx t68=%llx t1a0=%llx t4e0=%llx t4a0=%llx t88=%x ta0=%llx",
+               static_cast<unsigned int>(ld32(f338, 0x50)), static_cast<unsigned int>(ld32(f338, 0x54)),
+               static_cast<unsigned long long>(load64(f338, 0x58)), static_cast<unsigned long long>(load64(f338, 0x60)),
+               static_cast<unsigned long long>(load64(f338, 0x68)), static_cast<unsigned long long>(load64(f338, 0x1A0)),
+               static_cast<unsigned long long>(load64(f338, 0x4E0)), static_cast<unsigned long long>(load64(f338, 0x4A0)),
+               static_cast<unsigned int>(ld32(f338, 0x88)),
+               static_cast<unsigned long long>(load64(f338, 0xA0)));
     }
 
     FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
