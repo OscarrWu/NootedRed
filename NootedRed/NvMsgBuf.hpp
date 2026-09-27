@@ -40,6 +40,9 @@
 
 #include <libkern/libkern.h>
 
+#include <Headers/kern_util.hpp>   // SYSLOG
+#include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（Lilu 导出的内核态写文件接口）
+
 // 内核消息环形缓冲（XNU bsd/kern/subr_log.c）。弱引用：未解析则为空，运行期判空。
 extern "C" {
 	struct NvMsgBufMeta {
@@ -62,6 +65,14 @@ namespace NvMsgBuf {
 	// 注：长度/偏移的取值放在**调用方**（X6000FB.cpp），且用 **flag 档位**表达 ——
 	//     刻意不使用数值 boot-arg：`PE_parse_boot_argn` 是 Apple 的 pexpert 函数，
 	//     在探针里调用它会导致 panic 流程无法完成（2026-09-27 第 9 轮实测）。
+
+	// ── 门控状态缓存（关键设计，2026-09-27）──────────────────────────────────────
+	//  ⛔ **不要在探针里调用 `checkKernelArgument`**：它内部就是 Apple 的 `PE_parse_boot_argn`
+	//     （Lilu `kern_util.hpp:432`，会拿锁/耗时）。实测：只要探针里做门控判断，就会出现
+	//     "panic 与快照都正常写出，但机器**不自动重启**"（第 8/9/11/12 轮；第 7 轮同样内容却成功）。
+	//  ✅ **正确姿势**：在 kext 早期、正常上下文里解析一次并存入下面两个标量；探针**只读标量**。
+	// 注：门控状态的**存储**放在单个 .cpp（`X6000FB.cpp` 的文件作用域静态），**不放在本头文件**——
+	//     头文件里的 `static` 会让每个包含它的翻译单元各持一份副本，造成读写不一致。
 
 	// 通道元信息（供 panic 头一并带出）：用于判断"缓冲是否被扩大（`msgbuf=` 是否生效）"与写指针位置。
 	struct ChannelInfo {
@@ -120,8 +131,26 @@ namespace NvMsgBuf {
 			if (++idx >= size) idx = 0;
 			gBuf[i] = (c == '\n' || c == '\t' || (c >= 32 && c < 127)) ? c : '.';
 		}
-		gBuf[len] = '\0';
-		return len;
+		gBuf[n] = '\0';
+		return n;
+	}
+
+	// ── 落盘（L2）：把 msgbuf 尾部快照写进 APFS 卷，供 Manjaro 侧只读读回 ─────────────
+	//  ⛔ 不 panic、不打断流程：只"读内存 + 写文件"。失败静默（仅 SYSLOG 一行）。
+	//  依赖：根文件系统已挂载（约启动 10 秒后）。
+	//  依据与审查：docs/NVRAM观测通道方案与风险评估.md §6.1（L2 实现细节 + 自审）。
+	static constexpr const char *kDumpPath = "/private/var/log/NRedObserve.txt";
+
+	// 返回是否写成功；调用方**不需要**处理失败（静默即可）。
+	inline bool flushToDisk() {
+		const int n = dumpTail(8192, 0);   // 复用已实测的 8 KB 快照
+		if (n <= 0) return false;          // 通道不可用 ⇒ 静默返回
+		const int err = FileIO::writeBufferToFile(kDumpPath, gBuf, static_cast<size_t>(n));
+		if (err != 0) {
+			SYSLOG("NvMsgBuf", "flushToDisk failed (%d)", err);
+			return false;
+		}
+		return true;
 	}
 }
 

@@ -1138,6 +1138,15 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
 
+    // ─── 静默落盘（门控 `-NRedObserveDisk`，默认关闭）─────────────────────────────
+    //  目的：**不打断流程**地把内核 console（含我们驱动的 DBGLOG）落到 APFS 卷，Manjaro 侧用
+    //        `apfs-fuse` 只读读回。它取代"主动 panic 取数"（后者会打断流程、掩盖成功）。
+    //  依据：docs/NVRAM观测通道方案与风险评估.md §6.1（L2）；红线见 docs/测试与验证设计.md §3.5。
+    //  安全：只"读内存 + 写文件"，**不 panic**、失败静默；写在苹果函数调用之前，故成功/失败都能留下文件。
+    //  ⚠️ 仅 1 次 Apple 函数调用（`checkKernelArgument` 内部即 `PE_parse_boot_argn`）。
+    if (checkKernelArgument("-NRedObserveDisk"))
+        NvMsgBuf::flushToDisk();
+
     // ─── 内核 console（msgbuf）快照探针（门控 `-NRedMsgDump [-NRedMsgDump8k] [-NRedMsgOff1..3]`）──
     //  目标/载体/读取侧依据见 NvMsgBuf.hpp 头部与 docs/子任务/第九步执行记录（观测通道与内核日志快照）。
     //  ⚠️ 设计约束（2026-09-27 实测）：Lilu 的 `checkKernelArgument` 内部**就是** Apple 的
