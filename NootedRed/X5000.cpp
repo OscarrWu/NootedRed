@@ -220,6 +220,19 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         }
     }
 
+    // 第八步观测（2026-09-28）：hook `AMDRTHardware::initializeTtl`（**无条件安装**；内部按
+    //  `-NRedTtlLog` 决定是否落盘输出）。只读内存字段、零行为改变 ⇒ 默认轮次也安全。
+    {
+        PenguinWizardry::PatternRouteRequest ttlIfaceReq{
+            "__ZN28AMDRadeonX5000_AMDRTHardware13initializeTtlEP16_GART_PARAMETERS", wrapInitializeTtl,
+            this->orgInitializeTtl};
+        if (!ttlIfaceReq.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "ttl-iface: failed to route AMDRTHardware::initializeTtl");
+        } else {
+            DBGLOG("X5000", "ttl-iface: routed AMDRTHardware::initializeTtl");
+        }
+    }
+
     // 第八步观测（第 15 轮）：**已移除** `probe` 的 hook —— 第 14 轮实测它**有副作用**
     //  （hook 后系统未再走到 PP 上电、直接跑到 userspace watchdog ⇒ 匹配阶段行为被改变）。
     //  ⇒ 改为纯被动取证：`DriverInjector::wrapAddDrivers` 只记录"注入的 personality 是否在数组里"，
@@ -867,6 +880,77 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
     }
 
     return ret;
+}
+
+// ─── 第八步观测（2026-09-28）：`AMDRTHardware::initializeTtl` 的运行时链路 ─────────
+//  依据（离线反汇编，见 📄 `kb/re/TTL-initialize失败根因报告.md`）：
+//   · 本函数（X5000，归零 VM `0x5e548`）就地构造 TTL 的入参结构：`+0x00`/`+0x08` = 两张回调表
+//     （在 `this+0x20670` / `this+0x20688` 构造），`+0x20` = `*_GART_PARAMETERS`，
+//     `+0x28` = `this+0x530`，`+0x30` = int；而 **`+0x10` 被清零后从未赋值**。
+//   · 随后它调 `*(this+0x338)`（HWLibs 的 TTL 类）的 `vtable[0x30]` = `TTL::initialize`；
+//     后者在「入参 `+0x10` == 0」时**直接返回 kIOReturnError**（未做任何实际工作）
+//     ⇒ `TTL+0x578`（该表副本）保持 0、`TTL+0x5a0`（已初始化标志）保持 0。
+//  本探针**只读内存字段、不调用任何 Apple 方法**，且 hook 无条件安装、内部才按门控输出；
+//  观测走落盘通道（`-NRedTtlLog`）⇒ 不打断流程，一轮即可取回。
+void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
+{
+    auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+        return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+    };
+    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
+
+    const UInt64 s = reinterpret_cast<UInt64>(self);
+    const UInt64 g = reinterpret_cast<UInt64>(gartParams);
+
+    UInt64 vt = 0, f338 = 0, f338vt = 0, slot30 = 0, f528 = 0, f530 = 0, f20690 = 0;
+    UInt64 g0 = 0, g8 = 0, g10 = 0;
+    if (isKernelPtr(s)) {
+        vt     = load64(s, 0x000);
+        f338   = load64(s, 0x338);
+        f528   = load64(s, 0x528);
+        f530   = load64(s, 0x530);
+        f20690 = load64(s, 0x20690);
+        if (isKernelPtr(f338)) {
+            f338vt = load64(f338, 0x000);
+            if (isKernelPtr(f338vt)) { slot30 = load64(f338vt, 0x30); }
+        }
+    }
+    if (isKernelPtr(g)) {
+        g0  = load64(g, 0x00);
+        g8  = load64(g, 0x08);
+        g10 = load64(g, 0x10);
+    }
+
+    FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
+
+    UInt64 ttl568 = 0, ttl570 = 0, ttl578 = 0, ttl580 = 0, ttl588 = 0, ttl590 = 0, ttl598 = 0, ttl5a0 = 0;
+    if (isKernelPtr(f338)) {
+        ttl568 = load64(f338, 0x568);
+        ttl570 = load64(f338, 0x570);
+        ttl578 = load64(f338, 0x578);    // ★ 失败判据：参数+0x10 的副本；== 0 即"零表早退"
+        ttl580 = load64(f338, 0x580);    // safeboot 标志
+        ttl588 = load64(f338, 0x588);    // = *(_GART_PARAMETERS)（nonlocalMemSizeLimitBytes）
+        ttl590 = load64(f338, 0x590);
+        ttl598 = load64(f338, 0x598);
+        ttl5a0 = load64(f338, 0x5A0);    // 已初始化标志（成功才为 1）
+    }
+
+    if (checkKernelArgument("-NRedTtlLog")) {
+        SYSLOG("X5000",
+               "ttl iface: self=%llx gart=%llx | vt=%llx f338=%llx f338vt=%llx slot30=%llx f528=%llx f530=%llx "
+               "f20690=%llx | g0=%llx g8=%llx g10=%llx | ttl568=%llx ttl570=%llx ttl578=%llx ttl580=%llx ttl588=%llx "
+               "ttl590=%llx ttl598=%llx ttl5a0=%llx",
+               static_cast<unsigned long long>(s), static_cast<unsigned long long>(g),
+               static_cast<unsigned long long>(vt), static_cast<unsigned long long>(f338),
+               static_cast<unsigned long long>(f338vt), static_cast<unsigned long long>(slot30),
+               static_cast<unsigned long long>(f528), static_cast<unsigned long long>(f530),
+               static_cast<unsigned long long>(f20690), static_cast<unsigned long long>(g0),
+               static_cast<unsigned long long>(g8), static_cast<unsigned long long>(g10),
+               static_cast<unsigned long long>(ttl568), static_cast<unsigned long long>(ttl570),
+               static_cast<unsigned long long>(ttl578), static_cast<unsigned long long>(ttl580),
+               static_cast<unsigned long long>(ttl588), static_cast<unsigned long long>(ttl590),
+               static_cast<unsigned long long>(ttl598), static_cast<unsigned long long>(ttl5a0));
+    }
 }
 
 // 第八步观测（第 14 轮）：`probe` 的结果**不在原地 panic**（第 13 轮实测：匹配阶段 panic 太早，
