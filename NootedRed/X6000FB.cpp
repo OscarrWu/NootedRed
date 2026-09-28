@@ -982,7 +982,15 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                     }
                 }
             }
-
+            // ★ 读数主通道（2026-09-28 第 25/26 轮教训）：**SYSLOG → Lilu 日志**，且**无条件**。
+            //   实测该通道覆盖到 powerUp 时刻（同轮 `ip:` 行就在 `Lilu_1.7.2_*.txt` 里），而
+            //   自建落盘在此刻不可靠（PP 探针无产出、IP 探针却成功）。本函数每启动至多被调用
+            //   3 次 ⇒ 不挤日志缓冲。**故意不挂在任何 boot-arg 门控下**：门控判定在本文件里
+            //   曾观察到与 HWLibs 侧不一致的行为，而这条读数只有 5 个字段，成本可忽略。
+            SYSLOG("X6000FB", "pp-ttl: ttl=%llx vt=%llx [0]=%llx [8]=%llx [10]=%llx",
+                   static_cast<unsigned long long>(hsD8), static_cast<unsigned long long>(ttlVt),
+                   static_cast<unsigned long long>(ttl_0), static_cast<unsigned long long>(ttl_8),
+                   static_cast<unsigned long long>(ttl_10));
             // ─── 加速器加载前置判据（门控 `-NRedAccelProbe`）────────────────────
             //  依据（2026-09-26 离线取证）：Apple 的 `AmdGpuWrangler::vendor_doDeviceAttribute`
             //  （Framebuffer VM 0x44b0c）把三个属性写到 provider 上：LoadHWServices /
