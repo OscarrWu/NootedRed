@@ -357,6 +357,16 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
             || checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")) {
             KernelPatcher::RouteRequest pphRequest{"__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv",
                                                   wrapPpHelperPowerUp, this->orgPpHelperPowerUp};
+            // 自检（2026-09-28）：PP 侧落盘通道是否可用（与 HWLibs 侧同一判据）；结果进 L2（此刻 ~23s）
+            {
+                static char ppSelf[] = "pp-selftest\n";
+                const int e = (rootvnode != nullptr)
+                                  ? FileIO::writeBufferToFile("/var/log/NRedPPSelfTest.txt", ppSelf,
+                                                              sizeof(ppSelf) - 1)
+                                  : -999;
+                SYSLOG("X6000FB", "pp-selftest: rootvnode=%llx err=%d",
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(rootvnode)), e);
+            }
             if (!patcher.routeMultiple(id, &pphRequest, 1, slide, size)) {
                 SYSLOG("X6000FB", "stage-mark: failed to route AmdPowerPlayHelper::powerUp");
             } else {
