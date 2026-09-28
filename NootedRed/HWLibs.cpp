@@ -812,10 +812,9 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
 static void nredTraceLine(char* const buf, const int n)
 {
     if (n <= 0 || rootvnode == nullptr) { return; }
-    static char name[64];
-    char n2[64];
-    snprintf(n2, sizeof(n2), "/var/log/NRedTrace-%llx.log", static_cast<unsigned long long>(singleton().kcSlide));
-    if (name[0] == 0) { memcpy(name, n2, sizeof(n2)); }
+    char name[64];
+    snprintf(name, sizeof(name), "/var/log/NRedTrace-%llx.log",
+             static_cast<unsigned long long>(singleton().kcSlide));
     FileIO::writeBufferToFile(name, buf, static_cast<size_t>(n), O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
 }
 
