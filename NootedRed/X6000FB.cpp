@@ -1760,9 +1760,32 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt32 datAfter = n3.readReg32(kDat2);
         // ③ 旧路径对照
         const UInt32 oC81 = n3.readReg32(a81);
+        // ── ④ 已知值 oracle：扫描 BAR5 映射窗口，找 PSP TMR 地址签名 ─────────────────────────
+        //  依据【客观观测·Linux 实机日志】：本机 Linux 侧 "reserve 0x4000000 from 0x80f8000000 for PSP TMR"
+        //  ⇒ `psp_tmr_init` 会把 `tmr_mc_addr` 拆进 `C2PMSG_36`(高32)=0x80 与 `C2PMSG_35`(低32)=0xf8000000
+        //  （`psp_v13_0.c:281-284`）。`0xf8000000` 极罕见 ⇒ 用它当**已知值 oracle**，
+        //  在**只看我们自己的 BAR 映射**（合法、不碰设备状态）的前提下扫出这对寄存器**真实落在哪个地址**，
+        //  一次同时确定"段基址 + 单位（dword/byte）"这两个一直没定的问题。
+        //  ⚠️ 只读；只扫映射窗口内（128K dword），成本约十几毫秒。
+        UInt32 hitAddr[6] = {0, 0, 0, 0, 0, 0};
+        UInt32 hitNext[6] = {0, 0, 0, 0, 0, 0};
+        UInt32 hitCnt     = 0;
+        const UInt32 winDw = static_cast<UInt32>(n3.getRmmioLengthDw());
+        for (UInt32 i = 0; i + 1 < winDw && hitCnt < 6; ++i) {
+            if (n3.readReg32(i) == 0xF8000000u) {
+                const UInt32 nx = n3.readReg32(i + 1);
+                if (nx == 0x80u || nx == 0x81u) {   // TMR 高 32 位（容忍 0x81 变体）
+                    hitAddr[hitCnt] = i;
+                    hitNext[hitCnt] = nx;
+                    ++hitCnt;
+                }
+            }
+        }
         panic("NRed FwProbe3: ext c81=%x c35=%x c36=%x c58=%x v67=%x v91=%x | 旧路径 c81=%x | "
-              "机制: INDEX2写=%x 回读=%x DATA2=%x | want(c81!=0 c35=1 c36=80)",
-              xC81, xC35, xC36, xC58, xV67, xV91, oC81, a81, rb, datAfter);
+              "机制: INDEX2写=%x 回读=%x DATA2=%x | TMR扫描 n=%u "
+              "hit=[%x/%x %x/%x %x/%x] want(c81!=0 c35=1 c36=80)",
+              xC81, xC35, xC36, xC58, xV67, xV91, oC81, a81, rb, datAfter, hitCnt,
+              hitAddr[0], hitNext[0], hitAddr[1], hitNext[1], hitAddr[2], hitNext[2]);
     }
 
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）

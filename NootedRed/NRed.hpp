@@ -87,6 +87,11 @@ public:
      */
     UInt32 readReg32Ext(UInt32 addr) const;
 
+    /// 映射窗口长度（**以 dword 计**）——供探针做"已知值 oracle"扫描用；未映射时返回 0。
+    UInt32 getRmmioLengthDw() const {
+        return this->rmmio != nullptr ? static_cast<UInt32>(this->rmmio->getLength() / sizeof(UInt32)) : 0;
+    }
+
     /**
      * Probe：SMU13 相关路径的累积探针状态（旁路记录，不改变任何原有行为）。
      *
