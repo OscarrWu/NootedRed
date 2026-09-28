@@ -42,6 +42,10 @@ extern "C" void *rootvnode __attribute__((weak));
 // 可能尚未就绪 ⇒ PP 行先缓存，由本文件已验证可写盘的 IP 探针落盘点补写。
 extern "C" char gPpProbeLine[768];
 extern "C" int  gPpProbeLen;
+// 入口判据的捎带缓冲（同样定义在 X6000FB.cpp）：PP 包装函数**入口**是否被执行，
+// 由本文件已验证可写盘的 IP 探针落盘点代写，作为不依赖 Lilu 日志的独立证据。
+extern "C" char gPpInLine[160];
+extern "C" int  gPpInLen;
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
 //  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
@@ -1030,6 +1034,13 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                                  static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
                         FileIO::writeBufferToFile(ppName, gPpProbeLine, static_cast<size_t>(gPpProbeLen));
                         gPpProbeLen = 0;   // 只捎带一次（避免把早期读数反复覆盖到每个对象文件里）
+                    }
+                    if (gPpInLen > 0) {
+                        char inName[80];
+                        snprintf(inName, sizeof(inName), "/var/log/NRedPPIn-carry-%llx.txt",
+                                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
+                        FileIO::writeBufferToFile(inName, gPpInLine, static_cast<size_t>(gPpInLen));
+                        gPpInLen = 0;
                     }
                 }
             }

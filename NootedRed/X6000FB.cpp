@@ -65,6 +65,11 @@ extern "C" char gPpProbeLine[768];
 extern "C" int  gPpProbeLen;
 char gPpProbeLine[768];
 int  gPpProbeLen = 0;
+// 入口判据的独立缓存：即使后面所有通道都失效，也能由已验证可用的 IP 探针落盘点带出。
+extern "C" char gPpInLine[160];
+extern "C" int  gPpInLen;
+char gPpInLine[160];
+int  gPpInLen = 0;
 
 static void nredPPTrace(char* const buf, const int n)
 {
@@ -920,6 +925,12 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                                  static_cast<unsigned long long>(gPpHelperSelf),
                                  wantProbe ? 1 : 0, wantRegister ? 1 : 0,
                                  wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
+        if (inN > 0) {
+            const size_t cn = static_cast<size_t>(inN > 159 ? 159 : inN);
+            memcpy(gPpInLine, inMsg, cn);
+            gPpInLine[cn] = '\0';
+            gPpInLen = static_cast<int>(cn);
+        }
         if (inN > 0 && rootvnode != nullptr) {
             FileIO::writeBufferToFile("/var/log/NRedPPIn.txt", inMsg, static_cast<size_t>(inN));
         }
