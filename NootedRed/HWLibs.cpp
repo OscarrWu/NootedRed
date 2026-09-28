@@ -907,7 +907,9 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
     // 不调用任何 Apple 方法、不改内存。
     // ⚠️ **只在失败时输出**（2026-09-28 第 12 轮教训）：成功调用的行会把 L2 环形缓冲占满，
     //  导致失败调用的关键行反被挤掉；而成功调用的内容已知固定。
-    if (checkKernelArgument("-NRedAccelLog") && b != nullptr && ret != 0) {
+    // ⚠️ 无论成功失败都落盘（2026-09-28 第 16 轮教训）：自检证明落盘通道可用，但"失败才落盘"
+    //  一直没产出 ⇒ 与其猜，不如每次都写（每轮仅 3–4 次调用，文件极小）。
+    if (checkKernelArgument("-NRedAccelLog") && b != nullptr) {
         const auto* const p = static_cast<const UInt8*>(b);
         const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);   // IPDS 子表偏移（相对缓冲起点）
         const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);  // HARV 子表偏移
