@@ -964,7 +964,6 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                static_cast<unsigned>(n0), static_cast<unsigned>(b1), static_cast<unsigned>(n1),
                static_cast<unsigned>(magic12), static_cast<unsigned>(magic1c));
         }
-    }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
     if (checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("HWLibs", "mode2-tail: a1=%llx a2=%llx a3=%llx a4=%llx a5=%llx ret=%u",
