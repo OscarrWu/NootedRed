@@ -4,6 +4,7 @@
 // See LICENSE for details.
 
 #include "GoldenSettings.hpp"
+#include <NvMsgBuf.hpp>     // NvMsgBuf::dumpNow()：在关键探针处立即落一拍（见该文件头注释）
 #include <ASICCaps.hpp>
 #include <GPUDriversAMD/CAIL/ASICCaps.hpp>
 #include <GPUDriversAMD/CAIL/DevCaps.hpp>
@@ -38,19 +39,9 @@
 // 根 vnode（XNU `bsd/sys/vnode.h`）：**内核态写文件的必备判据**，非空才表示根 FS 已挂载。
 // 与 `NvMsgBuf.hpp` 同一写法（`extern "C"` + weak），此处单独声明以免把它的静态缓冲带进来。
 extern "C" void *rootvnode __attribute__((weak));
-// 捎带落盘缓冲（定义在 X6000FB.cpp）：PP 探针早于本文件的 IP 探针执行，其时刻 `rootvnode`
-// 可能尚未就绪 ⇒ PP 行先缓存，由本文件已验证可写盘的 IP 探针落盘点补写。
-extern "C" char gPpProbeLine[768];
-extern "C" int  gPpProbeLen;
-// 入口判据的捎带缓冲（同样定义在 X6000FB.cpp）：PP 包装函数**入口**是否被执行，
-// 由本文件已验证可写盘的 IP 探针落盘点代写，作为不依赖 Lilu 日志的独立证据。
-extern "C" char gPpInLine[160];
-extern "C" int  gPpInLen;
-// 被 patch 的目标地址（定义在 X6000FB.cpp）：用于在更晚的时刻读回首字节。
-extern "C" UInt64 gPpHelperTarget;
-// PP 包装函数入口写入的魔数（定义在 X6000FB.cpp）：非 0xA5A5A5A5DEADBEEF 即说明
-// 本包装函数的入口代码从未执行过（这是判断 hook 是否真正生效的最终判据）。
-extern "C" UInt64 gPpHelperSelf;
+// 捎带落盘缓冲与其相关全局已全部移除（2026-09-28 第 30 轮）：改为在关键探针处直接调用
+// `NvMsgBuf::dumpNow()` 立即落一拍，不再需要跨翻译单元的全局符号（那是本会话唯一
+// 无法用静态检查排除的挂死嫌疑来源，按"减少不确定性"的原则清除）。
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
 //  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
@@ -1030,23 +1021,11 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                         snprintf(name, sizeof(name), "/var/log/NRedIpProbe-err%d.txt", err);
                         FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
                     }
-                    // ★ 捎带写出 PP 探针的行（见 X6000FB.cpp `nredPPTrace` 的说明）：PP 探针在
-                    //   本函数之前执行，其时刻 `rootvnode` 可能尚未就绪 ⇒ 由这里补写一次。
-                    //   本函数已知能成功写盘（上一步就是证据），所以这条通道是可靠的。
-                    if (gPpProbeLen > 0) {
-                        char ppName[80];
-                        snprintf(ppName, sizeof(ppName), "/var/log/NRedPP-carry-%llx.txt",
-                                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
-                        FileIO::writeBufferToFile(ppName, gPpProbeLine, static_cast<size_t>(gPpProbeLen));
-                        gPpProbeLen = 0;   // 只捎带一次（避免把早期读数反复覆盖到每个对象文件里）
-                    }
-                    if (gPpInLen > 0) {
-                        char inName[80];
-                        snprintf(inName, sizeof(inName), "/var/log/NRedPPIn-carry-%llx.txt",
-                                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
-                        FileIO::writeBufferToFile(inName, gPpInLine, static_cast<size_t>(gPpInLen));
-                        gPpInLen = 0;
-                    }
+                    // ★ 立即落一拍（2026-09-28 第 30 轮）：本点已验证可执行且可写盘
+                    //   （`ip:` 行与 `NRedIpProbe-*.txt` 就是证据），在此主动调用一次 NvMsgBuf
+                    //   的即时落盘，等价于"手动拍一张"，把此前累积的 msgbuf 增量（含 PP 探针
+                    //   写入的行）立刻写成文件，不依赖 1 秒周期的下一拍。
+                    NvMsgBuf::dumpNow();
                 }
             }
         }
@@ -1062,20 +1041,6 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
-        // 捎带缓冲的实时状态（2026-09-28 第 28 轮）：**无条件**打印，用于区分
-        // "PP 包装函数入口没执行"（两个长度都是 0）与 "执行了但文件写不出去"（长度非 0）。
-        // 本行与 `ip:` 同频（每次 IP 表解析一行），不会挤爆日志。
-        SYSLOG("HWLibs", "ip-carry: ppIn=%d ppLen=%d self=%llx", gPpInLen, gPpProbeLen,
-               static_cast<unsigned long long>(gPpHelperSelf));
-        // ★ patch 是否仍然有效（2026-09-28 第 28 轮）：本点是**已验证可执行**的时刻（~26 s），
-        //   晚于 patch（~16 s）、早于/邻近 powerUp。若首字节仍是 `E9`（jmp rel32）⇒ patch 在
-        //   运行期保持，则"包装函数不执行"另有原因；若已变回原始序言 ⇒ patch 被还原，
-        //   需要改换挂钩方式（这是我们所有 PP 侧探针无产出的唯一自洽解释）。
-        if (gPpHelperTarget != 0) {
-            const UInt8* hb = reinterpret_cast<const UInt8*>(gPpHelperTarget);
-            SYSLOG("HWLibs", "pp-hook-late: tgt=%llx bytes=%02x %02x %02x %02x",
-                   static_cast<unsigned long long>(gPpHelperTarget), hb[0], hb[1], hb[2], hb[3]);
-        }
     }
     return ret;
 }

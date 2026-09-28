@@ -56,43 +56,26 @@ extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），�
 //  ⚠️ 必须先判 `rootvnode`（根 FS 未挂载时写文件会阻塞内核线程，见真机手册 §5.1）。
 extern "C" void *rootvnode __attribute__((weak));
 
-extern "C" UInt64 gPpHelperSelf;   // 供 HWLibs 侧在更晚的时刻读回（判定入口是否执行）
-UInt64 gPpHelperSelf = 0;          // `AmdPowerPlayHelper::powerUp` 的 this（入口写魔数）
+static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（入口写、探针读）
 
-// ★ 捎带落盘（2026-09-28 第 25 轮教训）：PP 探针与 IP 探针同在 powerUp 路径上，但 PP 探针
-//   更早执行——此时 `rootvnode` 可能尚未就绪（PP 落盘静默失败、而稍后的 IP 探针却写成功，
-//   第 24/25 轮实测）。于是把 PP 行**缓存**下来，交给紧随其后的 IP 探针落盘点一并写出。
-extern "C" char gPpProbeLine[768];
-extern "C" int  gPpProbeLen;
-char gPpProbeLine[768];
-int  gPpProbeLen = 0;
-// 入口判据的独立缓存：即使后面所有通道都失效，也能由已验证可用的 IP 探针落盘点带出。
-extern "C" char gPpInLine[160];
-extern "C" int  gPpInLen;
-char gPpInLine[160];
-int  gPpInLen = 0;
-// 被 patch 的目标地址（`AmdPowerPlayHelper::powerUp` 的运行时入口），供其它文件在
-// 更晚的时刻读回其首字节，判定 patch 是否在运行期仍然有效（2026-09-28 第 28 轮）。
-extern "C" UInt64 gPpHelperTarget;
-UInt64 gPpHelperTarget = 0;
-
+// PP 侧读数（2026-09-28 第 30 轮定稿）：只保留"写日志 + 立即落一拍"两条通道。
+//   为什么不缓存给别的文件捎带：PP 包装函数的实际执行时刻（~34.5 s）**晚于** IP 探针
+//   （26–27 s），捎带机制在时间上根本排不上；而周期拍（每 1 s）的下一拍落在 panic 之后。
+//   ⇒ 唯一可靠做法是在本函数内写完日志后**立刻**调用 `NvMsgBuf::dumpNow()` 拍一张。
+//   ⚠️ 这里刻意不再引入任何跨翻译单元的全局符号（本会话唯一无法静态排除的挂死嫌疑）。
 static void nredPPTrace(char* const buf, const int n)
 {
     if (n <= 0) { return; }
     const size_t len = static_cast<size_t>(n > 767 ? 767 : n);
-    // 1) 缓存：即使此刻写盘不可用，后续的 IP 探针落盘点仍会把它带出。
-    memcpy(gPpProbeLine, buf, len);
-    gPpProbeLine[len < 767 ? len : 767] = '\0';
-    gPpProbeLen = static_cast<int>(len);
-    // 2) 立即尝试写盘。flags 与**已被证明可用**的 IP 探针写法保持一致（不带 O_TRUNC 组合）；
-    //    失败时写错误码文件名，避免"静默无产出"这种无从判读的状态。
-    if (rootvnode == nullptr) { return; }
-    static unsigned seq = 0;
-    char name[64];
-    snprintf(name, sizeof(name), "/var/log/NRedPP-%03u.log", seq++);
-    const int err = FileIO::writeBufferToFile(name, buf, len);
-    if (err != 0) {
-        snprintf(name, sizeof(name), "/var/log/NRedPP-err%d.log", err);
+    // 通道 1：写内核 console（同时也会进 Lilu 日志——但该通道在下述时刻常已饱和）
+    SYSLOG("X6000FB", "%s", buf);
+    // 通道 2：立即把 msgbuf 增量落盘（失败静默，不影响流程）
+    NvMsgBuf::dumpNow();
+    // 通道 3：直写文件（前两条都失效时的兜底；本时刻 `FileIO` 可能不可用，故仅作冗余）
+    if (rootvnode != nullptr) {
+        static unsigned seq = 0;
+        char name[64];
+        snprintf(name, sizeof(name), "/var/log/NRedPP-%03u.log", seq++);
         FileIO::writeBufferToFile(name, buf, len);
     }
 }
@@ -402,24 +385,6 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                 SYSLOG("X6000FB", "stage-mark: failed to route AmdPowerPlayHelper::powerUp");
             } else {
                 DBGLOG("X6000FB", "stage-mark: routed AmdPowerPlayHelper::powerUp");
-            }
-            // ★ hook 生效性直接取证（2026-09-28 第 28 轮）：五个 PP 侧探针在运行期全部无产出
-            //   （落盘/SYSLOG/捎带三条通道），而同 kext 的 `wrapHandleCriticalError` 却能执行并
-            //   带出数据（第 24 轮）。"routed" 只说明 routeMultiple 返回真，不证明跳转真的写进了
-            //   目标函数入口。这里在读回目标函数入口的前 6 个字节：
-            //     `E9 xx xx xx xx`（jmp rel32）或 `FF 25 ...`（jmp [rip+disp]）⇒ hook 已写入；
-            //     仍是原始序言（如 `55 48 89 E5`）⇒ **写入没生效**，需改换挂钩方式。
-            {
-                // 注意：`org` 在某些 patcher 实现里指向 trampoline（含原始序言），读它会误判；
-                // 因此**必须读被 patch 的目标符号地址本身**。
-                const mach_vm_address_t tgt = patcher.solveSymbol(
-                    id, "__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv");
-                const UInt8* tb = reinterpret_cast<const UInt8*>(tgt);
-                gPpHelperTarget = static_cast<UInt64>(tgt);
-                SYSLOG("X6000FB", "pp-hook: tgt=%llx org=%llx bytes=%02x %02x %02x %02x %02x %02x",
-                       static_cast<unsigned long long>(tgt),
-                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(this->orgPpHelperPowerUp)),
-                       tb[0], tb[1], tb[2], tb[3], tb[4], tb[5]);
             }
         }
 
@@ -925,46 +890,20 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 //  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic6`（与其它探针互斥使用）。
 UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
-    gPpHelperSelf = reinterpret_cast<UInt64>(self);   // 入口判据：非 0 即说明入口代码执行过
-    // ★ 最小写入判据（2026-09-28 第 28 轮）：这两条**纯赋值**放在门控求值之前，
-    //   不依赖任何外部函数（不调 checkKernelArgument、不用 SYSLOG、不碰文件系统），
-    //   编译后必然随函数入口一起执行；随后由已验证可写盘的 IP 探针（26s，晚于本函数）
-    //   把 gPpHelperSelf 读出 → 一次判定"本函数入口到底执行没有"。
-    {
-        gPpInLen = 5;
-        memcpy(gPpInLine, "inA0\n", 5);
-    }
+    gPpHelperSelf = reinterpret_cast<UInt64>(self);
     const bool wantProbe = checkKernelArgument("-NRedAccelLog");
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
     const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
     const bool wantAccelLog = checkKernelArgument("-NRedAccelLog");
-    // ★ 入口最小实证（2026-09-28 第 28 轮）。为什么放在这里：
-    //   第 25–27 轮（ttl1/2/3）里，本函数内**所有**探针（自建落盘、捎带落盘、SYSLOG）
-    //   都无产出，而**同一轮**、同一时刻 HWLibs 侧的探针（`ip:` 日志行 + `NRedIpProbe-*.txt`）
-    //   都有产出。已有的硬事实是：① 本函数确实被进入（panic 栈里有本函数的返回地址
-    //   `+0xf7e`/`+0xfd0`，且第三轮多一条日志语句正好使偏移增加 0x52 字节 ⇒ 运行的就是新二进制）；
-    //   ② patch 阶段同一门控表达式为真（`pp-selftest` 有输出）。
-    //   ⇒ 矛盾点就在"函数体进入之后到底走到哪一步"。此处只有一次赋值与四次门控求值，
-    //     其后全是纯读取，最不可能失败；两条通道各写一次，足以把问题二分为
-    //     "函数体没走到" 与 "通道在此刻不可用"。
+    // 入口自证（2026-09-28 第 30 轮）：一条极短的日志行 + **立即落一拍**。
+    //   价值：① 它是"本函数确实执行了"的独立判据（此前 6 轮无法区分"hook 没生效"与
+    //   "读数时刻在落盘盲区"）；② 顺带把此前累积的 msgbuf 增量落盘。
+    //   成本：本函数每启动至多被调用数次，不会挤爆日志缓冲。
     {
         SYSLOG("X6000FB", "pp-in: self=%llx gates=%d%d%d%d",
                static_cast<unsigned long long>(gPpHelperSelf),
                wantProbe ? 1 : 0, wantRegister ? 1 : 0, wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
-        char inMsg[96];
-        const int inN = snprintf(inMsg, sizeof(inMsg), "pp-in self=%llx gates=%d%d%d%d\n",
-                                 static_cast<unsigned long long>(gPpHelperSelf),
-                                 wantProbe ? 1 : 0, wantRegister ? 1 : 0,
-                                 wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
-        if (inN > 0) {
-            const size_t cn = static_cast<size_t>(inN > 159 ? 159 : inN);
-            memcpy(gPpInLine, inMsg, cn);
-            gPpInLine[cn] = '\0';
-            gPpInLen = static_cast<int>(cn);
-        }
-        if (inN > 0 && rootvnode != nullptr) {
-            FileIO::writeBufferToFile("/var/log/NRedPPIn.txt", inMsg, static_cast<size_t>(inN));
-        }
+        NvMsgBuf::dumpNow();
     }
 
     if (wantProbe || wantRegister || wantAccelProbe || wantAccelLog) {
@@ -1616,6 +1555,10 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     // Observe P2: always log the error detail (SYSLOG = visible regardless of debug flag)
     SYSLOG("X6000FB", "handleCriticalError: '%s' | '%s' | '%s'",
            fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+    // ⚠️ 此处**刻意不做任何落盘**（2026-09-28 第 30 轮）：本函数运行在 panic 流程中，
+    //   在此时写文件可能阻塞内核线程（手册 §5.1），那正是"机器不自动重启、需现场强关"的
+    //   成因之一。读数由 `wrapPpHelperPowerUp` 侧的 `nvMsgBuf` 即时落盘承担（正常上下文）。
+    //   ⛔ 更不可在此抢 `panic()`：会绕开 Apple 写重启位的步骤（手册 §7.3 教训 14）。
 
     // ★ PP 后端对象落盘（2026-09-28）：`powerUp` 自身在返回前就 panic，其"调用后读字段"的探针块
     //  永不执行 ⇒ 把读取搬到这里（panic 前的最后出口）。只读内存，不调用任何 Apple 方法。
