@@ -1537,11 +1537,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
                                static_cast<unsigned long long>(s670), static_cast<unsigned long long>(s6b8),
                                static_cast<unsigned long long>(gMaCalls), static_cast<unsigned long long>(gMaIri),
                                static_cast<unsigned long long>(gMaDummy));
-        // ⚠️ 2026-09-28 第 23 轮教训：**panic 路径上 `FileIO::writeBufferToFile` 不产出**
-        //  （同一函数里早期（22s）写同一路径是成功的 ⇒ 是上下文/时机问题，不是权限），
-        //  故改用**已验证可靠**的 panic 消息通道把数据带出（`.panic`/NVRAM 分片，带宽足够）。
         nredPPTrace(b, n);
-        panic("NRed PP backend: %s", b);
     }
 
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
