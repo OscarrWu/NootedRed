@@ -34,6 +34,10 @@
 #include <Regs/SMU.hpp>
 #include <Regs/VBIOSSMC.hpp>
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态落盘，见下方 IP 探针）
+
+// 根 vnode（XNU `bsd/sys/vnode.h`）：**内核态写文件的必备判据**，非空才表示根 FS 已挂载。
+// 与 `NvMsgBuf.hpp` 同一写法（`extern "C"` + weak），此处单独声明以免把它的静态缓冲带进来。
+extern "C" void *rootvnode __attribute__((weak));
 #include <kern/assert.h>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSBoolean.h>
