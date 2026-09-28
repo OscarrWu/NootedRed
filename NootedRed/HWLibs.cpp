@@ -906,32 +906,6 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         // 这里 dump 头部 0x20 字节 + 两个子表偏移处的 4 字节，用以判定"校验失败"的成因；
         // 不调用任何 Apple 方法、不改内存。判读见 docs/子任务/第八步执行记录（点亮验证）.md。
         const auto* const p = static_cast<const UInt8*>(b);
-        const auto w = [p](unsigned i) { return static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + i * 4)); };
-        SYSLOG("HWLibs", "ip-hdr: %08x %08x %08x %08x %08x %08x %08x %08x",
-               w(0), w(1), w(2), w(3), w(4), w(5), w(6), w(7));
-        const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);
-        const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);
-        SYSLOG("HWLibs",
-               "ip-tbl: o12=%x o1c=%x u4=%x u8=%x ua=%x ue=%x u14=%x u18=%x u1e=%x u20=%x u24=%x u28=%x",
-               static_cast<unsigned>(o12), static_cast<unsigned>(o1C),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x4)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x8)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0xA)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0xE)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x14)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x18)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x1E)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x20)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x24)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x28)));
-        if (o12 + 4 <= 0x10000) {
-            SYSLOG("HWLibs", "ip-magic12: %08x",
-                   static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o12)));
-        }
-        if (o1C + 4 <= 0x10000) {
-            SYSLOG("HWLibs", "ip-magic1c: %08x",
-                   static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)));
-        }
         // 三段校验和：**逐条复刻 `0x2ab00e` 的算法**（16 位字节累加和），用于判定它究竟卡在哪一段。
         const auto u16 = [p](unsigned o) { return static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + o)); };
         const UInt32 cntA = u16(0xA);
@@ -957,35 +931,36 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                 for (UInt32 i = 0; i < len; i++) { cksC = static_cast<UInt16>(cksC + p[o1C + i]); }
             }
         }
-        SYSLOG("HWLibs", "ip-cks: A=%04x/%04x B=%04x/%04x C=%04x/%04x",
+        // ⚠️ **每次调用只输出这一行**：第 8/9 轮实测日志行会随机丢失（L2 环形缓冲 + msgbuf 竞争），
+        //  多行输出必然缺数据 ⇒ 把所有关键字段（校验和 + die + 越界块自检）压进一行。
+        UInt32 dieOff = 0, cnt = 0, bad = 0, b0 = 0, n0 = 0, b1 = 0, n1 = 0, magic12 = 0, magic1c = 0;
+        if (o12 + 4 <= 0x10000) { magic12 = *reinterpret_cast<const UInt32*>(p + o12); }
+        if (o1C + 4 <= 0x10000) { magic1c = *reinterpret_cast<const UInt32*>(p + o1C); }
+        dieOff = u16(o12 + 0x10);
+        if (dieOff + 8 <= 0x10000) {
+            cnt = u16(dieOff + 2);
+            UInt32 pos = dieOff + 4;
+            for (UInt32 i = 0; i < cnt && pos + 8 <= 0x10000; i++) {
+                const UInt32 hw = *reinterpret_cast<const UInt16*>(p + pos);
+                const UInt32 nba = p[pos + 3];
+                if (nba == 0 || nba > 9) {          // Apple 判据是 nba ∈ {1..6}；补丁已放宽到 ≤9
+                    if (bad == 0) { b0 = hw; n0 = nba; }
+                    else if (bad == 1) { b1 = hw; n1 = nba; }
+                    bad++;
+                }
+                pos += 8 + 4 * nba;
+            }
+        }
+        SYSLOG("HWLibs", "ip: ck=%04x/%04x,%04x/%04x,%04x/%04x die=%x/%x/%x/%x cnt=%u bad=%u b0=%x/%u b1=%x/%u m=%08x,%08x",
                static_cast<unsigned>(cksA), static_cast<unsigned>(u16(0x8)),
                static_cast<unsigned>(cksB), static_cast<unsigned>(u16(0xE)),
-               static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)));
-        // ✅ 修正后的定位（2026-09-28 真机第 4 轮之后）：`0x2ab00e` 读到的 die 偏移
-        // `u16(out + u16(out+0xc) + 0x10)` 是**相对缓冲起点**的偏移（不是相对 IPDS 子表），
-        // 故 die 记录在 `out + dieOff`，首个 IP 块在 `out + dieOff + 4`。
-        // ⚠️ 压成**单行**（第 8 轮教训：多行会被 L2 环形缓冲覆盖 ⇒ 判读时缺数据）。
-        {
-            const UInt32 dieOff = u16(o12 + 0x10);
-            if (dieOff + 8 <= 0x10000) {
-                const UInt32 cnt = u16(dieOff + 2);
-                UInt32 pos = dieOff + 4, bad = 0, b0 = 0, n0 = 0, b1 = 0, n1 = 0;
-                for (UInt32 i = 0; i < cnt && pos + 8 <= 0x10000; i++) {
-                    const UInt32 hw = *reinterpret_cast<const UInt16*>(p + pos);
-                    const UInt32 nba = p[pos + 3];
-                    if (nba == 0 || nba > 9) {   // Apple 判据是 nba ∈ {1..6}；补丁已放宽到 ≤9
-                        if (bad == 0) { b0 = hw; n0 = nba; }
-                        else if (bad == 1) { b1 = hw; n1 = nba; }
-                        bad++;
-                    }
-                    pos += 8 + 4 * nba;
-                }
-                SYSLOG("HWLibs", "ip1: off=%x id=%x sz=%x blk=%x cnt=%u bad=%u b0=%x/%u b1=%x/%u",
-                       static_cast<unsigned>(dieOff), static_cast<unsigned>(u16(dieOff)),
-                       static_cast<unsigned>(u16(dieOff + 2)), static_cast<unsigned>(u16(dieOff + 4)),
-                       static_cast<unsigned>(cnt), static_cast<unsigned>(bad), static_cast<unsigned>(b0),
-                       static_cast<unsigned>(n0), static_cast<unsigned>(b1), static_cast<unsigned>(n1));
-            }
+               static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)),
+               static_cast<unsigned>(dieOff), static_cast<unsigned>(dieOff + 8 <= 0x10000 ? u16(dieOff) : 0xFFFF),
+               static_cast<unsigned>(dieOff + 8 <= 0x10000 ? u16(dieOff + 2) : 0xFFFF),
+               static_cast<unsigned>(dieOff + 8 <= 0x10000 ? u16(dieOff + 4) : 0xFFFF),
+               static_cast<unsigned>(cnt), static_cast<unsigned>(bad), static_cast<unsigned>(b0),
+               static_cast<unsigned>(n0), static_cast<unsigned>(b1), static_cast<unsigned>(n1),
+               static_cast<unsigned>(magic12), static_cast<unsigned>(magic1c));
         }
     }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
