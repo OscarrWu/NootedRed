@@ -972,11 +972,20 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                 static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
-            if (n > 0 && rootvnode != nullptr) {
-                char name[64];
-                snprintf(name, sizeof(name), "/var/log/NRedIpProbe-%llx.txt",
-                         static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
-                FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
+            if (n > 0) {
+                char name[80];
+                if (rootvnode == nullptr) {
+                    // 根 FS 未挂载 ⇒ 绝不碰文件系统（会阻塞内核线程、被 watchdog 强重启）
+                    SYSLOG("HWLibs", "ip-noroot");
+                } else {
+                    snprintf(name, sizeof(name), "/var/log/NRedIpProbe-%llx.txt",
+                             static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
+                    const int err = FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
+                    if (err != 0) {   // 失败 ⇒ 把错误码写进文件名，便于事后判定原因
+                        snprintf(name, sizeof(name), "/var/log/NRedIpProbe-err%d.txt", err);
+                        FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
+                    }
+                }
             }
         }
         SYSLOG("HWLibs",
