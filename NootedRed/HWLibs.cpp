@@ -892,6 +892,39 @@ UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const 
 
 UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, void* const d, void* const e)
 {
+    if (checkKernelArgument("-NRedAccelLog") && b != nullptr) {
+        // 只读观测：`0x2ab00e` 的第 2 形参是一个 64 KiB 缓冲，函数内部按 **IP 发现表**校验它
+        // （`*(UInt32*)(buf + u16(buf+0xc)) == "IPDS"`、`buf + u16(buf+0x1c) == "HARV"`、三段校验和）。
+        // 这里 dump 头部 0x20 字节 + 两个子表偏移处的 4 字节，用以判定"校验失败"的成因；
+        // 不调用任何 Apple 方法、不改内存。判读见 docs/子任务/第八步执行记录（点亮验证）.md。
+        const auto* const p = static_cast<const UInt8*>(b);
+        const auto w = [p](unsigned i) { return static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + i * 4)); };
+        SYSLOG("HWLibs", "ip-hdr: %08x %08x %08x %08x %08x %08x %08x %08x",
+               w(0), w(1), w(2), w(3), w(4), w(5), w(6), w(7));
+        const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);
+        const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);
+        SYSLOG("HWLibs",
+               "ip-tbl: o12=%x o1c=%x u4=%u u8=%u ua=%u ue=%u u14=%u u18=%u u1e=%u u20=%u u24=%u u28=%u",
+               static_cast<unsigned>(o12), static_cast<unsigned>(o1C),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x4)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x8)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0xA)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0xE)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x14)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x18)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x1E)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x20)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x24)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x28)));
+        if (o12 + 4 <= 0x10000) {
+            SYSLOG("HWLibs", "ip-magic12: %08x",
+                   static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o12)));
+        }
+        if (o1C + 4 <= 0x10000) {
+            SYSLOG("HWLibs", "ip-magic1c: %08x",
+                   static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)));
+        }
+    }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
     if (checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("HWLibs", "mode2-tail: a1=%llx a2=%llx a3=%llx a4=%llx a5=%llx ret=%u",
