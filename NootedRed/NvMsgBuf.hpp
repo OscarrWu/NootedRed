@@ -225,6 +225,20 @@ namespace NvMsgBuf {
 	//   线程上。两条路径共用 `stBusy` 标志互斥，避免同时写同一卷（最坏只丢一拍，不影响流程）。
 	inline bool &stBusy() { static bool v = false; return v; }
 
+	// 把刚写成功的这一帧"提交"（推进读起点的指针）
+	inline void commitIncrement() {
+		stLastBufx() = stPendingEnd();
+	}
+
+	// ★ 立即落一拍（2026-09-28 第 30 轮）：供**关键探针在 panic 之前主动调用**。
+	//   动机：PP 包装函数的读数发生在 ~34.5 s，而周期拍（每 1 s）的下一拍落在 panic 之后
+	//   ⇒ 数据进得来 msgbuf、却没有任何一拍照到它（实测 6 轮零产出）。
+	//   本函数**只做"读内存 + 写文件"**：不改状态、不 panic、不阻塞（失败静默），
+	//   与周期拍共用同一套增量指针（`stLastBufx`）。
+	//   ⚠️ 互斥：`FileIO::writeBufferToFile` 不是为并发设计的，而周期拍跑在独立的 thread_call
+	//   线程上。两条路径共用 `stBusy` 标志互斥，避免同时写同一卷（最坏只丢一拍，不影响流程）。
+	//   位置要求：必须定义在 `dumpIncrement`/`commitIncrement` **之后**（它们是同命名空间的
+	//   自由函数，使用前须已声明）。
 	inline void dumpNow() {
 		if (rootvnode == nullptr || stBusy()) return;
 		stBusy() = true;
@@ -238,11 +252,6 @@ namespace NvMsgBuf {
 			}
 		}
 		stBusy() = false;
-	}
-
-	// 把刚写成功的这一帧"提交"（推进读起点的指针）
-	inline void commitIncrement() {
-		stLastBufx() = stPendingEnd();
 	}
 
 	// 排下一拍（提取成小函数，多处复用）
