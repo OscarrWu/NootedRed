@@ -33,7 +33,6 @@
 
 #include "Psp13Ring.hpp"
 #include "Regs/PSP13.hpp"
-#include "GPUDriversAMD/RavenIPOffset.hpp"
 
 namespace fw {
 

@@ -16,37 +16,30 @@
 //   - header-only（内联），命名空间 fw
 //   - 寄存器访问经 display::RegSink（read/write/delayMicroseconds）
 //   - 无动态分配（固定大小缓冲区由调用方提供）
-//   - 段基址取 SEG0（MP0_BASE_0 = 0x16000），与 Smu13Mailbox.hpp 一致
-//
-// 本实现按 SEG0；SEG1 为对照项，由真机判别实验定论。
-// 禁止在代码/注释中断言 "SEG0 正确 / SEG1 必然不可达"。
+//   - 寄存器字节地址由 `RegAddr.hpp::smnAddr` 统一计算（SEG1，等价 Linux RREG32_SOC15_EXT）
 
 #pragma once
 
 #include "Regs/PSP13.hpp"
 #include "DisplaySeq/RegSink.hpp"
-#include "GPUDriversAMD/RavenIPOffset.hpp"
+#include "RegAddr.hpp"
 
 namespace fw {
 
 // =============================================================================
-// 绝对寄存器地址（dword 索引，供 RegSink 直接使用）
-// PSP13.hpp 常量为 dword 偏移（mp_13_0_4_offset.h BASE_IDX=1），
-// 物理地址 = MP0_BASE_0（SEG0）+ 偏移。与 Smu13Mailbox.hpp 做法一致。
+// 绝对 SMN 字节地址（供 RegSink → NRed::readReg32/writeReg32 越窗间接分支使用）
+// PSP13.hpp 常量为 dword 偏移（mp_13_0_4_offset.h BASE_IDX = 1 ⇒ SEG1）；
+// 字节地址 = smnAddr(偏移) = (SEG1 + 偏移) × 4（smn_base64 = 0）。详见 RegAddr.hpp。
 // =============================================================================
 
-inline constexpr display::RegAddr kC2PMSG35 = MP0_BASE_0 + MP0_SMN_C2PMSG_35;
-inline constexpr display::RegAddr kC2PMSG36 = MP0_BASE_0 + MP0_SMN_C2PMSG_36;
-inline constexpr display::RegAddr kC2PMSG64 = MP0_BASE_0 + MP0_SMN_C2PMSG_64;
-inline constexpr display::RegAddr kC2PMSG67 = MP0_BASE_0 + MP0_SMN_C2PMSG_67;
-inline constexpr display::RegAddr kC2PMSG69 = MP0_BASE_0 + MP0_SMN_C2PMSG_69;
-inline constexpr display::RegAddr kC2PMSG70 = MP0_BASE_0 + MP0_SMN_C2PMSG_70;
-inline constexpr display::RegAddr kC2PMSG71 = MP0_BASE_0 + MP0_SMN_C2PMSG_71;
-inline constexpr display::RegAddr kC2PMSG81 = MP0_BASE_0 + MP0_SMN_C2PMSG_81;
-// ⚠️ D4（T6 差分）：Linux 底本 mp_13_0_4_offset.h 对 MP0 C2PMSG 的 BASE_IDX=1 ⇒ SEG1
-//    （yellow_carp_offset.h:827 MP0_BASE__INST0_SEG1 = 0x0243FC00）；本实现与现役代码按 SEG0
-//    （MP0_BASE_0 = 0x16000，HWLibs.cpp:1965 §16.89 实测回滚背书）。属作战计划 §6 R6 待真机判别项，
-//    不得断言哪侧正确。地址若错 = 静默写错寄存器（ROADMAP §3.3 硬件硬约束）。
+inline constexpr display::RegAddr kC2PMSG35 = smnAddr(MP0_SMN_C2PMSG_35);
+inline constexpr display::RegAddr kC2PMSG36 = smnAddr(MP0_SMN_C2PMSG_36);
+inline constexpr display::RegAddr kC2PMSG64 = smnAddr(MP0_SMN_C2PMSG_64);
+inline constexpr display::RegAddr kC2PMSG67 = smnAddr(MP0_SMN_C2PMSG_67);
+inline constexpr display::RegAddr kC2PMSG69 = smnAddr(MP0_SMN_C2PMSG_69);
+inline constexpr display::RegAddr kC2PMSG70 = smnAddr(MP0_SMN_C2PMSG_70);
+inline constexpr display::RegAddr kC2PMSG71 = smnAddr(MP0_SMN_C2PMSG_71);
+inline constexpr display::RegAddr kC2PMSG81 = smnAddr(MP0_SMN_C2PMSG_81);
 
 // =============================================================================
 // GPCOM 环帧常量（与 Linux psp_gfx_if.h 一致）

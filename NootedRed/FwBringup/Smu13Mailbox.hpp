@@ -5,20 +5,18 @@
 //   - 现役实现 `src/NootedRed/HWLibs.cpp:1939-2001`（`smu13SendMsgDirect`，SEG0 路径）
 //   - 消息 ID 复用 `src/NootedRed/GPUDriversAMD/PhoenixPPSMC.hpp`
 //
-// ⚠️ 段基址说明（项目内两条记载冲突，尚未澄清）：
-//   - 现役代码（`HWLibs.cpp:1966-1968`）与本实现按 **SEG0**（`MP0_BASE_0 + 0x282/0x292/0x29A`）实现。
-//   - `mp_13_0_4_offset.h` 给 MP1 寄存器 `BASE_IDX = 1`，对应 `yellow_carp_offset.h:875-876` 的
-//     `MP1_BASE__INST0_SEG1 = 0x0243FC00`（即 SEG1 路径）。
-//   - `docs/ROADMAP.md:1619-1622` 记载：VBIOSSMC（显示时钟）走 SEG0，PMFW/PPSMC（电源管理）走 SEG1。
-//   - `oldfiles-handoff/docs/ROADMAP.md:271-330` 实测 SEG0 有效、SEG1 因 BAR5 窗口限制判不可达。
-//   ⇒ **本实现按 SEG0 实现（与现役代码一致）；SEG1 列为对照项，由真机判别实验定论。**
-//   ❌ 禁止在代码或注释里断言"SEG0 正确"或"SEG1 必然不可达"。
+// 寄存器寻址（单一事实源见 `RegAddr.hpp::smnAddr`）：
+//   SMU 邮箱寄存器（C2PMSG_66/82/90）在 mp_13_0_4_offset.h 的 BASE_IDX = 1 ⇒ SEG1
+//   （0x0243FC00，dcn314_smu.c:38-43）。字节地址 = (SEG1 + 偏移) × 4，经
+//   NRed::readReg32 的 PCIE 间接分支访问（地址 > BAR5 512K）。公式/段基址/
+//   smn_base64/PCIE_INDEX_HI 判据详见 RegAddr.hpp 顶部注释（依据 soc15_common.h:201-204、
+//   amdgpu_reg_access.c:321-348/612-650）。
 //
 // 约束：
 //   - header-only（内联函数），无 .cpp，无动态分配，无异常
 //   - 寄存器访问复用 `display::RegSink`（`display::RegAddr`/`RegValue` 均为 uint32_t）
 //   - 命名空间 `fw`；寄存器常量风格对齐 `Regs/SMU.hpp`（裸 constexpr，dword 偏移）
-//   - 段基址取自 `GPUDriversAMD/RavenIPOffset.hpp`（`MP0_BASE_0 = 0x16000`），不写死
+//   - 寄存器字节地址由 `RegAddr.hpp::smnAddr` 统一计算（SEG1，不再走旧的 SEG0 dword 索引路径）
 //
 // Linux 时序对照（逐行见注释）：
 //   1. 清响应寄存器（C2PMSG_90 = 0）           ← `__smu_msg_v1_send` L319
@@ -34,20 +32,19 @@
 #pragma once
 
 #include "../DisplaySeq/RegSink.hpp"
-#include "../GPUDriversAMD/RavenIPOffset.hpp"
+#include "RegAddr.hpp"
 #include "../GPUDriversAMD/PhoenixPPSMC.hpp"
 namespace fw {
 
-// 寄存器偏移（dword 偏移，风格对齐 Regs/SMU.hpp）
-// SEG0 路径：MP0_BASE_0 + 偏移
+// 寄存器偏移（dword 偏移，风格对齐 Regs/SMU.hpp；mp_13_0_4_offset.h BASE_IDX = 1）
 constexpr UInt32 kSmu13RegRespOffset = 0x29A;  // C2PMSG_90：响应（读），写 0 清零
 constexpr UInt32 kSmu13RegArgOffset  = 0x292;  // C2PMSG_82：参数（写）
 constexpr UInt32 kSmu13RegMsgOffset  = 0x282;  // C2PMSG_66：命令（写即触发）
 
-// 绝对寄存器地址（dword 索引，供 RegSink 直接使用）
-inline constexpr display::RegAddr kSmu13RegResp = MP0_BASE_0 + kSmu13RegRespOffset;
-inline constexpr display::RegAddr kSmu13RegArg  = MP0_BASE_0 + kSmu13RegArgOffset;
-inline constexpr display::RegAddr kSmu13RegMsg  = MP0_BASE_0 + kSmu13RegMsgOffset;
+// 绝对 SMN 字节地址（供 RegSink → NRed::readReg32/writeReg32 越窗间接分支使用）
+inline constexpr display::RegAddr kSmu13RegResp = smnAddr(kSmu13RegRespOffset);
+inline constexpr display::RegAddr kSmu13RegArg  = smnAddr(kSmu13RegArgOffset);
+inline constexpr display::RegAddr kSmu13RegMsg  = smnAddr(kSmu13RegMsgOffset);
 
 // SMU 响应码（与 Linux `smu_cmn.c:76-82` 与现役 `HWLibs.cpp:1986-1998` 一致）
 constexpr UInt32 kSmuRespOk              = 0x01;  // SMU_RESP_OK

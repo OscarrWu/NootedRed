@@ -184,6 +184,32 @@ static void testWaitRegTimeout() {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// 测试 5：smnAddr 等价关系 —— 验证字节地址公式与单一事实源一致
+//   依据 RegAddr.hpp：smnAddr(off) = (kMpSeg1Base + off) * 4
+//   （等价 Linux RREG32_SOC15_EXT，soc15_common.h:201-204；SEG1=0x0243FC00）
+// ════════════════════════════════════════════════════════════════════
+static void testSmnAddrEquivalence() {
+    printf("[test 5] smnAddr equivalence (SEG1 byte address)... ");
+
+    // 公式本身：smnAddr(off) == (SEG1 + off) * 4，对任意 off 成立
+    assert(smnAddr(0x51) == (0x0243FC00u + 0x51) * 4);
+    assert(smnAddr(0x00) == (0x0243FC00u + 0x00) * 4);
+    assert(smnAddr(0x29A) == (0x0243FC00u + 0x29A) * 4);
+
+    // 定标寄存器：kC2PMSG* 必须由 smnAddr(对应偏移) 计算得出
+    //   C2PMSG_35 (0x63) → (0x0243FC00+0x63)*4 = 0x090FF18C
+    //   C2PMSG_81 (0x91) → (0x0243FC00+0x91)*4 = 0x090FF244
+    assert(kC2PMSG35 == smnAddr(MP0_SMN_C2PMSG_35));
+    assert(kC2PMSG35 == (0x0243FC00u + MP0_SMN_C2PMSG_35) * 4);
+    assert(kC2PMSG35 == 0x090FF18Cu);
+    assert(kC2PMSG81 == smnAddr(MP0_SMN_C2PMSG_81));
+    assert(kC2PMSG81 == (0x0243FC00u + MP0_SMN_C2PMSG_81) * 4);
+    assert(kC2PMSG81 == 0x090FF244u);
+
+    printf("PASS\n");
+}
+
+// ════════════════════════════════════════════════════════════════════
 // 主函数
 // ════════════════════════════════════════════════════════════════════
 int main() {
@@ -191,6 +217,7 @@ int main() {
     testFenceTimeout();
     testCmdBufCopy();
     testWaitRegTimeout();
+    testSmnAddrEquivalence();
     printf("\n所有 PSP13 环测试通过。\n");
     return 0;
 }

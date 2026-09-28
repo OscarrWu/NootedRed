@@ -1683,6 +1683,54 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               s1C35);
     }
 
+    // ─── 乙线 T7b：**正确寻址**下的固件层只读探针（门控 `-NRedFwProbe2`，默认关闭）──────────────
+    //  为什么新开探针位而不是改上面那个：手册 §4A 纪律 3 —— **panic 格式串一经投产即冻结**；
+    //  需要新值就新开探针位（第 74 轮的 `NRed FwProbe:` 串已投产）。
+    //
+    //  ⭐ 为什么地址与上一版不同（2026-09-29 离线核实，依据 `oldfiles-handoff/reference/linux/` 的 amdgpu 源码）：
+    //   正确公式（`amdgpu/soc15_common.h:202-207` 的 `RREG32_SOC15_EXT`）：
+    //       SMN_字节地址 = ( 段基址[reg##_BASE_IDX] + 寄存器偏移 ) * 4 + smn_base64
+    //   · 这些 MP0/MP1 SMN 寄存器在 `mp_13_0_4_offset.h` 里 **`BASE_IDX = 1`** ⇒ 取 **SEG1**；
+    //     Phoenix 的取值见本机 Linux 实跑通的 `display/dc/clk_mgr/dcn314/dcn314_smu.c:38-43`：
+    //     SEG0 = 0x00016000、**SEG1 = 0x0243FC00**。
+    //   · `smn_base64 = amdgpu_reg_get_smn_base64(MP0_HWIP, inst)`：单 die APU 为 **0**
+    //     （`amdgpu/amdgpu_reg_access.c:321-347`；实例用法 `amdgpu/psp_v13_0.c:171` 读 `C2PMSG_92`）。
+    //   · 算出的地址远超 BAR5 的 512 KB ⇒ 必须走 **PCIE 间接通道**（`PCIE_INDEX2`=0x0E 写**字节地址**、
+    //     `PCIE_DATA2`=0x0F 读数据），等价于 Linux 的 `RREG32_PCIE_EXT`（`amdgpu_reg_access.c:612` 起）；
+    //     地址在 32 位内 ⇒ **不需要**写 `PCIE_INDEX_HI`（Linux 的 `0x44>>2`，`:33/636-643`）。
+    //  ⛔ 上一版把 `MP0_BASE_0`（0x16000）当 **dword 索引**、且用了 **SEG0** —— **双重错误**：
+    //     真机读到全是 `FFFFFFFF`（未译码地址）。本版同时读 **SEG1×4（正确）** 与 **SEG0×4（对照）**，一轮即可判定。
+    //
+    //  读数预期（真机应当看到"活的"值）：`C2PMSG_81`(SOS 存活) ≠ 0；`C2PMSG_35`(bootloader 状态) == 1；
+    //  `C2PMSG_58`(SOS 版本) ≠ 0；`C2PMSG_36`(TMR 高 32 位) 应为 `0x80`（Linux 实测 TMR @ `0x80f8000000`）。
+    //  另读 MP1 的 VBIOSSMC 三件（`C2PMSG_67/83/91`，偏移 0x283/0x293/0x29B）⇒ 一次判明
+    //  **显示时钟路径是否也一直在错地址上**（这直接关系到项目为何始终点不亮）。
+    if (checkKernelArgument("-NRedFwProbe2") && NRed::singleton().getAttributes().isPhoenix()) {
+        auto&            nred2 = NRed::singleton();
+        constexpr UInt32 kS1   = 0x0243FC00;   // MP0/MP1 SEG1（BASE_IDX=1）
+        constexpr UInt32 kS0   = 0x00016000;   // 对照：SEG0
+        const auto       smn   = [](const UInt32 seg, const UInt32 off) -> UInt32 { return (seg + off) * 4; };
+        // 正确寻址（SEG1×4）
+        const UInt32 pC33 = nred2.readReg32(smn(kS1, 0x61));
+        const UInt32 pC35 = nred2.readReg32(smn(kS1, 0x63));
+        const UInt32 pC36 = nred2.readReg32(smn(kS1, 0x64));
+        const UInt32 pC58 = nred2.readReg32(smn(kS1, 0x7A));
+        const UInt32 pC64 = nred2.readReg32(smn(kS1, 0x80));
+        const UInt32 pC67 = nred2.readReg32(smn(kS1, 0x83));
+        const UInt32 pC71 = nred2.readReg32(smn(kS1, 0x87));
+        const UInt32 pC81 = nred2.readReg32(smn(kS1, 0x91));
+        // 对照（SEG0×4）
+        const UInt32 qC81 = nred2.readReg32(smn(kS0, 0x91));
+        const UInt32 qC35 = nred2.readReg32(smn(kS0, 0x63));
+        // VBIOSSMC（MP1，同一 SEG1 基址）——显示时钟通道
+        const UInt32 v67 = nred2.readReg32(smn(kS1, 0x283));
+        const UInt32 v83 = nred2.readReg32(smn(kS1, 0x293));
+        const UInt32 v91 = nred2.readReg32(smn(kS1, 0x29B));
+        panic("NRed FwProbe2: SEG1x4 c81=%x c35=%x c36=%x c58=%x c33=%x c64=%x c67=%x c71=%x "
+              "| SEG0x4 ctrl c81=%x c35=%x | VBIOSSMC c67=%x c83=%x c91=%x | off: c33=61 c35=63 c36=64 c58=7a c81=91",
+              pC81, pC35, pC36, pC58, pC33, pC64, pC67, pC71, qC81, qC35, v67, v83, v91);
+    }
+
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
     // 必须置于 -NRedProbePPLIB 之前：二者同开时以 Panic 优先（先取数据）。
     // panic() 与 Apple doGPUPanic 终点同一原语（DebugEnabler.cpp:250），栈/寄存器照常写入，.panic 不残缺。
