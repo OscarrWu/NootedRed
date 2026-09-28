@@ -904,7 +904,7 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);
         const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);
         SYSLOG("HWLibs",
-               "ip-tbl: o12=%x o1c=%x u4=%u u8=%u ua=%u ue=%u u14=%u u18=%u u1e=%u u20=%u u24=%u u28=%u",
+               "ip-tbl: o12=%x o1c=%x u4=%x u8=%x ua=%x ue=%x u14=%x u18=%x u1e=%x u20=%x u24=%x u28=%x",
                static_cast<unsigned>(o12), static_cast<unsigned>(o1C),
                static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x4)),
                static_cast<unsigned>(*reinterpret_cast<const UInt16*>(p + 0x8)),
@@ -924,6 +924,35 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
             SYSLOG("HWLibs", "ip-magic1c: %08x",
                    static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)));
         }
+        // 三段校验和：**逐条复刻 `0x2ab00e` 的算法**（16 位字节累加和），用于判定它究竟卡在哪一段。
+        const auto u16 = [p](unsigned o) { return static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + o)); };
+        const UInt32 cntA = u16(0xA);
+        UInt32 cksA = 0;
+        if (cntA != 10) {
+            cksA = static_cast<UInt8>(cntA);
+            const UInt32 n = static_cast<UInt16>(cntA - 10);
+            if (n != 1 && n >= 1 && 0xB + n - 1 <= 0x10000) {
+                for (UInt32 i = 0; i < n - 1; i++) { cksA = static_cast<UInt16>(cksA + p[0xB + i]); }
+            }
+        }
+        UInt32 cksB = 0;
+        if (o12 + 8 <= 0x10000) {
+            const UInt32 len = u16(o12 + 6);
+            if (o12 + len <= 0x10000) {
+                for (UInt32 i = 0; i < len; i++) { cksB = static_cast<UInt16>(cksB + p[o12 + i]); }
+            }
+        }
+        UInt32 cksC = 0;
+        if (o1C != 0 && o1C + 4 <= 0x10000) {
+            const UInt32 len = u16(0x20);
+            if (o1C + len <= 0x10000) {
+                for (UInt32 i = 0; i < len; i++) { cksC = static_cast<UInt16>(cksC + p[o1C + i]); }
+            }
+        }
+        SYSLOG("HWLibs", "ip-cks: A=%04x/%04x B=%04x/%04x C=%04x/%04x",
+               static_cast<unsigned>(cksA), static_cast<unsigned>(u16(0x8)),
+               static_cast<unsigned>(cksB), static_cast<unsigned>(u16(0xE)),
+               static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)));
     }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
     if (checkKernelArgument("-NRedAccelLog")) {
