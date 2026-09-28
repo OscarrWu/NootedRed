@@ -898,6 +898,10 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         UInt64 c7960 = 0, s670 = 0, s6b8 = 0;
         UInt64 pci = 0, lHws = 0, lCtl = 0, lAcc = 0;   // 加速器探针：provider 上的三个加载属性
         UInt64 hsD8 = 0;                                // 加速器探针：HWServices 的 TTL 接口字段（+0xd8）
+        // TTL 接口对象（`HWServices::getTtl()` == `*(this+0xd8)`，地址 0x4d5ecb0 已反汇编确认）
+        //   及其虚表前三槽：`powerUp+0x13d` 判据就是 `ttlVt[0x10]()` 返回值非 0
+        //   ⇒ 报 "Failed to get TTL RTS from HW Services"（串 @0x1f2ad1）。
+        UInt64 ttlVt = 0, ttl_0 = 0, ttl_8 = 0, ttl_10 = 0;
         // vtable 自证字段（第 5 批次补充）：若 vt 真的是 vtable，则 +0x0(offset-to-top)=0、
         //   +0x8(typeinfo) 与 +0x10(第一个虚函数) 应非 0；再读 +0x118（PP helper 会用它做 isReady）。
         UInt64 v0_0 = 0, v0_8 = 0, v0_10 = 0, v0_118 = 0;
@@ -949,6 +953,15 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                     s670 = load64(vt50, 0x670);   // 绑定方法（注册时调用）
                     s6b8 = load64(vt50, 0x6B8);   // ★ IRI 转发（messageAccelerator 最终调它）
                 }
+                hsD8 = load64(o50, 0xD8);         // == getTtl()：TTL 接口对象
+                if (isKernelPtr(hsD8)) {
+                    ttlVt = load64(hsD8, 0x000);
+                    if (isKernelPtr(ttlVt)) {
+                        ttl_0  = load64(ttlVt, 0x000);
+                        ttl_8  = load64(ttlVt, 0x008);
+                        ttl_10 = load64(ttlVt, 0x010);   // ★ powerUp 调用的正是它
+                    }
+                }
             }
 
             // ─── 加速器加载前置判据（门控 `-NRedAccelProbe`）────────────────────
@@ -974,7 +987,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                 // 顺带（零额外真机成本）：读 HWServices 实例的 TTL 接口字段（+0xd8）。ROADMAP
                 //  §2.9 任务 4 待查"该字段是否被 createTtlInterface 填上"——若为 0，则
                 //  `powerUp` 取 TTL Interface（vtable[0x850]）必然拿到空，是**另一条**独立阻塞。
-                if (isKernelPtr(o50)) { hsD8 = load64(o50, 0xD8); }
+                //  （该读取已上移到 o50 解引用块内，此处不再重复。）
             }
         }
 
@@ -1006,6 +1019,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             const UInt64 w00 = v0_0, w08 = v0_8, w10 = v0_10, w118 = v0_118;
             const UInt64 x00 = v1_0, x08 = v1_8, x10 = v1_10;
             const UInt64 v7960 = c7960;
+            const UInt64 vTtl = hsD8, vTtlVt = ttlVt, vT0 = ttl_0, vT8 = ttl_8, vT10 = ttl_10;
             const UInt64 vMagic = magicRead, vSvt = svt, vSv8 = sv8, vSv10 = sv10;
             const UInt64 vCtl5f18 = ctl5f18, vCtl100 = ctl100, vHs28 = hs28;
             const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
@@ -1015,12 +1029,14 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                   "| o20=%llx o50=%llx "
                   "| vt20=%llx [0]=%llx [8]=%llx [10]=%llx [118]=%llx [a00]=%llx "
                   "| vt50=%llx [0]=%llx [8]=%llx [10]=%llx [850]=%llx [670]=%llx [6b8]=%llx "
+                  "| ttl=%llx ttlVt=%llx ttl[0]=%llx ttl[8]=%llx ttl[10]=%llx "
                   "| c7960=%llx | ma calls=%llu iri=%llu dummy=%llu",
                   vMagic, vS, vSvt, vSv8, vSv10,
                   vCtl5f18, vCtl100, vHs28,
                   v20, v50,
                   vVt20, w00, w08, w10, w118, vA00,
                   vVt50, x00, x08, x10, v850, v670, v6b8,
+                  vTtl, vTtlVt, vT0, vT8, vT10,
                   v7960, vCalls, vIri, vDummy);
             nredPPTrace(_pb, _pn);
         }
