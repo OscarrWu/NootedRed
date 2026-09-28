@@ -964,39 +964,28 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         // ✅ 修正后的定位（2026-09-28 真机第 4 轮之后）：`0x2ab00e` 读到的 die 偏移
         // `u16(out + u16(out+0xc) + 0x10)` 是**相对缓冲起点**的偏移（不是相对 IPDS 子表），
         // 故 die 记录在 `out + dieOff`，首个 IP 块在 `out + dieOff + 4`。
+        // ⚠️ 压成**单行**（第 8 轮教训：多行会被 L2 环形缓冲覆盖 ⇒ 判读时缺数据）。
         {
             const UInt32 dieOff = u16(o12 + 0x10);
             if (dieOff + 8 <= 0x10000) {
-                SYSLOG("HWLibs", "ip-die: off=%x id=%04x size=%04x firstblk=%04x",
-                       static_cast<unsigned>(dieOff), static_cast<unsigned>(u16(dieOff)),
-                       static_cast<unsigned>(u16(dieOff + 2)),
-                       static_cast<unsigned>(u16(dieOff + 4)));
-                // 自检：Apple 的判据是 `num_base_address ∈ {1..6}`（我们已把它放宽到 ≤9）。
-                // 这里只报"仍会被拒绝"的块，避免整表 dump 挤占 L2 环形缓冲。
                 const UInt32 cnt = u16(dieOff + 2);
-                UInt32 pos = dieOff + 4, bad = 0;
+                UInt32 pos = dieOff + 4, bad = 0, b0 = 0, n0 = 0, b1 = 0, n1 = 0;
                 for (UInt32 i = 0; i < cnt && pos + 8 <= 0x10000; i++) {
                     const UInt32 hw = *reinterpret_cast<const UInt16*>(p + pos);
                     const UInt32 nba = p[pos + 3];
-                    if ((nba == 0 || nba > 9) && bad < 6) {
-                        SYSLOG("HWLibs", "ip-bad: i=%u off=%x hw=%x nba=%u", static_cast<unsigned>(i),
-                               static_cast<unsigned>(pos), static_cast<unsigned>(hw),
-                               static_cast<unsigned>(nba));
+                    if (nba == 0 || nba > 9) {   // Apple 判据是 nba ∈ {1..6}；补丁已放宽到 ≤9
+                        if (bad == 0) { b0 = hw; n0 = nba; }
+                        else if (bad == 1) { b1 = hw; n1 = nba; }
                         bad++;
                     }
                     pos += 8 + 4 * nba;
                 }
-                SYSLOG("HWLibs", "ip-sum: cnt=%u bad=%u", static_cast<unsigned>(cnt), static_cast<unsigned>(bad));
+                SYSLOG("HWLibs", "ip1: off=%x id=%x sz=%x blk=%x cnt=%u bad=%u b0=%x/%u b1=%x/%u",
+                       static_cast<unsigned>(dieOff), static_cast<unsigned>(u16(dieOff)),
+                       static_cast<unsigned>(u16(dieOff + 2)), static_cast<unsigned>(u16(dieOff + 4)),
+                       static_cast<unsigned>(cnt), static_cast<unsigned>(bad), static_cast<unsigned>(b0),
+                       static_cast<unsigned>(n0), static_cast<unsigned>(b1), static_cast<unsigned>(n1));
             }
-        }
-        // 少量原始字节（die 头 + 前 4 块），供离线交叉核对
-        for (UInt32 row = 0x80; row < 0x180; row += 0x20) {
-            char line[80];
-            int off = 0;
-            for (UInt32 k = 0; k < 0x20 && off < static_cast<int>(sizeof(line)) - 3; k++) {
-                off += snprintf(line + off, sizeof(line) - static_cast<size_t>(off), "%02x", p[row + k]);
-            }
-            SYSLOG("HWLibs", "ip-d%03x: %s", static_cast<unsigned>(row), line);
         }
     }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
