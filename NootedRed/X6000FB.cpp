@@ -56,7 +56,8 @@ extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），�
 //  ⚠️ 必须先判 `rootvnode`（根 FS 未挂载时写文件会阻塞内核线程，见真机手册 §5.1）。
 extern "C" void *rootvnode __attribute__((weak));
 
-static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（供 panic 前落盘用）
+extern "C" UInt64 gPpHelperSelf;   // 供 HWLibs 侧在更晚的时刻读回（判定入口是否执行）
+UInt64 gPpHelperSelf = 0;          // `AmdPowerPlayHelper::powerUp` 的 this（入口写魔数）
 
 // ★ 捎带落盘（2026-09-28 第 25 轮教训）：PP 探针与 IP 探针同在 powerUp 路径上，但 PP 探针
 //   更早执行——此时 `rootvnode` 可能尚未就绪（PP 落盘静默失败、而稍后的 IP 探针却写成功，
@@ -924,11 +925,12 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 //  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic6`（与其它探针互斥使用）。
 UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
-    gPpHelperSelf = reinterpret_cast<UInt64>(self);
-    // ★ 最小写入判据（2026-09-28 第 28 轮）：把这两条**纯内存写**放在门控求值之前。
+    gPpHelperSelf = 0xA5A5A5A5DEADBEEFULL;   // ★ 本轮改成魔数：见下方 gPpInLen 的说明
+    // ★ 最小写入判据（2026-09-28 第 28 轮）：把这两条**纯赋值**放在门控求值之前。
     //   它们不依赖任何外部函数（不调 checkKernelArgument、不用 SYSLOG、不碰文件系统），
     //   编译后必然随函数入口一起执行；随后由已验证可写盘的 IP 探针（26s，晚于本函数）
     //   把它们读出 → 一次判定"本函数入口到底执行没有"。
+    //   （gPpHelperSelf 改成魔数：排除"该变量被别处写"的可能，使判据无歧义。）
     {
         gPpInLen = 5;
         memcpy(gPpInLine, "inA0\n", 5);

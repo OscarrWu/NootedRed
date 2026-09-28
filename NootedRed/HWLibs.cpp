@@ -48,6 +48,9 @@ extern "C" char gPpInLine[160];
 extern "C" int  gPpInLen;
 // 被 patch 的目标地址（定义在 X6000FB.cpp）：用于在更晚的时刻读回首字节。
 extern "C" UInt64 gPpHelperTarget;
+// PP 包装函数入口写入的魔数（定义在 X6000FB.cpp）：非 0xA5A5A5A5DEADBEEF 即说明
+// 本包装函数的入口代码从未执行过（这是判断 hook 是否真正生效的最终判据）。
+extern "C" UInt64 gPpHelperSelf;
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
 //  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
@@ -1062,7 +1065,8 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         // 捎带缓冲的实时状态（2026-09-28 第 28 轮）：**无条件**打印，用于区分
         // "PP 包装函数入口没执行"（两个长度都是 0）与 "执行了但文件写不出去"（长度非 0）。
         // 本行与 `ip:` 同频（每次 IP 表解析一行），不会挤爆日志。
-        SYSLOG("HWLibs", "ip-carry: ppIn=%d ppLen=%d", gPpInLen, gPpProbeLen);
+        SYSLOG("HWLibs", "ip-carry: ppIn=%d ppLen=%d self=%llx", gPpInLen, gPpProbeLen,
+               static_cast<unsigned long long>(gPpHelperSelf));
         // ★ patch 是否仍然有效（2026-09-28 第 28 轮）：本点是**已验证可执行**的时刻（~26 s），
         //   晚于 patch（~16 s）、早于/邻近 powerUp。若首字节仍是 `E9`（jmp rel32）⇒ patch 在
         //   运行期保持，则"包装函数不执行"另有原因；若已变回原始序言 ⇒ patch 被还原，
