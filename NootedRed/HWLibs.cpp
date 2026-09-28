@@ -38,6 +38,31 @@
 // 根 vnode（XNU `bsd/sys/vnode.h`）：**内核态写文件的必备判据**，非空才表示根 FS 已挂载。
 // 与 `NvMsgBuf.hpp` 同一写法（`extern "C"` + weak），此处单独声明以免把它的静态缓冲带进来。
 extern "C" void *rootvnode __attribute__((weak));
+
+// 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
+//  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
+//  文件名带 **kext slide** ⇒ 每次启动天然不同，归档后不会混轮次。⚠️ 必须先判 `rootvnode`（手册 §5.1）。
+static void nredTraceLine(char* const buf, const int n)
+{
+    if (n <= 0 || rootvnode == nullptr) { return; }
+    // 固定文件名：每次启动的**第一次写**截断、之后追加 ⇒ 文件内容 = 本轮全部诊断行
+    // （判读时按 mtime 取本轮文件，流程见 docs/真机测试手册.md §6.1 第 0 步）。
+    static bool first = true;
+    const int fmode = first ? (O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW)
+                            : (O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
+    first = false;
+    FileIO::writeBufferToFile("/var/log/NRedTrace.log", buf, static_cast<size_t>(n), fmode);
+}
+
+// 统一诊断宏：**同时**写内核日志（SYSLOG）与自有落盘文件（`/var/log/NRedTrace.log`）。
+// 落盘是主通道（L2 覆盖窗口只有 26–35 s，关键读数在 34–39 s，见手册 §5.7）。
+#define NRED_TRACE(fmt, ...)                                                                        \
+    do {                                                                                            \
+        NRED_TRACE(fmt, ##__VA_ARGS__);                                                       \
+        char _tb[256];                                                                              \
+        const int _tn = snprintf(_tb, sizeof(_tb), fmt "\n", ##__VA_ARGS__);                        \
+        nredTraceLine(_tb, _tn);                                                                    \
+    } while (0)
 #include <kern/assert.h>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSBoolean.h>
@@ -671,7 +696,7 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt64 v0 = 0, v1 = 0;
         if (out != nullptr) { v0 = out[0]; v1 = out[1]; }   // 实测各调用点的缓冲区间隔 0xE8 字节，读 16 字节安全
-        SYSLOG("HWLibs", "ttl query: id=%u flags=%u ret=%llx out=%llx v0=%llx v1=%llx", static_cast<unsigned>(id),
+        NRED_TRACE("ttl query: id=%u flags=%u ret=%llx out=%llx v0=%llx v1=%llx", static_cast<unsigned>(id),
                static_cast<unsigned>(flags), static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(out)), static_cast<unsigned long long>(v0),
                static_cast<unsigned long long>(v1));
@@ -686,7 +711,7 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
 {
     void* const ret = FunctionCast(wrapTtlCollect, singleton().orgTtlCollect)(ctx);
     if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "ttl-coll: ctx=%llx ret=%llx (NULL would fail 0x8b10e)",
+        NRED_TRACE("ttl-coll: ctx=%llx ret=%llx (NULL would fail 0x8b10e)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
     }
@@ -697,7 +722,7 @@ void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
 {
     void* const ret = FunctionCast(wrapTtlAllocA, singleton().orgTtlAllocA)(ctx);
     if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "ttl-allocA: ctx=%llx ret=%llx (NULL -> exit 0x8b3d4)",
+        NRED_TRACE("ttl-allocA: ctx=%llx ret=%llx (NULL -> exit 0x8b3d4)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
     }
@@ -719,7 +744,7 @@ void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
                 e2 = reinterpret_cast<UInt64*>(tbl)[2 * 3 + 2];
             }
         }
-        SYSLOG("HWLibs", "ttl-allocB: ctx=%llx ret=%llx tbl=%llx e1=%llx e2=%llx e4=%llx (NULL -> exit 0x8b3cc)",
+        NRED_TRACE("ttl-allocB: ctx=%llx ret=%llx tbl=%llx e1=%llx e2=%llx e4=%llx (NULL -> exit 0x8b3cc)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)),
@@ -743,7 +768,7 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                 e1 = reinterpret_cast<UInt64*>(tbl)[1 * 3 + 2];
             }
         }
-        SYSLOG("HWLibs", "ttl-checkD: obj=%llx param=%llx ret=%d tbl=%llx e1=%llx e4=%llx (false -> exit 0x8b3cc)",
+        NRED_TRACE("ttl-checkD: obj=%llx param=%llx ret=%d tbl=%llx e1=%llx e4=%llx (false -> exit 0x8b3cc)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)), ret ? 1 : 0,
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)),
@@ -756,7 +781,7 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* const obj, void* const val)
 {
     if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "ttl-reg: table=%llx idx=%u obj=%llx val=%llx", static_cast<unsigned long long>(reinterpret_cast<UInt64>(table)),
+        NRED_TRACE("ttl-reg: table=%llx idx=%u obj=%llx val=%llx", static_cast<unsigned long long>(reinterpret_cast<UInt64>(table)),
                static_cast<unsigned>(idx), static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(val)));
     }
@@ -774,7 +799,7 @@ bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
             s1 = reinterpret_cast<UInt32*>(slots)[1];
             s2 = reinterpret_cast<UInt32*>(slots)[2];
         }
-        SYSLOG("HWLibs", "tls-create: obj=%llx slots=%llx s0=%u s1=%u s2=%u ret=%d",
+        NRED_TRACE("tls-create: obj=%llx slots=%llx s0=%u s1=%u s2=%u ret=%d",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(slots)), static_cast<unsigned>(s0),
                static_cast<unsigned>(s1), static_cast<unsigned>(s2), ret ? 1 : 0);
@@ -797,7 +822,7 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
             g60 = *reinterpret_cast<UInt64*>(singleton().kcSlide + 0x2241b60);
             g68 = *reinterpret_cast<UInt64*>(singleton().kcSlide + 0x2241b68);
         }
-        SYSLOG("HWLibs", "tls-swinit: obj=%llx f0=%llx f8=%llx g60=%llx g68=%llx ret=%llx",
+        NRED_TRACE("tls-swinit: obj=%llx f0=%llx f8=%llx g60=%llx g68=%llx ret=%llx",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                static_cast<unsigned long long>(f0), static_cast<unsigned long long>(f8),
                static_cast<unsigned long long>(g60), static_cast<unsigned long long>(g68),
@@ -806,20 +831,6 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
     return ret;
 }
 
-// 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
-//  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
-//  文件名带 **kext slide** ⇒ 每次启动天然不同，归档后不会混轮次。⚠️ 必须先判 `rootvnode`（手册 §5.1）。
-static void nredTraceLine(char* const buf, const int n)
-{
-    if (n <= 0 || rootvnode == nullptr) { return; }
-    // 固定文件名：每次启动的**第一次写**截断、之后追加 ⇒ 文件内容 = 本轮全部诊断行
-    // （判读时按 mtime 取本轮文件，流程见 docs/真机测试手册.md §6.1 第 0 步）。
-    static bool first = true;
-    const int fmode = first ? (O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW)
-                            : (O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
-    first = false;
-    FileIO::writeBufferToFile("/var/log/NRedTrace.log", buf, static_cast<size_t>(n), fmode);
-}
 
 // 第八步观测（2026-09-28 第二十五轮）：`bgm_create` 内层 4 步（只读，仅记录入参与返回值）。
 static void nredNoteBgmStep(const char* tag, UInt64 a1, UInt64 a2, UInt64 a3, UInt64 ret)
@@ -830,7 +841,7 @@ static void nredNoteBgmStep(const char* tag, UInt64 a1, UInt64 a2, UInt64 a3, UI
                            static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
                            static_cast<unsigned long long>(a3), static_cast<unsigned long long>(ret));
     nredTraceLine(buf, n);
-    SYSLOG("HWLibs", "%s: a1=%llx a2=%llx a3=%llx ret=%llx", tag, static_cast<unsigned long long>(a1),
+    NRED_TRACE("%s: a1=%llx a2=%llx a3=%llx ret=%llx", tag, static_cast<unsigned long long>(a1),
            static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
            static_cast<unsigned long long>(ret));
 }
@@ -853,7 +864,7 @@ UInt32 X5000HWLibs::wrapBgmStep1(void* const a, void* const b, void* const c, vo
             o0 = reinterpret_cast<UInt64*>(d)[0];
             o8 = reinterpret_cast<UInt64*>(d)[1];
         }
-        SYSLOG("HWLibs", "bgm-step1: a1=%llx a2=%llx a3=%llx out=%llx o0=%llx o8=%llx ret=%u",
+        NRED_TRACE("bgm-step1: a1=%llx a2=%llx a3=%llx out=%llx o0=%llx o8=%llx ret=%u",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(c)),
@@ -883,7 +894,7 @@ UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
             f2fa8 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(a) + 0x2fa8);
             f2fb8 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(a) + 0x2fb8);
         }
-        SYSLOG("HWLibs", "bgm-step4: obj=%llx inner=%llx mode=%u f2fa8=%llx f2fb8=%llx ret=%u",
+        NRED_TRACE("bgm-step4: obj=%llx inner=%llx mode=%u f2fa8=%llx f2fb8=%llx ret=%u",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)), static_cast<unsigned long long>(inner),
                static_cast<unsigned>(mode), static_cast<unsigned long long>(f2fa8),
                static_cast<unsigned long long>(f2fb8), static_cast<unsigned>(ret));
@@ -898,7 +909,7 @@ UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 
     // 只记录 BGM 相关的 selector/id（其余为热路径，静默通过，避免刷屏覆盖 L2 环形缓冲）。
     if ((sel == 7 || sel == 8 || a2 == 1 || a2 == 6 || a2 == 0xde5 || a2 == 0x16a00 || a2 == 0x16091) &&
         checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "read-sel: obj=%llx sel=%u a2=%u a3=%u buf=%llx a5=%u ret=%u",
+        NRED_TRACE("read-sel: obj=%llx sel=%u a2=%u a3=%u buf=%llx a5=%u ret=%u",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)), static_cast<unsigned>(sel),
                static_cast<unsigned>(a2), static_cast<unsigned>(a3),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)), static_cast<unsigned>(a5),
@@ -998,7 +1009,7 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                 char name[80];
                 if (rootvnode == nullptr) {
                     // 根 FS 未挂载 ⇒ 绝不碰文件系统（会阻塞内核线程、被 watchdog 强重启）
-                    SYSLOG("HWLibs", "ip-noroot");
+                    NRED_TRACE("ip-noroot");
                 } else {
                     snprintf(name, sizeof(name), "/var/log/NRedIpProbe-%llx.txt",
                              static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
@@ -1215,7 +1226,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     {
         PenguinWizardry::PatternRouteRequest ttlReq{"", wrapTtlQuery, this->orgTtlQuery, kTtlQueryPattern};
         if (!ttlReq.route(patcher, id, slide, size)) {
-            SYSLOG("HWLibs", "ttl-query: failed to route (pattern miss)");
+            NRED_TRACE("ttl-query: failed to route (pattern miss)");
         }
         else {
             DBGLOG("HWLibs", "ttl-query: routed");
@@ -1241,17 +1252,17 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                        static_cast<unsigned long long>(want));
                 return slide + want;
             }
-            SYSLOG("HWLibs", "%s: expected-offset bytes mismatch -> falling back to pattern scan", tag);
+            NRED_TRACE("%s: expected-offset bytes mismatch -> falling back to pattern scan", tag);
             // ② 回退：全 kext 扫描，并要求命中偏移与预期一致（否则跳过，绝不 patch 错地方）
             size_t offset = 0;
             if (!KernelPatcher::findPattern(pat, mask, n, reinterpret_cast<const void*>(slide), size, &offset)) {
-                SYSLOG("HWLibs", "%s: pattern not found", tag);
+                NRED_TRACE("%s: pattern not found", tag);
                 return 0;
             }
             DBGLOG("HWLibs", "%s: pattern at offset 0x%zx (expected 0x%llx)", tag, offset,
                    static_cast<unsigned long long>(want));
             if (offset != want) {
-                SYSLOG("HWLibs", "%s: matched 0x%zx, expected 0x%llx -> skipped", tag, offset,
+                NRED_TRACE("%s: matched 0x%zx, expected 0x%llx -> skipped", tag, offset,
                        static_cast<unsigned long long>(want));
                 return 0;
             }
@@ -1263,7 +1274,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         {
             req.from = from;
             if (patcher.routeMultiple(id, &req, 1, slide, size)) { DBGLOG("HWLibs", "%s: hooked", tag); }
-            else { SYSLOG("HWLibs", "%s: route failed", tag); }
+            else { NRED_TRACE("%s: route failed", tag); }
         };
 
         if (const auto from = resolveProbe("ttl-coll", kTtlInitCollectPattern, nullptr,
@@ -1331,7 +1342,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         const int err = (rootvnode != nullptr)
                             ? FileIO::writeBufferToFile("/var/log/NRedSelfTest.txt", kSelfTest, sizeof(kSelfTest) - 1)
                             : -999;
-        SYSLOG("HWLibs", "selftest: rootvnode=%llx err=%d", static_cast<unsigned long long>(reinterpret_cast<UInt64>(rootvnode)), err);
+        NRED_TRACE("selftest: rootvnode=%llx err=%d", static_cast<unsigned long long>(reinterpret_cast<UInt64>(rootvnode)), err);
     }
 
     // ★ 修复（2026-09-28）：把 IP 发现表的 `num_base_address` 上限从 6 放宽到 9（详见常量处注释）。
@@ -1751,7 +1762,7 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
     if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, 0)) != kCAILResultOK
         && res != kCAILResultUnsupported)
     {
-        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, res);
+        NRED_TRACE("smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrHigh, res);
         NRed::singleton().orSmu13ProbeState(1ULL << 0);
         return res;
     }
@@ -1762,7 +1773,7 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
     if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, 0)) != kCAILResultOK
         && res != kCAILResultUnsupported)
     {
-        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, res);
+        NRED_TRACE("smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, res);
         NRed::singleton().orSmu13ProbeState(1ULL << 1);
         return res;
     }
@@ -1773,7 +1784,7 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
     if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, 0)) != kCAILResultOK
         && res != kCAILResultUnsupported)
     {
-        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, res);
+        NRED_TRACE("smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, res);
         NRed::singleton().orSmu13ProbeState(1ULL << 2);
         return res;
     }
@@ -1784,7 +1795,7 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
     if ((res = singleton().smuSendMessage(ctx, PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, 1)) != kCAILResultOK
         && res != kCAILResultUnsupported)
     {
-        SYSLOG("HWLibs", "smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, res);
+        NRED_TRACE("smu13: msg 0x%X failed: 0x%X", PhoenixPPSMC::PPSMC_MSG_EnableGfxImu, res);
         NRed::singleton().orSmu13ProbeState(1ULL << 3);
         return res;
     }
@@ -1803,7 +1814,7 @@ CAILResult X5000HWLibs::smu13InternalHwInit(void* const ctx)
     singleton().smuCtxCache = ctx;
     CAILResult ret = smu13WaitForFwLoaded(ctx);
     if (ret != kCAILResultOK) {
-        SYSLOG("HWLibs", "smu13: internal HW init done, ret=0x%X", ret);
+        NRED_TRACE("smu13: internal HW init done, ret=0x%X", ret);
         // Probe: 标记 WaitForFwLoaded 失败早退（第 61 位）
         NRed::singleton().orSmu13ProbeState(1ULL << 61);
         return ret;
@@ -1812,14 +1823,14 @@ CAILResult X5000HWLibs::smu13InternalHwInit(void* const ctx)
     // Probe: 标记 WaitForFwLoaded 成功（第 62 位）
     NRed::singleton().orSmu13ProbeState(1ULL << 62);
     ret = smu13PowerUpConfig(ctx);
-    SYSLOG("HWLibs", "smu13: internal HW init done, ret=0x%X", ret);
+    NRED_TRACE("smu13: internal HW init done, ret=0x%X", ret);
     return ret;
 }
 
 CAILResult X5000HWLibs::smu13NotifyEvent(void* const ctx, TTLEventInput* const input)
 {
     if (input->arg >= SMU_EVENT_COUNT) {
-        SYSLOG("HWLibs", "Invalid input event to SMU notify event: %d", input->arg);
+        NRED_TRACE("Invalid input event to SMU notify event: %d", input->arg);
         return kCAILResultInvalidParameters;
     }
 
@@ -1862,7 +1873,7 @@ void X5000HWLibs::cgsWriteReg(void* const ctx, const UInt32 off, const UInt32 va
 UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
 {
     if (ctx == nullptr) {
-        SYSLOG("HWLibs", "VBIOSSMC send with null ctx (msg 0x%x)", msgId);
+        NRED_TRACE("VBIOSSMC send with null ctx (msg 0x%x)", msgId);
         return VBIOSSMC_Result_Failed;
     }
 
@@ -1876,7 +1887,7 @@ UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
         IODelay(10);
     }
     if (res == VBIOSSMC_Status_BUSY) {
-        SYSLOG("HWLibs", "VBIOSSMC busy timeout before send (msg 0x%x)", msgId);
+        NRED_TRACE("VBIOSSMC busy timeout before send (msg 0x%x)", msgId);
         return VBIOSSMC_Result_Failed;
     }
 
@@ -1900,11 +1911,11 @@ UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
     // 6) Handle failure
     if (res == VBIOSSMC_Result_Failed) {
         hw.smuCgsWriteRegister(ctx, MP1_SMN_C2PMSG_91, 0, VBIOSSMC_Result_OK, kCAILHWBlockMP1, 0);
-        SYSLOG("HWLibs", "VBIOSSMC msg 0x%x param %u failed", msgId, paramMHz);
+        NRED_TRACE("VBIOSSMC msg 0x%x param %u failed", msgId, paramMHz);
         return VBIOSSMC_Result_Failed;
     }
     if (res == VBIOSSMC_Status_BUSY) {
-        SYSLOG("HWLibs", "VBIOSSMC timeout after send (msg 0x%x)", msgId);
+        NRED_TRACE("VBIOSSMC timeout after send (msg 0x%x)", msgId);
         return VBIOSSMC_Result_Failed;
     }
 
@@ -1966,15 +1977,15 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
 
     // 结果判定（PMFW 响应值：0x1=OK 0xFE=UnknownCmd 0xFD=RejectedPrereq 0xFC=RejectedBusy 0xFF=Failed）
     if (res == 0) {
-        SYSLOG("HWLibs", "smu13Direct: no response (msg 0x%x param %u)", msgId, param);
+        NRED_TRACE("smu13Direct: no response (msg 0x%x param %u)", msgId, param);
         return kCAILResultNoResponse;
     }
     if (res == VBIOSSMC_Result_Failed) {
-        SYSLOG("HWLibs", "smu13Direct: msg 0x%x param %u returned Failed", msgId, param);
+        NRED_TRACE("smu13Direct: msg 0x%x param %u returned Failed", msgId, param);
         return kCAILResultFailed;
     }
     if (res != VBIOSSMC_Result_OK) {
-        SYSLOG("HWLibs", "smu13Direct: msg 0x%x param %u rejected, resp=0x%X", msgId, param, res);
+        NRED_TRACE("smu13Direct: msg 0x%x param %u rejected, resp=0x%X", msgId, param, res);
         return kCAILResultUnsupported;
     }
 
@@ -2015,7 +2026,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     // PAGE_SIZE 用常量（macOS 页 = 4096）保证物理对齐。
     auto& hw = singleton();
     if (hw.smu13MetricsBuffer != nullptr) {
-        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: buffer already allocated");
+        NRED_TRACE("smu13SetupDriverTableAndTransfer: buffer already allocated");
         return kCAILResultOK;
     }
 
@@ -2029,11 +2040,11 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     IOBufferMemoryDescriptor* buf = IOBufferMemoryDescriptor::withOptions(
         kIOMemoryPhysicallyContiguous | kIODirectionInOut, kBufferSize, kPageAlign);
     if (buf == nullptr) {
-        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: alloc failed");
+        NRED_TRACE("smu13SetupDriverTableAndTransfer: alloc failed");
         return kCAILResultFailed;
     }
     if (buf->prepare() != kIOReturnSuccess) {
-        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: prepare failed");
+        NRED_TRACE("smu13SetupDriverTableAndTransfer: prepare failed");
         buf->release();
         return kCAILResultFailed;
     }
@@ -2043,7 +2054,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     IOByteCount segLen = 0;
     const addr64_t phys = buf->getPhysicalSegment(0, &segLen, 0);
     if (phys == 0 || segLen < kMetricsSize) {
-        SYSLOG("HWLibs", "smu13SetupDriverTableAndTransfer: bad phys seg phys=0x%llX len=%llu",
+        NRED_TRACE("smu13SetupDriverTableAndTransfer: bad phys seg phys=0x%llX len=%llu",
                (unsigned long long)phys, (unsigned long long)segLen);
         buf->complete();
         buf->release();
@@ -2259,7 +2270,7 @@ CAILResult X5000HWLibs::smuFullAsicReset(void* const ctx, void* data)
 CAILResult X5000HWLibs::smu10NotifyEvent(void* const ctx, TTLEventInput* const input)
 {
     if (input->arg >= SMU_EVENT_COUNT) {
-        SYSLOG("HWLibs", "Invalid input event to SMU notify event: %d", input->arg);
+        NRED_TRACE("Invalid input event to SMU notify event: %d", input->arg);
         return kCAILResultInvalidParameters;
     }
 
@@ -2274,7 +2285,7 @@ CAILResult X5000HWLibs::smu10NotifyEvent(void* const ctx, TTLEventInput* const i
 CAILResult X5000HWLibs::smu12NotifyEvent(void* const ctx, TTLEventInput* const input)
 {
     if (input->arg >= SMU_EVENT_COUNT) {
-        SYSLOG("HWLibs", "Invalid input event to SMU notify event: %d", input->arg);
+        NRED_TRACE("Invalid input event to SMU notify event: %d", input->arg);
         return kCAILResultInvalidParameters;
     }
 
@@ -2298,7 +2309,7 @@ CAILResult X5000HWLibs::smuFullScreenEvent(void* const ctx, const TTLFullScreenE
             singleton().smuCgsWriteRegister(ctx, MP1_SMN_FPS_CNT, 0, 0, kCAILHWBlockMP1, 0);
             return kCAILResultOK;
         default:
-            SYSLOG("HWLibs", "Invalid input event to SMU full screen event: %d", event);
+            NRED_TRACE("Invalid input event to SMU full screen event: %d", event);
             return kCAILResultInvalidParameters;
     }
 }
@@ -2320,7 +2331,7 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
             singleton().smuNotifyEventField(ctx)    = reinterpret_cast<void*>(smu12NotifyEvent);
         } break;
         case 13: {
-            SYSLOG("HWLibs", "smu13: case 13 (SMU13 PMFW init) entered");
+            NRED_TRACE("smu13: case 13 (SMU13 PMFW init) entered");
             singleton().smuInternalHWInitField(ctx) = reinterpret_cast<void*>(smu13InternalHwInit);
             singleton().smuNotifyEventField(ctx)    = reinterpret_cast<void*>(smu13NotifyEvent);
         } break;
@@ -2516,7 +2527,7 @@ bool X5000HWLibs::getDcn1FwConstants(void* const ctx, DMCUFirmwareInfo* const fw
             setDMCUFWData(ctx, fwData, kDMCUFirmwareTypeERAM, &dmcu_eram_dcn10_abm_2_3);
             setDMCUFWData(ctx, fwData, kDMCUFirmwareTypeISR, &dmcu_intvectors_dcn10_abm_2_3);
         } break;
-        default: SYSLOG("HWLibs", "Invalid ABM Level (0x%X) for DCN 1!", abmLevel); return false;
+        default: NRED_TRACE("Invalid ABM Level (0x%X) for DCN 1!", abmLevel); return false;
     }
 
     return true;
@@ -2547,7 +2558,7 @@ bool X5000HWLibs::getDcn21FwConstants(void* const ctx, DMCUFirmwareInfo* const f
             setDMCUFWData(ctx, fwData, kDMCUFirmwareTypeERAM, &dmcu_eram_dcn21_abm_2_4);
             setDMCUFWData(ctx, fwData, kDMCUFirmwareTypeISR, &dmcu_intvectors_dcn21_abm_2_4);
         } break;
-        default: SYSLOG("HWLibs", "Invalid ABM Level (0x%X) for DCN 2.1!", abmLevel); return false;
+        default: NRED_TRACE("Invalid ABM Level (0x%X) for DCN 2.1!", abmLevel); return false;
     }
 
     return true;
