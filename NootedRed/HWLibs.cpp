@@ -1318,10 +1318,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         }
     }
 
-    PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "HWLibs",
-               "Failed to enable kernel writing");
-
     // ★ 修复（2026-09-28）：把 IP 发现表的 `num_base_address` 上限从 6 放宽到 9（详见常量处注释）。
+    //  ⚠️ **必须放在 `setKernelWriting(true, ...)` 之外**：`KernelPatcher::applyLookupPatch` 内部
+    //  自己会调用 `MachInfo::setKernelWriting(true, kernelWriteLock)`，若调用者已持锁 ⇒ 递归锁 panic
+    //  （2026-09-28 真机实测：`hwlock: ... recursively @locks.c:553`）。
     {
         const PenguinWizardry::MaskedLookupPatch ipNbaPatch{&kextRadeonX5000HWLibs, kIpNbaLimitOriginal,
                                                              kIpNbaLimitPatched, 1};
@@ -1329,6 +1329,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                    "Failed to apply IP num_base_address limit patch");
     }
 
+    PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "HWLibs",
+               "Failed to enable kernel writing");
     if (orgDeviceTypeTable != nullptr) {
         *orgDeviceTypeTable = {.deviceId = NRed::singleton().getDeviceID(), .deviceType = kAMDDeviceTypeNavi10};
     }
