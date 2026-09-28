@@ -70,6 +70,10 @@ extern "C" char gPpInLine[160];
 extern "C" int  gPpInLen;
 char gPpInLine[160];
 int  gPpInLen = 0;
+// 被 patch 的目标地址（`AmdPowerPlayHelper::powerUp` 的运行时入口），供其它文件在
+// 更晚的时刻读回其首字节，判定 patch 是否在运行期仍然有效（2026-09-28 第 28 轮）。
+extern "C" UInt64 gPpHelperTarget;
+UInt64 gPpHelperTarget = 0;
 
 static void nredPPTrace(char* const buf, const int n)
 {
@@ -410,6 +414,7 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                 const mach_vm_address_t tgt = patcher.solveSymbol(
                     id, "__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv");
                 const UInt8* tb = reinterpret_cast<const UInt8*>(tgt);
+                gPpHelperTarget = static_cast<UInt64>(tgt);
                 SYSLOG("X6000FB", "pp-hook: tgt=%llx org=%llx bytes=%02x %02x %02x %02x %02x %02x",
                        static_cast<unsigned long long>(tgt),
                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(this->orgPpHelperPowerUp)),

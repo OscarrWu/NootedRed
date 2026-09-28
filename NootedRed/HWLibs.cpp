@@ -46,6 +46,8 @@ extern "C" int  gPpProbeLen;
 // 由本文件已验证可写盘的 IP 探针落盘点代写，作为不依赖 Lilu 日志的独立证据。
 extern "C" char gPpInLine[160];
 extern "C" int  gPpInLen;
+// 被 patch 的目标地址（定义在 X6000FB.cpp）：用于在更晚的时刻读回首字节。
+extern "C" UInt64 gPpHelperTarget;
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
 //  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
@@ -1061,6 +1063,15 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         // "PP 包装函数入口没执行"（两个长度都是 0）与 "执行了但文件写不出去"（长度非 0）。
         // 本行与 `ip:` 同频（每次 IP 表解析一行），不会挤爆日志。
         SYSLOG("HWLibs", "ip-carry: ppIn=%d ppLen=%d", gPpInLen, gPpProbeLen);
+        // ★ patch 是否仍然有效（2026-09-28 第 28 轮）：本点是**已验证可执行**的时刻（~26 s），
+        //   晚于 patch（~16 s）、早于/邻近 powerUp。若首字节仍是 `E9`（jmp rel32）⇒ patch 在
+        //   运行期保持，则"包装函数不执行"另有原因；若已变回原始序言 ⇒ patch 被还原，
+        //   需要改换挂钩方式（这是我们所有 PP 侧探针无产出的唯一自洽解释）。
+        if (gPpHelperTarget != 0) {
+            const UInt8* hb = reinterpret_cast<const UInt8*>(gPpHelperTarget);
+            SYSLOG("HWLibs", "pp-hook-late: tgt=%llx bytes=%02x %02x %02x %02x",
+                   static_cast<unsigned long long>(gPpHelperTarget), hb[0], hb[1], hb[2], hb[3]);
+        }
     }
     return ret;
 }
