@@ -336,6 +336,14 @@ static const UInt8 kCfgReadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41
 //  即可区分"失败在判据 ①/②"与"失败在尾段内部"。
 static const UInt8 kMode2TailPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                           0x53, 0x48, 0x83, 0xEC, 0x28, 0x45, 0x89, 0xC4, 0x49, 0x89, 0xF5, 0xC7};
+// ★ 修复（2026-09-28）：IP 发现表的 `num_base_address` 判据放宽。
+//  `0x2ab00e` 在解析 IP 表时要求 `(u8(ip+3) - 1) <= 5`（即 nba ∈ {1..6}），否则跳到失败出口
+//  `0x2ab1b5` 返回 1。RDNA3（Phoenix，780M）的 IP 表里 **hw_id 0x96 映射到 0x46 的块有 8 个基址**
+//  （真机取证：`kb/sequences/raw/observe-20260928-1046-ipt5/`），于是 `0x2ab00e` 恒返回 1 ⇒
+//  `bgm_create` 失败 ⇒ TTL 初始化失败 ⇒ PP 上电 panic（`Failed to get TTL RTS from HW Services`）。
+//  放宽到 nba ≤ 9：目标缓冲的布局已核查（每实例 60 字节，8 个基址仅占 32 字节 ⇒ 不越界）。
+static const UInt8 kIpNbaLimitOriginal[] = {0x8D, 0x51, 0xFF, 0x80, 0xFA, 0x05, 0x0F, 0x87};
+static const UInt8 kIpNbaLimitPatched[]  = {0x8D, 0x51, 0xFF, 0x80, 0xFA, 0x08, 0x0F, 0x87};
 
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -1312,6 +1320,15 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
 
     PANIC_COND(MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS, "HWLibs",
                "Failed to enable kernel writing");
+
+    // ★ 修复（2026-09-28）：把 IP 发现表的 `num_base_address` 上限从 6 放宽到 9（详见常量处注释）。
+    {
+        const PenguinWizardry::MaskedLookupPatch ipNbaPatch{&kextRadeonX5000HWLibs, kIpNbaLimitOriginal,
+                                                             kIpNbaLimitPatched, 1};
+        PANIC_COND(!ipNbaPatch.apply(patcher, slide, size), "HWLibs",
+                   "Failed to apply IP num_base_address limit patch");
+    }
+
     if (orgDeviceTypeTable != nullptr) {
         *orgDeviceTypeTable = {.deviceId = NRed::singleton().getDeviceID(), .deviceType = kAMDDeviceTypeNavi10};
     }
