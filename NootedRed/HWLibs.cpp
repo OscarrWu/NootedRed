@@ -33,6 +33,7 @@
 #include <Regs/SDMA0.hpp>
 #include <Regs/SMU.hpp>
 #include <Regs/VBIOSSMC.hpp>
+#include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态落盘，见下方 IP 探针）
 #include <kern/assert.h>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSBoolean.h>
@@ -947,6 +948,31 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                     bad++;
                 }
                 pos += 8 + 4 * nba;
+            }
+        }
+        // ★ 自建落盘（2026-09-28 第 13 轮教训）：本函数在 ~34.8s 被调用，而 L2 的 msgbuf 环形
+        //  只覆盖到 ~26s ⇒ 关键读数根本进不了日志。这里直接把摘要写进 /var/log 下的自有文件
+        //  （每个对象一个文件，天然区分多次调用）。**必须先判 `rootvnode`**：根 FS 未挂载时写文件
+        //  会让内核线程阻塞、被 watchdog 强重启且不产生 panic 分片。
+        {
+            char line[256];
+            const int n = snprintf(line, sizeof(line),
+                "ip-fail: off=%x die=%x cnt=%u bad=%u b0=%x/%u b1=%x/%u ck=%04x/%04x,%04x/%04x,%04x/%04x "
+                "m=%08x,%08x ab=%llx/%llx ret=%u\n",
+                static_cast<unsigned>(dieOff), static_cast<unsigned>(die), static_cast<unsigned>(cnt),
+                static_cast<unsigned>(bad), static_cast<unsigned>(b0), static_cast<unsigned>(n0),
+                static_cast<unsigned>(b1), static_cast<unsigned>(n1),
+                static_cast<unsigned>(cksA), static_cast<unsigned>(u16(0x8)), static_cast<unsigned>(cksB),
+                static_cast<unsigned>(u16(0xE)), static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)),
+                static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o12)),
+                static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
+            if (n > 0 && rootvnode != nullptr) {
+                char name[64];
+                snprintf(name, sizeof(name), "/var/log/NRedIpProbe-%llx.txt",
+                         static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
+                FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
             }
         }
         SYSLOG("HWLibs",
