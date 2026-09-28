@@ -45,13 +45,12 @@ extern "C" void *rootvnode __attribute__((weak));
 static void nredTraceLine(char* const buf, const int n)
 {
     if (n <= 0 || rootvnode == nullptr) { return; }
-    // 固定文件名：每次启动的**第一次写**截断、之后追加 ⇒ 文件内容 = 本轮全部诊断行
-    // （判读时按 mtime 取本轮文件，流程见 docs/真机测试手册.md §6.1 第 0 步）。
-    static bool first = true;
-    const int fmode = first ? (O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW)
-                            : (O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
-    first = false;
-    FileIO::writeBufferToFile("/var/log/NRedTrace.log", buf, static_cast<size_t>(n), fmode);
+    // ⚠️ 每次调用写**独立文件**（2026-09-28 第 19 轮实测：`O_APPEND` 组合未生效，追加写退化成覆盖，
+    //  文件里只剩最后一行）⇒ 用递增序号命名，天然不互相覆盖；判读时按文件名排序即得完整轨迹。
+    static unsigned seq = 0;
+    char name[64];
+    snprintf(name, sizeof(name), "/var/log/NRedTrace-%03u.log", seq++);
+    FileIO::writeBufferToFile(name, buf, static_cast<size_t>(n), O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW);
 }
 
 // 统一诊断宏：**同时**写内核日志（SYSLOG）与自有落盘文件（`/var/log/NRedTrace.log`）。
