@@ -925,12 +925,11 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 //  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic6`（与其它探针互斥使用）。
 UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
-    gPpHelperSelf = 0xA5A5A5A5DEADBEEFULL;   // ★ 本轮改成魔数：见下方 gPpInLen 的说明
-    // ★ 最小写入判据（2026-09-28 第 28 轮）：把这两条**纯赋值**放在门控求值之前。
-    //   它们不依赖任何外部函数（不调 checkKernelArgument、不用 SYSLOG、不碰文件系统），
+    gPpHelperSelf = reinterpret_cast<UInt64>(self);   // 入口判据：非 0 即说明入口代码执行过
+    // ★ 最小写入判据（2026-09-28 第 28 轮）：这两条**纯赋值**放在门控求值之前，
+    //   不依赖任何外部函数（不调 checkKernelArgument、不用 SYSLOG、不碰文件系统），
     //   编译后必然随函数入口一起执行；随后由已验证可写盘的 IP 探针（26s，晚于本函数）
-    //   把它们读出 → 一次判定"本函数入口到底执行没有"。
-    //   （gPpHelperSelf 改成魔数：排除"该变量被别处写"的可能，使判据无歧义。）
+    //   把 gPpHelperSelf 读出 → 一次判定"本函数入口到底执行没有"。
     {
         gPpInLen = 5;
         memcpy(gPpInLine, "inA0\n", 5);
