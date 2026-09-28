@@ -1305,7 +1305,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  必须依赖自建落盘；而自建落盘此前一直没产出文件。这里在**早期**（L2 还看得到的时刻）做一次
     //  同路径的写文件，并把它的事实（`rootvnode` 值 + `FileIO` 返回码）写进日志 ⇒ 一轮即可定位病因。
     {
-        static const char kSelfTest[] = "nred-selftest\n";
+        static char kSelfTest[] = "nred-selftest\n";
         const int err = (rootvnode != nullptr)
                             ? FileIO::writeBufferToFile("/var/log/NRedSelfTest.txt", kSelfTest, sizeof(kSelfTest) - 1)
                             : -999;
