@@ -900,18 +900,20 @@ UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const 
 
 UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, void* const d, void* const e)
 {
+    const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
+    // 只读观测：`0x2ab00e` 的第 2 形参是一个 64 KiB 缓冲，函数内部按其构造的 **IP 发现表**做校验
+    // （`"IPDS"`/`"HARV"` 魔数 + 三段校验和 + 每块 `num_base_address ∈ {1..6}`）。
+    // ⚠️ **每次调用只输出这一行、且放在调用之后**：① 多行会被 L2 环形缓冲吞掉（第 8/9 轮实测）；
+    //  ② 与 `ret` 合并输出才能保证"哪张表 ⇒ 哪个返回值"不错配。
+    // 不调用任何 Apple 方法、不改内存。
     if (checkKernelArgument("-NRedAccelLog") && b != nullptr) {
-        // 只读观测：`0x2ab00e` 的第 2 形参是一个 64 KiB 缓冲，函数内部按 **IP 发现表**校验它
-        // （`*(UInt32*)(buf + u16(buf+0xc)) == "IPDS"`、`buf + u16(buf+0x1c) == "HARV"`、三段校验和）。
-        // 这里 dump 头部 0x20 字节 + 两个子表偏移处的 4 字节，用以判定"校验失败"的成因；
-        // 不调用任何 Apple 方法、不改内存。判读见 docs/子任务/第八步执行记录（点亮验证）.md。
         const auto* const p = static_cast<const UInt8*>(b);
         const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);   // IPDS 子表偏移（相对缓冲起点）
         const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);  // HARV 子表偏移
-        // 三段校验和：**逐条复刻 `0x2ab00e` 的算法**（16 位字节累加和），用于判定它究竟卡在哪一段。
         const auto u16 = [p](unsigned o) { return static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + o)); };
-        const UInt32 cntA = u16(0xA);
+        // 三段校验和：逐条复刻 `0x2ab00e` 的算法（16 位字节累加和）
         UInt32 cksA = 0;
+        const UInt32 cntA = u16(0xA);
         if (cntA != 10) {
             cksA = static_cast<UInt8>(cntA);
             const UInt32 n = static_cast<UInt16>(cntA - 10);
@@ -933,13 +935,11 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                 for (UInt32 i = 0; i < len; i++) { cksC = static_cast<UInt16>(cksC + p[o1C + i]); }
             }
         }
-        // ⚠️ **每次调用只输出这一行**：第 8/9 轮实测日志行会随机丢失（L2 环形缓冲 + msgbuf 竞争），
-        //  多行输出必然缺数据 ⇒ 把所有关键字段（校验和 + die + 越界块自检）压进一行。
-        UInt32 dieOff = 0, cnt = 0, bad = 0, b0 = 0, n0 = 0, b1 = 0, n1 = 0, magic12 = 0, magic1c = 0;
-        if (o12 + 4 <= 0x10000) { magic12 = *reinterpret_cast<const UInt32*>(p + o12); }
-        if (o1C + 4 <= 0x10000) { magic1c = *reinterpret_cast<const UInt32*>(p + o1C); }
-        dieOff = u16(o12 + 0x10);
+        // die 记录（偏移是**相对缓冲起点**，不是相对 IPDS 子表）+ 越界块自检
+        UInt32 die = 0xFFFFFFFF, cnt = 0, bad = 0, b0 = 0, n0 = 0, b1 = 0, n1 = 0;
+        const UInt32 dieOff = u16(o12 + 0x10);
         if (dieOff + 8 <= 0x10000) {
+            die = (u16(dieOff) << 16) | u16(dieOff + 2);
             cnt = u16(dieOff + 2);
             UInt32 pos = dieOff + 4;
             for (UInt32 i = 0; i < cnt && pos + 8 <= 0x10000; i++) {
@@ -953,25 +953,18 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                 pos += 8 + 4 * nba;
             }
         }
-        SYSLOG("HWLibs", "ip: ck=%04x/%04x,%04x/%04x,%04x/%04x die=%x/%x/%x/%x cnt=%u bad=%u b0=%x/%u b1=%x/%u m=%08x,%08x",
-               static_cast<unsigned>(cksA), static_cast<unsigned>(u16(0x8)),
-               static_cast<unsigned>(cksB), static_cast<unsigned>(u16(0xE)),
-               static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)),
-               static_cast<unsigned>(dieOff), static_cast<unsigned>(dieOff + 8 <= 0x10000 ? u16(dieOff) : 0xFFFF),
-               static_cast<unsigned>(dieOff + 8 <= 0x10000 ? u16(dieOff + 2) : 0xFFFF),
-               static_cast<unsigned>(dieOff + 8 <= 0x10000 ? u16(dieOff + 4) : 0xFFFF),
-               static_cast<unsigned>(cnt), static_cast<unsigned>(bad), static_cast<unsigned>(b0),
-               static_cast<unsigned>(n0), static_cast<unsigned>(b1), static_cast<unsigned>(n1),
-               static_cast<unsigned>(magic12), static_cast<unsigned>(magic1c));
-        }
-    const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
-    if (checkKernelArgument("-NRedAccelLog")) {
-        SYSLOG("HWLibs", "mode2-tail: a1=%llx a2=%llx a3=%llx a4=%llx a5=%llx ret=%u",
+        SYSLOG("HWLibs",
+               "ip: off=%x die=%x cnt=%u bad=%u b0=%x/%u b1=%x/%u ck=%04x/%04x,%04x/%04x,%04x/%04x "
+               "m=%08x,%08x ab=%llx/%llx ret=%u",
+               static_cast<unsigned>(dieOff), static_cast<unsigned>(die), static_cast<unsigned>(cnt),
+               static_cast<unsigned>(bad), static_cast<unsigned>(b0), static_cast<unsigned>(n0),
+               static_cast<unsigned>(b1), static_cast<unsigned>(n1),
+               static_cast<unsigned>(cksA), static_cast<unsigned>(u16(0x8)), static_cast<unsigned>(cksB),
+               static_cast<unsigned>(u16(0xE)), static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o12)),
+               static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(c)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(d)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(e)), static_cast<unsigned>(ret));
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
     }
     return ret;
 }
