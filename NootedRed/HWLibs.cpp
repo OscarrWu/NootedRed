@@ -38,6 +38,10 @@
 // 根 vnode（XNU `bsd/sys/vnode.h`）：**内核态写文件的必备判据**，非空才表示根 FS 已挂载。
 // 与 `NvMsgBuf.hpp` 同一写法（`extern "C"` + weak），此处单独声明以免把它的静态缓冲带进来。
 extern "C" void *rootvnode __attribute__((weak));
+// 捎带落盘缓冲（定义在 X6000FB.cpp）：PP 探针早于本文件的 IP 探针执行，其时刻 `rootvnode`
+// 可能尚未就绪 ⇒ PP 行先缓存，由本文件已验证可写盘的 IP 探针落盘点补写。
+extern "C" char gPpProbeLine[768];
+extern "C" int  gPpProbeLen;
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
 //  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
@@ -1016,6 +1020,16 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                     if (err != 0) {   // 失败 ⇒ 把错误码写进文件名，便于事后判定原因
                         snprintf(name, sizeof(name), "/var/log/NRedIpProbe-err%d.txt", err);
                         FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
+                    }
+                    // ★ 捎带写出 PP 探针的行（见 X6000FB.cpp `nredPPTrace` 的说明）：PP 探针在
+                    //   本函数之前执行，其时刻 `rootvnode` 可能尚未就绪 ⇒ 由这里补写一次。
+                    //   本函数已知能成功写盘（上一步就是证据），所以这条通道是可靠的。
+                    if (gPpProbeLen > 0) {
+                        char ppName[80];
+                        snprintf(ppName, sizeof(ppName), "/var/log/NRedPP-carry-%llx.txt",
+                                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
+                        FileIO::writeBufferToFile(ppName, gPpProbeLine, static_cast<size_t>(gPpProbeLen));
+                        gPpProbeLen = 0;   // 只捎带一次（避免把早期读数反复覆盖到每个对象文件里）
                     }
                 }
             }

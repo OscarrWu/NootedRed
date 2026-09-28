@@ -58,14 +58,33 @@ extern "C" void *rootvnode __attribute__((weak));
 
 static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（供 panic 前落盘用）
 
+// ★ 捎带落盘（2026-09-28 第 25 轮教训）：PP 探针与 IP 探针同在 powerUp 路径上，但 PP 探针
+//   更早执行——此时 `rootvnode` 可能尚未就绪（PP 落盘静默失败、而稍后的 IP 探针却写成功，
+//   第 24/25 轮实测）。于是把 PP 行**缓存**下来，交给紧随其后的 IP 探针落盘点一并写出。
+extern "C" char gPpProbeLine[768];
+extern "C" int  gPpProbeLen;
+char gPpProbeLine[768];
+int  gPpProbeLen = 0;
+
 static void nredPPTrace(char* const buf, const int n)
 {
-    if (n <= 0 || rootvnode == nullptr) { return; }
-    const size_t len = static_cast<size_t>(n > 767 ? 767 : n);   // snprintf 可能返回"应写长度"
+    if (n <= 0) { return; }
+    const size_t len = static_cast<size_t>(n > 767 ? 767 : n);
+    // 1) 缓存：即使此刻写盘不可用，后续的 IP 探针落盘点仍会把它带出。
+    memcpy(gPpProbeLine, buf, len);
+    gPpProbeLine[len < 767 ? len : 767] = '\0';
+    gPpProbeLen = static_cast<int>(len);
+    // 2) 立即尝试写盘。flags 与**已被证明可用**的 IP 探针写法保持一致（不带 O_TRUNC 组合）；
+    //    失败时写错误码文件名，避免"静默无产出"这种无从判读的状态。
+    if (rootvnode == nullptr) { return; }
     static unsigned seq = 0;
     char name[64];
     snprintf(name, sizeof(name), "/var/log/NRedPP-%03u.log", seq++);
-    FileIO::writeBufferToFile(name, buf, len, O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW);
+    const int err = FileIO::writeBufferToFile(name, buf, len);
+    if (err != 0) {
+        snprintf(name, sizeof(name), "/var/log/NRedPP-err%d.log", err);
+        FileIO::writeBufferToFile(name, buf, len);
+    }
 }
 
 static const UInt8 kCailAsicCapsTablePattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
