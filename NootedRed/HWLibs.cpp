@@ -814,7 +814,7 @@ static void nredTraceLine(char* const buf, const int n)
     if (n <= 0 || rootvnode == nullptr) { return; }
     char name[64];
     snprintf(name, sizeof(name), "/var/log/NRedTrace-%llx.log",
-             static_cast<unsigned long long>(singleton().kcSlide));
+             static_cast<unsigned long long>(X5000HWLibs::singleton().kcSlide));
     FileIO::writeBufferToFile(name, buf, static_cast<size_t>(n), O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
 }
 
