@@ -1767,6 +1767,22 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         //  在**只看我们自己的 BAR 映射**（合法、不碰设备状态）的前提下扫出这对寄存器**真实落在哪个地址**，
         //  一次同时确定"段基址 + 单位（dword/byte）"这两个一直没定的问题。
         //  ⚠️ 只读；只扫映射窗口内（128K dword），成本约十几毫秒。
+        // ── ⑤ 候选约定矩阵（兜底判据）：扫描若不命中（可能因为 macOS 侧 PSP TMR 未被写），
+        //  则靠这张表判"哪套约定给出活值"。每行 = 一种地址约定，列 = C2PMSG_81/35/58（SOS存活/引导状态/固件版本）。
+        //  ⚠️ 全部只读；hmm 值为 ffffffff/0 者基本可判为未译码或空。
+        struct Cand { const char* tag; UInt32 dw; };
+        static const Cand kCands[] = {
+            {"d_0x91/63/7A", 0x91},        // 假设 SEG1 = 0：直接用寄存器偏移当 dword 索引
+            {"d_16091/63/7A", 0x16000},    // 项目原约定：SEG0 基址当 dword 索引
+            {"d_5800+off", 0x5800},        // SEG0 当**字节**基址：(0x16000 + off*4)/4
+        };
+        UInt32 m81[3], m35[3], m58[3];
+        for (UInt32 k = 0; k < 3; ++k) {
+            const UInt32 b = kCands[k].dw;
+            m81[k] = n3.readReg32(b + 0x91);
+            m35[k] = n3.readReg32(b + 0x63);
+            m58[k] = n3.readReg32(b + 0x7A);
+        }
         UInt32 hitAddr[6] = {0, 0, 0, 0, 0, 0};
         UInt32 hitNext[6] = {0, 0, 0, 0, 0, 0};
         UInt32 hitCnt     = 0;
@@ -1783,9 +1799,10 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         }
         panic("NRed FwProbe3: ext c81=%x c35=%x c36=%x c58=%x v67=%x v91=%x | 旧路径 c81=%x | "
               "机制: INDEX2写=%x 回读=%x DATA2=%x | TMR扫描 n=%u "
-              "hit=[%x/%x %x/%x %x/%x] want(c81!=0 c35=1 c36=80)",
+              "hit=[%x/%x %x/%x %x/%x] | 矩阵81/35/58: [%x %x %x][%x %x %x][%x %x %x]",
               xC81, xC35, xC36, xC58, xV67, xV91, oC81, a81, rb, datAfter, hitCnt,
-              hitAddr[0], hitNext[0], hitAddr[1], hitNext[1], hitAddr[2], hitNext[2]);
+              hitAddr[0], hitNext[0], hitAddr[1], hitNext[1], hitAddr[2], hitNext[2],
+              m81[0], m35[0], m58[0], m81[1], m35[1], m58[1], m81[2], m35[2], m58[2]);
     }
 
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
