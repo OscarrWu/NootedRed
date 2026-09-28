@@ -1408,6 +1408,65 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         panic("NRed accel exist: ctl=%llx c7960=%llx accel=%llx accelCls=%llx ctrl=%llx hwsvc=%llx kextIdx=%llu",
               ctlAddr, f7960, vAccel, vAccelCls, vCtrl, vHwsvc, vKextIdx);
     }
+
+    // ─── 乙线 T7：固件层只读探针（门控 `-NRedFwProbe`，默认关闭）─────────────────────
+    //  目的（依据 `docs/子任务/乙线自建固件层作战计划.md` · T7）：在**不动任何状态**的前提下取回
+    //  PSP/SMU 固件层现状，回答四个问题：
+    //   ① BIOS 是否已把 SOS 拉起来（`C2PMSG_81` 存活标志、`C2PMSG_58` 固件版本）；
+    //   ② bootloader/PSP 就绪状态（`C2PMSG_35` 状态、`C2PMSG_33` ready 位）；
+    //   ③ 是否已存在 TMR 与 GPCOM 环（`C2PMSG_36`+`_35` 的 TMR 地址、`_69/_70/_71/_64/_67` 的环寄存器）；
+    //   ④ MP0 段基址判别（SEG0 vs SEG1，**零写入**判别；项目内两条记载相互冲突，见作战计划 §6 R6）。
+    //
+    //  为什么挂本函数：本 hook 的 route 是**无条件安装**的（`processKext` 对
+    //  `AmdRadeonController::powerUp` 的 route 无门控，见上文第 1370 行附近），且 panic 栈铁证本函数
+    //  100% 被调用（先于 `AmdPowerPlayHelper::powerUp`）⇒ 无论本轮成功还是失败，本探针都会执行。
+    //
+    //  ⛔ 纪律（`docs/ROADMAP.md` §2.9「真机纪律」）：**纯只读**——只调 `readReg32`，绝不写任何寄存器；
+    //     不使用 panic（不打断流程、不掩盖成功）；读数经 `nredPPTrace`（L1 日志 + 立即落盘 + 文件兜底）带回。
+    //
+    //  寄存器语义（逐条核对 Linux 源码，非推测）：
+    //   · `MP0_SMN_C2PMSG_81` = SOS 存活标志（`psp_v13_0.c:149` `psp_v13_0_is_sos_alive` 读它）
+    //   · `MP0_SMN_C2PMSG_58` = SOS 固件版本（`psp_v13_0.c:336` `psp->sos.fw_version`）
+    //   · `MP0_SMN_C2PMSG_35` = bootloader 状态（`psp_v13_0.c:216-222` 等它 == 1）
+    //                            / TMR 地址低 32 位（`psp_tmr_init` 写它，见 `:281-284`）
+    //   · `MP0_SMN_C2PMSG_36` = TMR 地址高 32 位
+    //   · `MP0_SMN_C2PMSG_33` = PSP ready（bit31，见 `:188-190`）
+    //   · `MP0_SMN_C2PMSG_64/67/69/70/71` = 非 SRIOV 的 GPCOM 环（命令+rsp 位/写指针/地址低高/大小）
+    //   · `MP0_SMN_C2PMSG_101/102/103`   = SRIOV 变体的环寄存器（取回作对照，本项目走非 SRIOV）
+    //  偏移换算：`mp_13_0_4_offset.h` 中 `regMP0_SMN_C2PMSG_N = 0x40 + N`（已逐条核对：`_35`=0x63@L37、
+    //   `_36`=0x64@L39、`_58`=0x7a@L83、`_64`=0x80@L95、`_67`=0x83@L101、`_69`=0x85@L105、`_70`=0x86@L107、
+    //   `_71`=0x87@L109）。
+    //   ⚠️ 注意：`C2PMSG_100..103` **不是** bootloader 版本，而是**显示时钟消息通道的 ARG0..3**
+    //   （`display/dc/clk_mgr/dcn60/dcn60_clk_mgr_smu_msg.c:15`），勿误用。
+    if (checkKernelArgument("-NRedFwProbe") && NRed::singleton().getAttributes().isPhoenix()) {
+        struct FwReg {
+            const char* name;
+            UInt32      off;
+        };
+        static const FwReg kFwRegs[] = {
+            {"c33", 0x21},  {"c35", 0x23},  {"c36", 0x24},  {"c58", 0x3A},  {"c64", 0x40},
+            {"c67", 0x43},  {"c69", 0x45},  {"c70", 0x46},  {"c71", 0x47},  {"c81", 0x51},
+            {"c101", 0x65}, {"c102", 0x66}, {"c103", 0x67},
+        };
+        // Linux 侧 MP0 的 BASE_IDX=1 段基址（`yellow_carp_offset.h:826-827`）；本项目现役代码走 SEG0。
+        constexpr UInt32 kSeg1Base = 0x0243FC00;
+
+        auto& nredFw = NRed::singleton();
+        char  fwBuf[768];
+        int   fwLen = 0;
+        fwLen += snprintf(fwBuf + fwLen, sizeof(fwBuf) - fwLen, "fw-probe: pure-read");
+        for (size_t i = 0; i < arrsize(kFwRegs); i++) {
+            const UInt32 vSeg0 = nredFw.readReg32(MP0_BASE_0 + kFwRegs[i].off);
+            const UInt32 vSeg1 = nredFw.readReg32(kSeg1Base + kFwRegs[i].off);
+            fwLen += snprintf(fwBuf + fwLen, sizeof(fwBuf) - fwLen, " %s=%x/%x", kFwRegs[i].name, vSeg0, vSeg1);
+        }
+        // 空白对照（纯读）：项目已知无效的 MMHUB 旧地址（`readReg32` 实测恒为全 F）——
+        // 用来证明本探针的"非全 F 读数"确实来自真实寄存器，而不是读路径的假阳性。
+        const UInt32 vDead = nredFw.readReg32(0x68000 + 0x0857);
+        fwLen += snprintf(fwBuf + fwLen, sizeof(fwBuf) - fwLen, " dead=%x | v0/v1=SEG0(0x16000)/SEG1(0x243fc00) 同偏移", vDead);
+        nredPPTrace(fwBuf, fwLen);
+    }
+
     auto& m_flags  = getMember<UInt8>(self, 0x5F18);
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
