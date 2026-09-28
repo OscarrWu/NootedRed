@@ -806,10 +806,28 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
     return ret;
 }
 
+// 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
+//  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
+//  文件名带 **kext slide** ⇒ 每次启动天然不同，归档后不会混轮次。⚠️ 必须先判 `rootvnode`（手册 §5.1）。
+static void nredTraceLine(char* const buf, const int n)
+{
+    if (n <= 0 || rootvnode == nullptr) { return; }
+    static char name[64];
+    char n2[64];
+    snprintf(n2, sizeof(n2), "/var/log/NRedTrace-%llx.log", static_cast<unsigned long long>(singleton().kcSlide));
+    if (name[0] == 0) { memcpy(name, n2, sizeof(n2)); }
+    FileIO::writeBufferToFile(name, buf, static_cast<size_t>(n), O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
+}
+
 // 第八步观测（2026-09-28 第二十五轮）：`bgm_create` 内层 4 步（只读，仅记录入参与返回值）。
 static void nredNoteBgmStep(const char* tag, UInt64 a1, UInt64 a2, UInt64 a3, UInt64 ret)
 {
     if (!checkKernelArgument("-NRedAccelLog")) { return; }
+    char buf[192];
+    const int n = snprintf(buf, sizeof(buf), "%s: a1=%llx a2=%llx a3=%llx ret=%llx\n", tag,
+                           static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2),
+                           static_cast<unsigned long long>(a3), static_cast<unsigned long long>(ret));
+    nredTraceLine(buf, n);
     SYSLOG("HWLibs", "%s: a1=%llx a2=%llx a3=%llx ret=%llx", tag, static_cast<unsigned long long>(a1),
            static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3),
            static_cast<unsigned long long>(ret));
