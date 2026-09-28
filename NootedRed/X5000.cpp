@@ -1129,8 +1129,15 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 //  `AMDGraphicsAccelerator::configureDevice`（VM 0x3306）：它在 `0x338b`/`0x33a7` 调
 //  `initLinkToPeer`（VM 0x3dae）按名查 `"ATIFramebuffer"`，失败再查 `"IOFramebuffer"`，
 //  命中才写 `this+0x1f40`（0x3393/0x33ac）并 `orb $0x40,0x1e88`（0x33bd）。
-//  真机已证：`start` 入口/出口 `f140` 均为 0、且该对象 `f1e88` 入口为 0（首次 start）
-//  ⇒ `this+0x1f40` **从未被设置** ⇒ 注册段跳过 ⇒ `start` 返回失败。
+//  真机已证：`start` 入口/出口 `f140` 均为 0、且该对象 `f1e88` 入口为 0（首次 start）。
+//  ⚠️ **更正（2026-09-29，由乙线 R1' 离线分析发现）**：此处原写"`this+0x1f40` **从未被设置**"**有误**——
+//     第 10 轮真机读数（`docs/真机轮次台账.md` 第 10 行 / 归档 `observe-20260928-0245-cfgdev`）显示
+//     `configureDevice` **确被调用，且其时 `this+0x1f40` 非 0**，即它**被设置过**；随后基类
+//     `IOGraphicsAccelerator2::start`（IOAF VM 0x3ba10）在失败清理中把 `this+0x1f40` **清空**
+//     （第 18 轮 `-NRedRestoreF140` 实测"入口恢复生效、`start` 内部又清掉"即为旁证）。
+//  ⇒ 正确的因果是：**`f140=0` 是结果而非原因**；真正的失败点在 `configureDevice` 内的
+//     `0x360f` 检查（详见 `docs/子任务/乙线R1-加速器注册链离线分析.md` §Q2）。**勿再据"从未被设置"做推断。**
+//  ⇒ 注册段跳过 ⇒ `start` 返回失败。
 //  本组探针回答"configureDevice 是否被调用、initLinkToPeer 查到什么、返回值如何"。
 //  只读字段 + 记录入参/返回值；落盘通道（`-NRedAccelLog`），hook 无条件安装。
 UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
