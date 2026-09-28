@@ -906,6 +906,8 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         // 这里 dump 头部 0x20 字节 + 两个子表偏移处的 4 字节，用以判定"校验失败"的成因；
         // 不调用任何 Apple 方法、不改内存。判读见 docs/子任务/第八步执行记录（点亮验证）.md。
         const auto* const p = static_cast<const UInt8*>(b);
+        const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);   // IPDS 子表偏移（相对缓冲起点）
+        const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);  // HARV 子表偏移
         // 三段校验和：**逐条复刻 `0x2ab00e` 的算法**（16 位字节累加和），用于判定它究竟卡在哪一段。
         const auto u16 = [p](unsigned o) { return static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + o)); };
         const UInt32 cntA = u16(0xA);
@@ -971,32 +973,6 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(c)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(d)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(e)), static_cast<unsigned>(ret));
-        // 失败出口 `0x2ab1b5` 在本函数的**后半段**：另外两处判据（`obj+0x24+0x260*i > 9` 与
-        // `(u8(ip+3) - 1) > 5`）都不是入参头部能反映的 ⇒ 这里补两样：调用**后**的槽位计数、
-        // 以及 IPDS 子表头（`buf + u16(buf+0xc)` 起 0x40 字节）。判据语义见 `kb/re/` 对应报告。
-        if (b != nullptr && a != nullptr) {
-            const auto* const p = static_cast<const UInt8*>(b);
-            const UInt32 ipdsOff = *reinterpret_cast<const UInt16*>(p + 0xC);
-            if (ipdsOff + 0x40 <= 0x10000) {
-                const auto d = [p, ipdsOff](unsigned i) {
-                    return static_cast<unsigned>(
-                        *reinterpret_cast<const UInt32*>(p + ipdsOff + i * 4));
-                };
-                SYSLOG("HWLibs", "ip-ipds0: %08x %08x %08x %08x %08x %08x %08x %08x",
-                       d(0), d(1), d(2), d(3), d(4), d(5), d(6), d(7));
-                SYSLOG("HWLibs", "ip-ipds1: %08x %08x %08x %08x %08x %08x %08x %08x",
-                       d(8), d(9), d(10), d(11), d(12), d(13), d(14), d(15));
-            }
-            const auto* const o = static_cast<const UInt8*>(a);
-            const auto slot = [o](unsigned i) {
-                return static_cast<unsigned>(
-                    *reinterpret_cast<const UInt32*>(o + 0x24 + 0x260ull * i));
-            };
-            SYSLOG("HWLibs", "ip-slot0: %u %u %u %u %u %u %u %u %u %u",
-                   slot(0), slot(1), slot(2), slot(3), slot(4), slot(5), slot(6), slot(7), slot(8), slot(9));
-            SYSLOG("HWLibs", "ip-slot1: %u %u %u %u %u %u %u %u %u",
-                   slot(10), slot(11), slot(12), slot(13), slot(14), slot(15), slot(16), slot(17), slot(18));
-        }
     }
     return ret;
 }
