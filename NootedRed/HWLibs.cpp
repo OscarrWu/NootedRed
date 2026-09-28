@@ -1301,6 +1301,17 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         }
     }
 
+    // ★ 落盘通道自检（2026-09-28）：`mode2-tail` 的关键读数发生在 ~34.8s，已晚于 L2 的 msgbuf 覆盖窗口，
+    //  必须依赖自建落盘；而自建落盘此前一直没产出文件。这里在**早期**（L2 还看得到的时刻）做一次
+    //  同路径的写文件，并把它的事实（`rootvnode` 值 + `FileIO` 返回码）写进日志 ⇒ 一轮即可定位病因。
+    {
+        static const char kSelfTest[] = "nred-selftest\n";
+        const int err = (rootvnode != nullptr)
+                            ? FileIO::writeBufferToFile("/var/log/NRedSelfTest.txt", kSelfTest, sizeof(kSelfTest) - 1)
+                            : -999;
+        SYSLOG("HWLibs", "selftest: rootvnode=%llx err=%d", static_cast<unsigned long long>(reinterpret_cast<UInt64>(rootvnode)), err);
+    }
+
     // ★ 修复（2026-09-28）：把 IP 发现表的 `num_base_address` 上限从 6 放宽到 9（详见常量处注释）。
     //  ⚠️ **必须放在 `setKernelWriting(true, ...)` 之外**：`KernelPatcher::applyLookupPatch` 内部
     //  自己会调用 `MachInfo::setKernelWriting(true, kernelWriteLock)`，若调用者已持锁 ⇒ 递归锁 panic
