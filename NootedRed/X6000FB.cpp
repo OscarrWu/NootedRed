@@ -56,6 +56,8 @@ extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），�
 //  ⚠️ 必须先判 `rootvnode`（根 FS 未挂载时写文件会阻塞内核线程，见真机手册 §5.1）。
 extern "C" void *rootvnode __attribute__((weak));
 
+static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（供 panic 前落盘用）
+
 static void nredPPTrace(char* const buf, const int n)
 {
     if (n <= 0 || rootvnode == nullptr) { return; }
@@ -876,6 +878,7 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 //  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic6`（与其它探针互斥使用）。
 UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
+    gPpHelperSelf = reinterpret_cast<UInt64>(self);
     const bool wantProbe = checkKernelArgument("-NRedAccelLog");
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
     const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
@@ -1506,6 +1509,36 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     // Observe P2: always log the error detail (SYSLOG = visible regardless of debug flag)
     SYSLOG("X6000FB", "handleCriticalError: '%s' | '%s' | '%s'",
            fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+
+    // ★ PP 后端对象落盘（2026-09-28）：`powerUp` 自身在返回前就 panic，其"调用后读字段"的探针块
+    //  永不执行 ⇒ 把读取搬到这里（panic 前的最后出口）。只读内存，不调用任何 Apple 方法。
+    if (gPpHelperSelf != 0) {
+        auto okPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL && (p & 7) == 0; };
+        const UInt64 s = gPpHelperSelf;
+        UInt64 o20 = 0, o50 = 0, vt50 = 0, s10 = 0, s850 = 0, s6b8 = 0, s670 = 0;
+        o20 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(s) + 0x20);
+        o50 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(s) + 0x50);
+        if (okPtr(o50)) {
+            vt50 = *reinterpret_cast<const UInt64*>(o50);
+            if (okPtr(vt50)) {
+                s10 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(vt50) + 0x10);
+                s850 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(vt50) + 0x850);
+                s6b8 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(vt50) + 0x6B8);
+                s670 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(vt50) + 0x670);
+            }
+        }
+        char b[320];
+        const int n = snprintf(b, sizeof(b),
+                               "pp-ui: self=%llx o20=%llx o50=%llx vt50=%llx s10=%llx s850=%llx s670=%llx s6b8=%llx "
+                               "maCalls=%llu maIri=%llu maDummy=%llu\n",
+                               static_cast<unsigned long long>(s), static_cast<unsigned long long>(o20),
+                               static_cast<unsigned long long>(o50), static_cast<unsigned long long>(vt50),
+                               static_cast<unsigned long long>(s10), static_cast<unsigned long long>(s850),
+                               static_cast<unsigned long long>(s670), static_cast<unsigned long long>(s6b8),
+                               static_cast<unsigned long long>(gMaCalls), static_cast<unsigned long long>(gMaIri),
+                               static_cast<unsigned long long>(gMaDummy));
+        nredPPTrace(b, n);
+    }
 
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
     // 必须置于 -NRedProbePPLIB 之前：二者同开时以 Panic 优先（先取数据）。
