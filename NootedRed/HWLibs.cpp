@@ -953,6 +953,35 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                static_cast<unsigned>(cksA), static_cast<unsigned>(u16(0x8)),
                static_cast<unsigned>(cksB), static_cast<unsigned>(u16(0xE)),
                static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)));
+        // IP 表**块清单**：复刻 `0x2ab00e` 后半段的块遍历（它的判据之一是 `num_base_address ∈ {1..6}`，
+        // 越界即跳到失败出口 `0x2ab1b5`）。每块编码 `hw_id<<16 | instance<<8 | num_base_address`。
+        if (o12 + 0x20 <= 0x10000) {
+            const UInt32 dieOff = *reinterpret_cast<const UInt16*>(p + o12 + 0x10);
+            const UInt32 ipBase = o12 + dieOff;
+            if (ipBase + 8 <= 0x10000) {
+                const UInt32 count = *reinterpret_cast<const UInt16*>(p + ipBase + 2);
+                UInt32 pos = ipBase + 4;
+                UInt32 packed[12] = {};
+                UInt32 n = 0, bad = 0, badOff = 0, badNba = 0;
+                for (UInt32 i = 0; i < count && pos + 8 <= 0x10000; i++) {
+                    const UInt32 hw = *reinterpret_cast<const UInt16*>(p + pos);
+                    const UInt32 inst = p[pos + 2];
+                    const UInt32 nba = p[pos + 3];
+                    if (n < 12) { packed[n] = (hw << 16) | (inst << 8) | nba; }
+                    n++;
+                    if (nba < 1 || nba > 6) { bad++; badOff = pos; badNba = nba; }
+                    pos += 8 + 4 * nba;
+                }
+                SYSLOG("HWLibs", "ip-blk: cnt=%u n=%u bad=%u at=%x nba=%u",
+                       static_cast<unsigned>(count), static_cast<unsigned>(n),
+                       static_cast<unsigned>(bad), static_cast<unsigned>(badOff),
+                       static_cast<unsigned>(badNba));
+                SYSLOG("HWLibs", "ip-blk0: %06x %06x %06x %06x %06x %06x %06x %06x",
+                       packed[0], packed[1], packed[2], packed[3], packed[4], packed[5], packed[6], packed[7]);
+                SYSLOG("HWLibs", "ip-blk1: %06x %06x %06x %06x",
+                       packed[8], packed[9], packed[10], packed[11]);
+            }
+        }
     }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
     if (checkKernelArgument("-NRedAccelLog")) {
