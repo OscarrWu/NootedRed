@@ -1409,64 +1409,6 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
               ctlAddr, f7960, vAccel, vAccelCls, vCtrl, vHwsvc, vKextIdx);
     }
 
-    // ─── 乙线 T7：固件层只读探针（门控 `-NRedFwProbe`，默认关闭）─────────────────────
-    //  目的（依据 `docs/子任务/乙线自建固件层作战计划.md` · T7）：在**不动任何状态**的前提下取回
-    //  PSP/SMU 固件层现状，回答四个问题：
-    //   ① BIOS 是否已把 SOS 拉起来（`C2PMSG_81` 存活标志、`C2PMSG_58` 固件版本）；
-    //   ② bootloader/PSP 就绪状态（`C2PMSG_35` 状态、`C2PMSG_33` ready 位）；
-    //   ③ 是否已存在 TMR 与 GPCOM 环（`C2PMSG_36`+`_35` 的 TMR 地址、`_69/_70/_71/_64/_67` 的环寄存器）；
-    //   ④ MP0 段基址判别（SEG0 vs SEG1，**零写入**判别；项目内两条记载相互冲突，见作战计划 §6 R6）。
-    //
-    //  为什么挂本函数：本 hook 的 route 是**无条件安装**的（`processKext` 对
-    //  `AmdRadeonController::powerUp` 的 route 无门控，见上文第 1370 行附近），且 panic 栈铁证本函数
-    //  100% 被调用（先于 `AmdPowerPlayHelper::powerUp`）⇒ 无论本轮成功还是失败，本探针都会执行。
-    //
-    //  ⛔ 纪律（`docs/ROADMAP.md` §2.9「真机纪律」）：**纯只读**——只调 `readReg32`，绝不写任何寄存器；
-    //     不使用 panic（不打断流程、不掩盖成功）；读数经 `nredPPTrace`（L1 日志 + 立即落盘 + 文件兜底）带回。
-    //
-    //  寄存器语义（逐条核对 Linux 源码，非推测）：
-    //   · `MP0_SMN_C2PMSG_81` = SOS 存活标志（`psp_v13_0.c:149` `psp_v13_0_is_sos_alive` 读它）
-    //   · `MP0_SMN_C2PMSG_58` = SOS 固件版本（`psp_v13_0.c:336` `psp->sos.fw_version`）
-    //   · `MP0_SMN_C2PMSG_35` = bootloader 状态（`psp_v13_0.c:216-222` 等它 == 1）
-    //                            / TMR 地址低 32 位（`psp_tmr_init` 写它，见 `:281-284`）
-    //   · `MP0_SMN_C2PMSG_36` = TMR 地址高 32 位
-    //   · `MP0_SMN_C2PMSG_33` = PSP ready（bit31，见 `:188-190`）
-    //   · `MP0_SMN_C2PMSG_64/67/69/70/71` = 非 SRIOV 的 GPCOM 环（命令+rsp 位/写指针/地址低高/大小）
-    //   · `MP0_SMN_C2PMSG_101/102/103`   = SRIOV 变体的环寄存器（取回作对照，本项目走非 SRIOV）
-    //  偏移换算：`mp_13_0_4_offset.h` 中 `regMP0_SMN_C2PMSG_N = 0x40 + N`（已逐条核对：`_35`=0x63@L37、
-    //   `_36`=0x64@L39、`_58`=0x7a@L83、`_64`=0x80@L95、`_67`=0x83@L101、`_69`=0x85@L105、`_70`=0x86@L107、
-    //   `_71`=0x87@L109）。
-    //   ⚠️ 注意：`C2PMSG_100..103` **不是** bootloader 版本，而是**显示时钟消息通道的 ARG0..3**
-    //   （`display/dc/clk_mgr/dcn60/dcn60_clk_mgr_smu_msg.c:15`），勿误用。
-    if (checkKernelArgument("-NRedFwProbe") && NRed::singleton().getAttributes().isPhoenix()) {
-        struct FwReg {
-            const char* name;
-            UInt32      off;
-        };
-        static const FwReg kFwRegs[] = {
-            {"c33", 0x21},  {"c35", 0x23},  {"c36", 0x24},  {"c58", 0x3A},  {"c64", 0x40},
-            {"c67", 0x43},  {"c69", 0x45},  {"c70", 0x46},  {"c71", 0x47},  {"c81", 0x51},
-            {"c101", 0x65}, {"c102", 0x66}, {"c103", 0x67},
-        };
-        // Linux 侧 MP0 的 BASE_IDX=1 段基址（`yellow_carp_offset.h:826-827`）；本项目现役代码走 SEG0。
-        constexpr UInt32 kSeg1Base = 0x0243FC00;
-
-        auto& nredFw = NRed::singleton();
-        char  fwBuf[768];
-        int   fwLen = 0;
-        fwLen += snprintf(fwBuf + fwLen, sizeof(fwBuf) - fwLen, "fw-probe: pure-read");
-        for (size_t i = 0; i < arrsize(kFwRegs); i++) {
-            const UInt32 vSeg0 = nredFw.readReg32(MP0_BASE_0 + kFwRegs[i].off);
-            const UInt32 vSeg1 = nredFw.readReg32(kSeg1Base + kFwRegs[i].off);
-            fwLen += snprintf(fwBuf + fwLen, sizeof(fwBuf) - fwLen, " %s=%x/%x", kFwRegs[i].name, vSeg0, vSeg1);
-        }
-        // 空白对照（纯读）：项目已知无效的 MMHUB 旧地址（`readReg32` 实测恒为全 F）——
-        // 用来证明本探针的"非全 F 读数"确实来自真实寄存器，而不是读路径的假阳性。
-        const UInt32 vDead = nredFw.readReg32(0x68000 + 0x0857);
-        fwLen += snprintf(fwBuf + fwLen, sizeof(fwBuf) - fwLen, " dead=%x | v0/v1=SEG0(0x16000)/SEG1(0x243fc00) 同偏移", vDead);
-        nredPPTrace(fwBuf, fwLen);
-    }
-
     auto& m_flags  = getMember<UInt8>(self, 0x5F18);
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
@@ -1675,6 +1617,70 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
                                static_cast<unsigned long long>(gMaCalls), static_cast<unsigned long long>(gMaIri),
                                static_cast<unsigned long long>(gMaDummy));
         nredPPTrace(b, n);
+    }
+
+    // ─── 乙线 T7：固件层只读探针（门控 `-NRedFwProbe`，默认关闭）────────────────────
+    //  目的（依据 `docs/子任务/乙线自建固件层作战计划.md` · T7）：取回 PSP/SMU 固件层现状，回答：
+    //   ① BIOS 是否已把 SOS 拉起（`C2PMSG_81` 存活标志、`C2PMSG_58` SOS 固件版本）；
+    //   ② bootloader/PSP 就绪状态（`C2PMSG_35` 状态位、`C2PMSG_33` ready 位）；
+    //   ③ 是否已存在 TMR 与 GPCOM 环（`C2PMSG_36`+`_35` 的 TMR 地址、`_69/_70/_71/_64/_67` 环寄存器）；
+    //   ④ MP0 段基址判别（SEG0 vs SEG1，零写入；项目内两条记载相互冲突，见作战计划 §6 R6）。
+    //
+    //  ⛔ 为什么挂在这里、而不是挂 `wrapControllerPowerUp`（2026-09-29 血的教训）：
+    //   本探针**第一版**曾挂在 `wrapControllerPowerUp`，用 `nredPPTrace`（含日志 + `dumpNow()` +
+    //   `FileIO` 兜底三条通道）带回读数。那一轮真机**挂死**：12 分钟未回 Manjaro、无 panic、
+    //   无重启链（需所有者现场处理）。复核手册后确认两点设计错误：
+    //     · 手册 §7.3 教训 15：**panic 时刻（~35 s）`FileIO::writeBufferToFile` 本就不产出**
+    //       （实测两轮）⇒ 该落盘通道在此时段**买不到任何东西**，只增加"在锁上下文中写文件"的风险；
+    //       `IOFramebuffer::open → enableController → powerUp` 这条链正持有 IOKit 锁。
+    //     · 手册 §4A 纪律 3 的既定做法：**panic 格式串一经投产即冻结；需要新值就"新开探针位"，
+    //       且只能挂到"已验证过的 panic 点"**——即本处（既有 `-NRedProbePanic` 所在位置，
+    //       位于 Apple 流程更靠后，手册 §7.3 教训 14 明确认可）。
+    //   ⇒ 本版改为：**新开探针位 + 自己的新格式串 + 只读 MMIO + 走已验证的 panic 消息通道**。
+    //   本块置于既有 `-NRedProbePanic` 之前 ⇒ 二者同开时以本块（乙线数据）优先。
+    //
+    //  寄存器语义（逐条核对 Linux 源码，非推测）：
+    //   · `C2PMSG_81` = SOS 存活（`psp_v13_0.c:149` `psp_v13_0_is_sos_alive`）
+    //   · `C2PMSG_58` = SOS 固件版本（`psp_v13_0.c:336` `psp->sos.fw_version`）
+    //   · `C2PMSG_35` = bootloader 状态（`:216-222` 等它 == 1）/ TMR 地址低 32 位（`:284` 写）
+    //   · `C2PMSG_36` = TMR 地址高 32 位（`:281` 写）
+    //   · `C2PMSG_33` = PSP ready（bit31，`:188-190`）
+    //   · `C2PMSG_64/67/69/70/71` = 非 SRIOV GPCOM 环（命令+rsp 位 / 写指针 / 地址低高 / 大小）
+    //   · `C2PMSG_101/102/103`   = SRIOV 变体环寄存器（取回作对照；本项目走非 SRIOV）
+    //  偏移换算：`mp_13_0_4_offset.h` 中 `regMP0_SMN_C2PMSG_N = 0x40 + N`（已逐条核对行号：
+    //   `_33`=0x61、`_35`=0x63@L37、`_36`=0x64@L39、`_58`=0x7a@L83、`_64`=0x80@L95、`_67`=0x83@L101、
+    //   `_69`=0x85@L105、`_70`=0x86@L107、`_71`=0x87@L109、`_81`=0x91、`_101`=0xa5、`_102`=0xa6、`_103`=0xa7）。
+    //   ⚠️ `C2PMSG_100..103` **不是** bootloader 版本，而是显示时钟消息通道的 ARG0..3
+    //  （`display/dc/clk_mgr/dcn60/dcn60_clk_mgr_smu_msg.c:15`），勿误用。
+    //
+    //  铁律遵守：实参**全部是已求值的局部变量**（不在 `panic()` 实参里调 `singleton()` 等可能加锁的函数，
+    //  见 §16.68）；`readReg32` 只做 MMIO，不加锁。
+    if (checkKernelArgument("-NRedFwProbe") && NRed::singleton().getAttributes().isPhoenix()) {
+        auto&         nredFw = NRed::singleton();
+        // SEG0（项目现役路径；`MP0_BASE_0 + off` 全部落在 BAR5 窗口内 ⇒ 直接读，无间接访问风险）
+        const UInt32 fwC33  = nredFw.readReg32(MP0_BASE_0 + 0x21);
+        const UInt32 fwC35  = nredFw.readReg32(MP0_BASE_0 + 0x23);
+        const UInt32 fwC36  = nredFw.readReg32(MP0_BASE_0 + 0x24);
+        const UInt32 fwC58  = nredFw.readReg32(MP0_BASE_0 + 0x3A);
+        const UInt32 fwC64  = nredFw.readReg32(MP0_BASE_0 + 0x40);
+        const UInt32 fwC67  = nredFw.readReg32(MP0_BASE_0 + 0x43);
+        const UInt32 fwC69  = nredFw.readReg32(MP0_BASE_0 + 0x45);
+        const UInt32 fwC70  = nredFw.readReg32(MP0_BASE_0 + 0x46);
+        const UInt32 fwC71  = nredFw.readReg32(MP0_BASE_0 + 0x47);
+        const UInt32 fwC81  = nredFw.readReg32(MP0_BASE_0 + 0x51);
+        const UInt32 fwC101 = nredFw.readReg32(MP0_BASE_0 + 0x65);
+        const UInt32 fwC102 = nredFw.readReg32(MP0_BASE_0 + 0x66);
+        const UInt32 fwC103 = nredFw.readReg32(MP0_BASE_0 + 0x67);
+        // SEG1 对照（Linux BASE_IDX=1 段基址 `0x0243FC00`，`yellow_carp_offset.h:826-827`）：
+        // 只取 3 个关键偏移，限制崩溃上下文里的间接访问次数。
+        constexpr UInt32 kSeg1Base = 0x0243FC00;
+        const UInt32     s1C81     = nredFw.readReg32(kSeg1Base + 0x51);
+        const UInt32     s1C58     = nredFw.readReg32(kSeg1Base + 0x3A);
+        const UInt32     s1C35     = nredFw.readReg32(kSeg1Base + 0x23);
+        panic("NRed FwProbe: c33=%x c35=%x c36=%x c58=%x c64=%x c67=%x c69=%x c70=%x c71=%x c81=%x "
+              "c101=%x c102=%x c103=%x | seg1(c81,c58,c35)=%x,%x,%x | off: c35=0x23 c58=0x3a c81=0x51",
+              fwC33, fwC35, fwC36, fwC58, fwC64, fwC67, fwC69, fwC70, fwC71, fwC81, fwC101, fwC102, fwC103, s1C81, s1C58,
+              s1C35);
     }
 
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
