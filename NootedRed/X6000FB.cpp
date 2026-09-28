@@ -132,6 +132,23 @@ static const UInt8 kPpSmuFillPattern[] = {
     0x00, 0x00, 0x48, 0x89, 0xF3, 0x4C, 0x8B, 0x77, 0x08, 0x4C, 0x89, 0xF7, 0xE8, 0xED, 0xC1, 0xFE,
     0xFF, 0x48, 0x85, 0xDB, 0x0F, 0x84, 0x82, 0x01, 0x00, 0x00, 0x49, 0x89, 0xC7, 0x4C, 0x8D, 0xA5};
 
+// ─── 第八步"分水岭实验"：PP 上电 TTL 门槛的放宽补丁（门控 `-NRedBypassTtl`，默认关闭）────
+//  目的（ROADMAP §2.9 📌②）：定路线甲/乙。判据 = 放宽 PP 门槛后**下一个失败落点**——
+//    落在时钟/SMU ⇒ ③ 层（固件层）证实断裂 ⇒ 乙线；流程能继续走 ⇒ 甲线可行。
+//  目标：`AmdPowerPlayHelper::powerUp`（VM 0x10D90）内 TTL RTS 获取段（VM 0x10E8E 起 31 字节）：
+//    原码：test %rax,%rax; je <失败>; …; call *0x10(%rcx); test %eax,%eax; je <成功>
+//    改后：xor %eax,%eax; mov %rax,-0x30(%rbp); mov %rax,-0x28(%rbp); jmp <成功 0x10ED2>; nop×16
+//    ⇒ 无论 TTL 接口是否为空、TTL RTS 调用是否失败，一律按"TTL 已就绪"继续；TTL RTS 两槽置 0。
+//  依据：`kb/re/AmdPowerPlayHelper-powerUp完整反汇编.md`（逐字节反汇编）。
+//  唯一性：13.6 目标二进制全文件命中 1 处（离线核验，含 objdump 复核本补丁字节）。
+//  ⚠️ 放宽 ≠ 修复：花屏/崩溃属预期（ROADMAP §3.0.8 阶段 1 的风险清单）。
+static const UInt8 kBypassTtlGateOriginal[] = {
+    0x48, 0x85, 0xC0, 0x74, 0x23, 0x31, 0xC9, 0x48, 0x8D, 0x75, 0xD0, 0x48, 0x89, 0x4E, 0x08, 0x48,
+    0x89, 0x0E, 0x48, 0x8B, 0x08, 0x48, 0x89, 0xC7, 0xFF, 0x51, 0x10, 0x85, 0xC0, 0x74, 0x25};
+static const UInt8 kBypassTtlGatePatched[] = {
+    0x31, 0xC0, 0x48, 0x89, 0x45, 0xD0, 0x48, 0x89, 0x45, 0xD8, 0xE9, 0x35, 0x00, 0x00, 0x00, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+
 static const UInt8      kCreateVramInfoCallPattern[]          = {0x48, 0x8B, 0x7B, 0x18, 0x48, 0x8B, 0x43, 0x20, 0x0F,
                                                                  0xB7, 0x70, 0x3C, 0xE8, 0x00, 0x00, 0x00, 0x00};
 static const UInt8      kCreateVramInfoCallPatternMask[]      = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -489,6 +506,17 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
                                                    kPopulateDeviceInfoMask,     kPopulateDeviceInfoPatched,
                                                    kPopulateDeviceInfoMask,     1};
     PANIC_COND(!patch.apply(patcher, slide, size), "X6000FB", "Failed to apply populateDeviceInfo patch");
+
+    // 第八步"分水岭实验"（ROADMAP §2.9 📌②）：放宽 PP 上电的 TTL RTS 门槛，看**下一个失败落点**。
+    //  判据：失败落在时钟/SMU ⇒ ③ 层（固件层）证实断裂 ⇒ 乙线；流程能继续走 ⇒ 甲线可行。
+    //  ⚠️ 默认关闭（`-NRedBypassTtl` 显式启用）；放宽 ≠ 修复，花屏/崩溃属预期。
+    //  ⚠️ `MaskedLookupPatch::apply` 内部自带上锁，**不得**置于 `setKernelWriting` 窗口内（手册 §5.8）。
+    if (checkKernelArgument("-NRedBypassTtl")) {
+        const PenguinWizardry::MaskedLookupPatch ttlPatch{&kextRadeonX6000Framebuffer, kBypassTtlGateOriginal,
+                                                          kBypassTtlGatePatched, 1};
+        PANIC_COND(!ttlPatch.apply(patcher, slide, size), "X6000FB", "Failed to apply TTL gate bypass patch");
+        SYSLOG("X6000FB", "BYPASS-TTL: PP TTL RTS gate relaxed (differential experiment, patch applied)");
+    }
 
     if (NRed::singleton().getAttributes().isRenoir() && !NRed::singleton().getAttributes().isPhoenix()) {
         const PenguinWizardry::MaskedLookupPatch patch{&kextRadeonX6000Framebuffer, kInitializeDmcubServices1Original,
