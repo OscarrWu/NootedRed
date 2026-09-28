@@ -900,7 +900,9 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
     // ⚠️ **每次调用只输出这一行、且放在调用之后**：① 多行会被 L2 环形缓冲吞掉（第 8/9 轮实测）；
     //  ② 与 `ret` 合并输出才能保证"哪张表 ⇒ 哪个返回值"不错配。
     // 不调用任何 Apple 方法、不改内存。
-    if (checkKernelArgument("-NRedAccelLog") && b != nullptr) {
+    // ⚠️ **只在失败时输出**（2026-09-28 第 12 轮教训）：成功调用的行会把 L2 环形缓冲占满，
+    //  导致失败调用的关键行反被挤掉；而成功调用的内容已知固定。
+    if (checkKernelArgument("-NRedAccelLog") && b != nullptr && ret != 0) {
         const auto* const p = static_cast<const UInt8*>(b);
         const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);   // IPDS 子表偏移（相对缓冲起点）
         const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);  // HARV 子表偏移
