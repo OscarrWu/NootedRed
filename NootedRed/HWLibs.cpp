@@ -840,10 +840,9 @@ UInt32 X5000HWLibs::wrapBgmStep1(void* const a, void* const b, void* const c, vo
 
 UInt32 X5000HWLibs::wrapBgmQuery(void* const a, void* const b, void* const c)
 {
-    const UInt32 ret = FunctionCast(wrapBgmQuery, singleton().orgBgmQuery)(a, b, c);
-    nredNoteBgmStep("bgm-query", reinterpret_cast<UInt64>(a), reinterpret_cast<UInt64>(b),
-                    reinterpret_cast<UInt64>(c), ret);
-    return ret;
+    // ⚠️ 已静音（2026-09-28）：本函数是热路径（单轮 ~2000 次调用），输出会挤满 L2 环形缓冲、
+    //  使关键观测行（`mode2-tail`/`ip`）落不了盘。信息已收集完毕；仍保留 hook（行为不变）。
+    return FunctionCast(wrapBgmQuery, singleton().orgBgmQuery)(a, b, c);
 }
 
 UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
@@ -887,14 +886,9 @@ UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const 
 {
     const UInt64 before = (out != nullptr) ? *out : 0;
     const UInt32 ret = FunctionCast(wrapCfgRead, singleton().orgCfgRead)(obj, id, out, flag);
-    if (checkKernelArgument("-NRedAccelLog")) {
-        const UInt64 after = (out != nullptr) ? *out : 0;
-        const UInt32 fl = (flag != nullptr) ? *flag : 0;
-        SYSLOG("HWLibs", "cfg-read: obj=%llx id=%x out=%llx before=%llx after=%llx flag=%u ret=%u",
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)), static_cast<unsigned>(id),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(out)), static_cast<unsigned long long>(before),
-               static_cast<unsigned long long>(after), static_cast<unsigned>(fl), static_cast<unsigned>(ret));
-    }
+    // ⚠️ 已静音（2026-09-28）：本函数是热路径（单轮 ~1800 次调用），其输出会把 L2 环形缓冲挤满，
+    //  导致真正关键的观测行（`mode2-tail`/`ip`）落不了盘。信息已收集完毕，需要时再临时打开。
+    (void)before;
     return ret;
 }
 
