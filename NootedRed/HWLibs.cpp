@@ -58,7 +58,7 @@ static void nredTraceLine(char* const buf, const int n)
 // 落盘是主通道（L2 覆盖窗口只有 26–35 s，关键读数在 34–39 s，见手册 §5.7）。
 #define NRED_TRACE(fmt, ...)                                                                        \
     do {                                                                                            \
-        NRED_TRACE(fmt, ##__VA_ARGS__);                                                       \
+        SYSLOG("HWLibs", fmt, ##__VA_ARGS__);                                                       \
         char _tb[256];                                                                              \
         const int _tn = snprintf(_tb, sizeof(_tb), fmt "\n", ##__VA_ARGS__);                        \
         nredTraceLine(_tb, _tn);                                                                    \
