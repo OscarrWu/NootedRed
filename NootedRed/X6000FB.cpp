@@ -902,6 +902,28 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
     const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
     const bool wantAccelLog = checkKernelArgument("-NRedAccelLog");
+    // ★ 入口最小实证（2026-09-28 第 28 轮）。为什么放在这里：
+    //   第 25–27 轮（ttl1/2/3）里，本函数内**所有**探针（自建落盘、捎带落盘、SYSLOG）
+    //   都无产出，而**同一轮**、同一时刻 HWLibs 侧的探针（`ip:` 日志行 + `NRedIpProbe-*.txt`）
+    //   都有产出。已有的硬事实是：① 本函数确实被进入（panic 栈里有本函数的返回地址
+    //   `+0xf7e`/`+0xfd0`，且第三轮多一条日志语句正好使偏移增加 0x52 字节 ⇒ 运行的就是新二进制）；
+    //   ② patch 阶段同一门控表达式为真（`pp-selftest` 有输出）。
+    //   ⇒ 矛盾点就在"函数体进入之后到底走到哪一步"。此处只有一次赋值与四次门控求值，
+    //     其后全是纯读取，最不可能失败；两条通道各写一次，足以把问题二分为
+    //     "函数体没走到" 与 "通道在此刻不可用"。
+    {
+        SYSLOG("X6000FB", "pp-in: self=%llx gates=%d%d%d%d",
+               static_cast<unsigned long long>(gPpHelperSelf),
+               wantProbe ? 1 : 0, wantRegister ? 1 : 0, wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
+        char inMsg[96];
+        const int inN = snprintf(inMsg, sizeof(inMsg), "pp-in self=%llx gates=%d%d%d%d\n",
+                                 static_cast<unsigned long long>(gPpHelperSelf),
+                                 wantProbe ? 1 : 0, wantRegister ? 1 : 0,
+                                 wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
+        if (inN > 0 && rootvnode != nullptr) {
+            FileIO::writeBufferToFile("/var/log/NRedPPIn.txt", inMsg, static_cast<size_t>(inN));
+        }
+    }
 
     if (wantProbe || wantRegister || wantAccelProbe || wantAccelLog) {
         auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
