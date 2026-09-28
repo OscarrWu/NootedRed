@@ -1057,6 +1057,10 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
+        // 捎带缓冲的实时状态（2026-09-28 第 28 轮）：**无条件**打印，用于区分
+        // "PP 包装函数入口没执行"（两个长度都是 0）与 "执行了但文件写不出去"（长度非 0）。
+        // 本行与 `ip:` 同频（每次 IP 表解析一行），不会挤爆日志。
+        SYSLOG("HWLibs", "ip-carry: ppIn=%d ppLen=%d", gPpInLen, gPpProbeLen);
     }
     return ret;
 }

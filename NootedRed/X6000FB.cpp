@@ -398,6 +398,23 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
             } else {
                 DBGLOG("X6000FB", "stage-mark: routed AmdPowerPlayHelper::powerUp");
             }
+            // ★ hook 生效性直接取证（2026-09-28 第 28 轮）：五个 PP 侧探针在运行期全部无产出
+            //   （落盘/SYSLOG/捎带三条通道），而同 kext 的 `wrapHandleCriticalError` 却能执行并
+            //   带出数据（第 24 轮）。"routed" 只说明 routeMultiple 返回真，不证明跳转真的写进了
+            //   目标函数入口。这里在读回目标函数入口的前 6 个字节：
+            //     `E9 xx xx xx xx`（jmp rel32）或 `FF 25 ...`（jmp [rip+disp]）⇒ hook 已写入；
+            //     仍是原始序言（如 `55 48 89 E5`）⇒ **写入没生效**，需改换挂钩方式。
+            {
+                // 注意：`org` 在某些 patcher 实现里指向 trampoline（含原始序言），读它会误判；
+                // 因此**必须读被 patch 的目标符号地址本身**。
+                const mach_vm_address_t tgt = patcher.solveSymbol(
+                    id, "__ZN33AMDRadeonX6000_AmdPowerPlayHelper7powerUpEv");
+                const UInt8* tb = reinterpret_cast<const UInt8*>(tgt);
+                SYSLOG("X6000FB", "pp-hook: tgt=%llx org=%llx bytes=%02x %02x %02x %02x %02x %02x",
+                       static_cast<unsigned long long>(tgt),
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(this->orgPpHelperPowerUp)),
+                       tb[0], tb[1], tb[2], tb[3], tb[4], tb[5]);
+            }
         }
 
         // 第八步观测（第 7 批次）：hook `AmdRadeonController::callPlatformFunctionFromDrvr` 入口，
@@ -903,6 +920,14 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
     gPpHelperSelf = reinterpret_cast<UInt64>(self);
+    // ★ 最小写入判据（2026-09-28 第 28 轮）：把这两条**纯内存写**放在门控求值之前。
+    //   它们不依赖任何外部函数（不调 checkKernelArgument、不用 SYSLOG、不碰文件系统），
+    //   编译后必然随函数入口一起执行；随后由已验证可写盘的 IP 探针（26s，晚于本函数）
+    //   把它们读出 → 一次判定"本函数入口到底执行没有"。
+    {
+        gPpInLen = 5;
+        memcpy(gPpInLine, "inA0\n", 5);
+    }
     const bool wantProbe = checkKernelArgument("-NRedAccelLog");
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
     const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
