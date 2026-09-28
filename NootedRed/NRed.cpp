@@ -255,3 +255,21 @@ void NRed::writeReg32(const UInt32 reg, const UInt32 value) const
         this->rmmioPtr[PCIE_DATA2]  = value;
     }
 }
+
+// ═══ 忠实复刻 Linux `amdgpu_device_indirect_rreg`（amdgpu_reg_access.c:590-661）═══════════════
+//  为什么需要它（2026-09-29）：乙线要读 MP0/MP1 的 SMN 寄存器（PSP/SMU），其字节地址
+//  `(段基址[BASE_IDX=1→SEG1=0x0243FC00] + 偏移) * 4`（约 0x090FFxxx）远超 BAR5 的 512 KB ⇒ 必须走间接通道。
+//  真机实测（第 74/75 轮）：用 `readReg32(addr)` 的间接分支**读不到**（全 FFFFFFFF），
+//  而 Linux 的序列里比我们**多一步**：写完 `PCIE_INDEX2` 之后**回读 `PCIE_INDEX2`**（posted-write flush）。
+//  Linux 原文（:647-656）：
+//      writel(reg_addr, pcie_index_offset);
+//      readl(pcie_index_offset);                       // ★ 回读刷写（本原语补上的就是这一步）
+//      if (pcie_index_hi != 0) { writel(...); readl(...); }   // Phoenix 无 HI ⇒ 恒跳过（见 NRed.hpp 注释）
+//      r = readl(pcie_data_offset);
+//      if (pcie_index_hi != 0) { writel(0, ...); readl(...); }
+UInt32 NRed::readReg32Ext(const UInt32 addr) const
+{
+    this->rmmioPtr[PCIE_INDEX2] = addr;
+    (void)this->rmmioPtr[PCIE_INDEX2];   // ★ 回读刷写（volatile 读，编译器不会优化掉）
+    return this->rmmioPtr[PCIE_DATA2];
+}

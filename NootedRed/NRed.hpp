@@ -74,6 +74,20 @@ public:
     void   writeReg32(UInt32 reg, UInt32 value) const;        // TODO: Remove!
 
     /**
+     * 忠实复刻 Linux `amdgpu_device_indirect_rreg` 的 **SMN 间接读**（越窗寄存器用）。
+     *
+     * 与 `readReg32` 间接分支的**唯一区别**：写完 `PCIE_INDEX2` 后**回读一次 INDEX2**
+     * （posted-write flush）——Linux `amdgpu_reg_access.c:647-648` 正是如此；我们的旧实现缺这一步。
+     * Phoenix 的 NBIO（`amdgpu/nbio_v7_11.c:229-237`）只提供 INDEX2/DATA2、**没有**
+     * `get_pcie_index_hi_offset` ⇒ Linux 侧 `pcie_index_hi` 恒为 0 ⇒ **无需 INDEX_HI 处理**
+     * （这也是本原语省略它的依据）。
+     *
+     * @param addr **字节地址** = `(段基址[reg##_BASE_IDX] + 寄存器偏移) * 4 + smn_base`
+     *             （公式与依据见 `FwBringup/RegAddr.hpp`）
+     */
+    UInt32 readReg32Ext(UInt32 addr) const;
+
+    /**
      * Probe：SMU13 相关路径的累积探针状态（旁路记录，不改变任何原有行为）。
      *
      * ⚠️ 两个写入者共用这一个变量，位域**曾经相交**，2026-09-25 已解冲突：

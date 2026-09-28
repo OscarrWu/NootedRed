@@ -1731,6 +1731,40 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               pC81, pC35, pC36, pC58, pC33, pC64, pC67, pC71, qC81, qC35, v67, v83, v91);
     }
 
+    // ─── 乙线 T7c：**间接访问机制**对照探针（门控 `-NRedFwProbe3`，默认关闭）────────────────────
+    //  第 75 轮结果：按 Linux 公式算出的正确地址（SEG1×4 ≈ 0x090FFxxx）经**旧**路径仍全读 `ffffffff`。
+    //  ⇒ 怀疑不在地址、而在**间接访问机制**：我们缺 Linux 的"写完 `PCIE_INDEX2` 后**回读刷写**"
+    //    （`amdgpu_reg_access.c:647-648`）。本探针：
+    //    ① 用新原语 `NRed::readReg32Ext`（忠实复刻 Linux，含回读）读同一批寄存器；
+    //    ② **机制自证**：把地址写进 `PCIE_INDEX2` 后回读它，应得原值（证明"写索引→读回"这条链通）；
+    //    ③ 旧路径读数做对照。
+    //  预期（【推测】）：若新原语给出"活"值（c81≠0、c35==1、c36==0x80）⇒ 机制即根因；
+    //    若仍全 `ffffffff` 而 INDEX2 回读正常 ⇒ 该地址在 SMN 空间确无译码，需另找基址/空间。
+    if (checkKernelArgument("-NRedFwProbe3") && NRed::singleton().getAttributes().isPhoenix()) {
+        auto&            n3    = NRed::singleton();
+        constexpr UInt32 kS1   = 0x0243FC00;              // MP0/MP1 SEG1（BASE_IDX=1）
+        constexpr UInt32 kIdx2 = 0x0E;                    // Regs/NBIO.hpp: PCIE_INDEX2（dword 索引）
+        constexpr UInt32 kDat2 = 0x0F;                    // Regs/NBIO.hpp: PCIE_DATA2
+        const auto       smn   = [](const UInt32 off) -> UInt32 { return (kS1 + off) * 4; };
+        // ① 新原语（忠实 Linux：写 INDEX2 → 回读 INDEX2 → 读 DATA2）
+        const UInt32 xC81 = n3.readReg32Ext(smn(0x91));   // C2PMSG_81（SOS 存活）
+        const UInt32 xC35 = n3.readReg32Ext(smn(0x63));   // C2PMSG_35（bootloader 状态）
+        const UInt32 xC36 = n3.readReg32Ext(smn(0x64));   // C2PMSG_36（TMR 高 32 位）
+        const UInt32 xC58 = n3.readReg32Ext(smn(0x7A));   // C2PMSG_58（SOS 版本）
+        const UInt32 xV67 = n3.readReg32Ext(smn(0x283));  // VBIOSSMC（MP1）显示时钟通道
+        const UInt32 xV91 = n3.readReg32Ext(smn(0x29B));
+        // ② 机制自证：写 INDEX2 → 回读 INDEX2 → 再经旧路径读 DATA2
+        const UInt32 a81 = smn(0x91);
+        n3.writeReg32(kIdx2, a81);
+        const UInt32 rb       = n3.readReg32(kIdx2);
+        const UInt32 datAfter = n3.readReg32(kDat2);
+        // ③ 旧路径对照
+        const UInt32 oC81 = n3.readReg32(a81);
+        panic("NRed FwProbe3: ext c81=%x c35=%x c36=%x c58=%x v67=%x v91=%x | 旧路径 c81=%x | "
+              "机制: INDEX2写=%x 回读=%x DATA2=%x | want(c81!=0 c35=1 c36=80)",
+              xC81, xC35, xC36, xC58, xV67, xV91, oC81, a81, rb, datAfter);
+    }
+
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
     // 必须置于 -NRedProbePPLIB 之前：二者同开时以 Panic 优先（先取数据）。
     // panic() 与 Apple doGPUPanic 终点同一原语（DebugEnabler.cpp:250），栈/寄存器照常写入，.panic 不残缺。
