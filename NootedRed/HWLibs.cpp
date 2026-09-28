@@ -812,10 +812,13 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
 static void nredTraceLine(char* const buf, const int n)
 {
     if (n <= 0 || rootvnode == nullptr) { return; }
-    char name[64];
-    snprintf(name, sizeof(name), "/var/log/NRedTrace-%llx.log",
-             static_cast<unsigned long long>(X5000HWLibs::singleton().kcSlide));
-    FileIO::writeBufferToFile(name, buf, static_cast<size_t>(n), O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
+    // 固定文件名：每次启动的**第一次写**截断、之后追加 ⇒ 文件内容 = 本轮全部诊断行
+    // （判读时按 mtime 取本轮文件，流程见 docs/真机测试手册.md §6.1 第 0 步）。
+    static bool first = true;
+    const int fmode = first ? (O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW)
+                            : (O_APPEND | O_CREAT | FWRITE | O_NOFOLLOW);
+    first = false;
+    FileIO::writeBufferToFile("/var/log/NRedTrace.log", buf, static_cast<size_t>(n), fmode);
 }
 
 // 第八步观测（2026-09-28 第二十五轮）：`bgm_create` 内层 4 步（只读，仅记录入参与返回值）。
