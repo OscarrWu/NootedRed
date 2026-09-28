@@ -40,6 +40,7 @@
 #include <mach/i386/vm_param.h>
 #include <mach/i386/vm_types.h>
 #include <mach/kern_return.h>
+#include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（PP 观测落盘，见下方 helper）
 
 // 第八步观测：加速器 `probe` 的读数（由 X5000.cpp 记录、在此处【安全位置】输出）
 extern UInt64 gAccelProbeCalls;
@@ -48,6 +49,22 @@ extern UInt64 gAccelProbeScoreIn;
 extern UInt64 gAccelProbeScoreOut;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
+
+
+// PP 观测落盘（2026-09-28）：与 HWLibs 侧同一思路——L2（内核 msgbuf）覆盖窗口只有 26–35 s，
+//  而 `AmdPowerPlayHelper::powerUp` 的读数发生在 34–39 s ⇒ 必须自建落盘。
+//  ⚠️ 必须先判 `rootvnode`（根 FS 未挂载时写文件会阻塞内核线程，见真机手册 §5.1）。
+extern "C" void *rootvnode __attribute__((weak));
+
+static void nredPPTrace(char* const buf, const int n)
+{
+    if (n <= 0 || rootvnode == nullptr) { return; }
+    const size_t len = static_cast<size_t>(n > 767 ? 767 : n);   // snprintf 可能返回"应写长度"
+    static unsigned seq = 0;
+    char name[64];
+    snprintf(name, sizeof(name), "/var/log/NRedPP-%03u.log", seq++);
+    FileIO::writeBufferToFile(name, buf, len, O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW);
+}
 
 static const UInt8 kCailAsicCapsTablePattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                   0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -849,7 +866,7 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
 //  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic6`（与其它探针互斥使用）。
 UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
 {
-    const bool wantProbe = checkKernelArgument("-NRedStagePanic6");
+    const bool wantProbe = checkKernelArgument("-NRedAccelLog");
     const bool wantRegister = checkKernelArgument("-NRedRegisterHwSvc");
     const bool wantAccelProbe = checkKernelArgument("-NRedAccelProbe");
     const bool wantAccelLog = checkKernelArgument("-NRedAccelLog");
@@ -979,7 +996,8 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             const UInt64 vMagic = magicRead, vSvt = svt, vSv8 = sv8, vSv10 = sv10;
             const UInt64 vCtl5f18 = ctl5f18, vCtl100 = ctl100, vHs28 = hs28;
             const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
-            panic("NRed PPH probe: READCHK magic=%llx[exp=a5a5a5a512345678] self=%llx svt=%llx sv[8]=%llx sv[10]=%llx "
+            char _pb[768];
+            const int _pn = snprintf(_pb, sizeof(_pb), "NRed PPH probe: READCHK magic=%llx[exp=a5a5a5a512345678] self=%llx svt=%llx sv[8]=%llx sv[10]=%llx "
                   "| CTL[5f18]=%llx CTL[100]=%llx HS[28]=%llx "
                   "| o20=%llx o50=%llx "
                   "| vt20=%llx [0]=%llx [8]=%llx [10]=%llx [118]=%llx [a00]=%llx "
@@ -991,6 +1009,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                   vVt20, w00, w08, w10, w118, vA00,
                   vVt50, x00, x08, x10, v850, v670, v6b8,
                   v7960, vCalls, vIri, vDummy);
+            nredPPTrace(_pb, _pn);
         }
 
         // ─── 加速器加载前置判据的输出（门控 `-NRedAccelProbe`）─────────────────
