@@ -1776,8 +1776,6 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
             m35[k] = n3.readReg32(b + 0x63);
             m58[k] = n3.readReg32(b + 0x7A);
         }
-            }
-        }
         panic("NRed FwProbe3: ext c81=%x c35=%x c36=%x c58=%x v67=%x v91=%x | 旧路径 c81=%x | "
               "机制: INDEX2写=%x 回读=%x DATA2=%x | 矩阵81/35/58: [%x %x %x][%x %x %x][%x %x %x]",
               xC81, xC35, xC36, xC58, xV67, xV91, oC81, a81, rb, datAfter,
