@@ -66,10 +66,6 @@ extern UInt64      gR1bObj1A38Vtable24;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
-
- static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（入口写、探针读）
-
-
 // PP 观测落盘（2026-09-28）：与 HWLibs 侧同一思路——L2（内核 msgbuf）覆盖窗口只有 26–35 s，
 //  而 `AmdPowerPlayHelper::powerUp` 的读数发生在 34–39 s ⇒ 必须自建落盘。
 //  ⚠️ 必须先判 `rootvnode`（根 FS 未挂载时写文件会阻塞内核线程，见真机手册 §5.1）。
