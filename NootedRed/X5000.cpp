@@ -150,28 +150,38 @@ X5000::X5000()
 // 第八步观测：保存 X5000 kext 的 slide，供探针在运行时定位其内部符号（如 probe 用的属性名 OSSymbol）
 UInt64 gAccelProbeProv    = 0;    // 最后一次 provider 指针
 
-// ─── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
-//  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
-//  仅在 configureDevice 返回时捕获内存字段与属性，**不读 GPU 寄存器、不调 Apple 方法**
-//  （panic 处只读已捕获的标量）。定义放在此处（早于使用点），X6000FB.cpp 以 extern 引用。
-bool        gR1bProbeEnabled      = false;
-UInt64      gR1bCfgDevSelf        = 0;      // configureDevice 的 this（加速器对象）
-UInt64      gR1bCfgDevProvider    = 0;      // configureDevice 的 provider 参数（IOPCIDevice*）
-UInt64      gR1bCfgDevF1F10       = 0;      // this+0x1F10
-UInt64      gR1bCfgDevF1F14       = 0;      // this+0x1F14
-UInt64      gR1bCfgDevF1F18       = 0;      // this+0x1F18
-UInt64      gR1bCfgDevF1F58       = 0;      // this+0x1F58
-UInt64      gR1bCfgDevF1F40       = 0;      // this+0x1F40（framebuffer 服务，用于读 AAPL,aux-power-connected）
-// provider 的 AAPL,aux-power-connected：存在性/类型/值（在 configureDevice 上下文捕获）
-bool        gR1bAuxPowerExists    = false;
-UInt32      gR1bAuxPowerType      = 0;      // 简化类型码：1=OSData,2=OSNumber,3=OSBoolean,0=失败/其它
-UInt64      gR1bAuxPowerValue     = 0;      // 值：OSData 取首 8 字节；OSNumber 取数值；OSBoolean 取 0/1
-// *0x1ed118（GOT 项）所指对象的首字段
-UInt64      gR1bKeyObjFirstField  = 0;
-// this+0x1a38 所指对象的 vtable 指针与 vtable[0x24] 目标地址
-UInt64      gR1bObj1A38           = 0;      // this+0x1A38 指向的对象指针
-UInt64      gR1bObj1A38Vtable     = 0;      // 该对象的 vtable 指针（对象首字段）
-UInt64      gR1bObj1A38Vtable24   = 0;      // vtable[0x24] = vtable + 0x120 处的目标地址
+// ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）───────────────────────────────
+//  目的：判定 `X5000::configureDevice` 究竟从**哪个失败出口**返回（该方法有 6 条以上失败出口，
+//  此前把观测坐标当成"唯一检查点"，导致结论无法收敛）。
+//  依据（主 agent 2026-09-29 逐条核对真机 13.6 二进制；符号锚定：`__text` 归零 vm=0xf60，
+//  0x3306 恰为符号 `AMDRadeonX5000_AMDGraphicsAccelerator::configureDevice` 入口）：
+//    · 返回值寄存器 %r15 在全函数内**只被写 4 次**：0x3343 初始清零 / 0x35fb 置 1 /
+//      0x3620 清零（aux-power 形状检查失败）/ 0x368b 清零（早退族公共出口）。
+//    · 早退族 = 5 条 `je 0x368b`：0x33b7(f1f40==0) / 0x33ee(f1f28==0) / 0x342f(f1a68==0)
+//      / 0x344d(f1a40==0) / 0x346e(f1a38==0)；另有 0x3354（设备 ID 读回 0xffff）与 0x333a（provider==0）。
+//      ⇒ **每个出口都留下一个刚被写空/未写入的特征字段**，故读这几个字段即可一轮定出口。
+//    · 早退路径会执行 0x3696 的 `and $~0x30` + `or $0x20` ⇒ **f1e88 的 bit5 是"早退族"的印记**；
+//      aux 分支的特征是 **f1f10 被显式清 0**（0x3614）。
+//  纪律（手册 §9.1 允许形态）：**纯内存字段读**——不读任何 GPU/SMN 寄存器、不调用任何 Apple
+//    方法、不写任何内存。故 panic 时刻无需任何额外操作，也不会引入锁/阻塞风险。
+bool        gR1bProbeEnabled     = false;
+UInt64      gR1bCfgDevCalls      = 0;      // configureDevice 被调用次数
+UInt64      gR1bCfgDevRetNZ      = 0;      // 返回值为"真"的次数
+UInt64      gR1bCfgDevSelf       = 0;      // 最后一次的 this
+UInt64      gR1bCfgDevProvider   = 0;      // 最后一次的 provider（IOPCIDevice*）
+UInt64      gR1bCfgDevRet        = 0;      // 最后一次的返回值
+UInt64      gR1bZeroMask         = 0;      // bit0..4 = f1f40/f1f28/f1a68/f1a40/f1a38 曾出现 0
+UInt64      gR1bF1F40            = 0;      // this+0x1F40（framebuffer 服务；0 ⇒ 0x33b7 出口）
+UInt64      gR1bF1F28            = 0;      // this+0x1F28（0 ⇒ 0x33ee 出口）
+UInt64      gR1bF1F30            = 0;      // this+0x1F30
+UInt64      gR1bF1A68            = 0;      // this+0x1A68（0 ⇒ 0x342f 出口）
+UInt64      gR1bF1A40            = 0;      // this+0x1A40（0 ⇒ 0x344d 出口）
+UInt64      gR1bF1A38            = 0;      // this+0x1A38（0 ⇒ 0x346e 出口）
+UInt64      gR1bF1F10            = 0;      // this+0x1F10（aux 分支失败时被显式清 0）
+UInt64      gR1bF1E88            = 0;      // this+0x1E88（bit5 = 早退族印记）
+UInt64      gR1bF368             = 0;      // this+0x368
+UInt64      gR1bObj1A38Vtable    = 0;      // f1a38 所指对象的 vtable 指针（纯读，供离线定名）
+UInt64      gR1bKeyObjFirstField = 0;      // *0x1ed118 所指对象的首字段
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
@@ -1230,85 +1240,41 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
         f1a68 = load64(s, 0x1A68);
         f1a40 = load64(s, 0x1A40);
     }
-    // ─── R1'-b 最小读数探针捕获（`-NRedR1Probe`，默认关）───────────────────────
-    //  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
-    //  仅在 configureDevice 返回时捕获，**不读 GPU 寄存器、不调 Apple 方法**（panic 处只读已捕获标量）。
+    // ─── R1' 最小读数探针捕获（`-NRedR1Probe`，默认关）───────────────────────────
+    //  见文件头全局量处的说明：**纯内存读**（不调方法、不读寄存器、不写内存）。
     if (checkKernelArgument("-NRedR1Probe")) {
         gR1bProbeEnabled = true;
-        gR1bCfgDevSelf = s;
+        ++gR1bCfgDevCalls;
+        gR1bCfgDevSelf     = s;
         gR1bCfgDevProvider = reinterpret_cast<UInt64>(provider);
-        // 读 configureDevice 返回时的四个字段（R1b 报告 §6 项 1、5）
+        gR1bCfgDevRet      = ret;
+        if (ret != 0) { ++gR1bCfgDevRetNZ; }
         if (s >= 0xffffff7f80000000ULL) {
             auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
                 return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
             };
-            gR1bCfgDevF1F10 = load64(s, 0x1F10);
-            gR1bCfgDevF1F14 = load64(s, 0x1F14);
-            gR1bCfgDevF1F18 = load64(s, 0x1F18);
-            gR1bCfgDevF1F58 = load64(s, 0x1F58);
-            gR1bCfgDevF1F40 = load64(s, 0x1F40);  // framebuffer 服务（用于 AAPL,aux-power-connected）
-            // *0x1ed118（GOT 项）所指对象的首字段（R1b 报告 §6 项 3）
+            gR1bF1F40 = load64(s, 0x1F40);
+            gR1bF1F28 = load64(s, 0x1F28);
+            gR1bF1F30 = load64(s, 0x1F30);
+            gR1bF1A68 = load64(s, 0x1A68);
+            gR1bF1A40 = load64(s, 0x1A40);
+            gR1bF1A38 = load64(s, 0x1A38);
+            gR1bF1F10 = load64(s, 0x1F10);
+            gR1bF1E88 = load64(s, 0x1E88);
+            gR1bF368  = load64(s, 0x368);
+            gR1bZeroMask |= (gR1bF1F40 == 0 ? 1ULL : 0ULL) | (gR1bF1F28 == 0 ? 2ULL : 0ULL)
+                          | (gR1bF1A68 == 0 ? 4ULL : 0ULL) | (gR1bF1A40 == 0 ? 8ULL : 0ULL)
+                          | (gR1bF1A38 == 0 ? 16ULL : 0ULL);
+            // f1a38 所指对象的 vtable 指针（供离线定名；纯读，不调用其任何方法）
+            if (gR1bF1A38 >= 0xffffff7f80000000ULL) {
+                gR1bObj1A38Vtable = *reinterpret_cast<const UInt64*>(gR1bF1A38);
+            }
+            // *0x1ed118（GOT 项）所指对象的首字段（aux 形状检查第二参的来源）
             if (gX5000Slide != 0) {
-                const UInt64 gotAbs = gX5000Slide + 0x1ED118ULL;
-                const UInt64 gotPtr = *reinterpret_cast<const UInt64*>(gotAbs);
+                const UInt64 gotPtr = *reinterpret_cast<const UInt64*>(gX5000Slide + 0x1ED118ULL);
                 if (gotPtr >= 0xffffff8000000000ULL) {
                     gR1bKeyObjFirstField = *reinterpret_cast<const UInt64*>(gotPtr);
                 }
-            }
-            // this+0x1a38 所指对象的 vtable 与 vtable[0x24]（R1b 报告 §6 项 4）
-            const UInt64 obj1a38 = load64(s, 0x1A38);
-            gR1bObj1A38 = obj1a38;
-            if (obj1a38 >= 0xffffff7f80000000ULL) {
-                const UInt64 vtablePtr = *reinterpret_cast<const UInt64*>(obj1a38);
-                gR1bObj1A38Vtable = vtablePtr;
-                if (vtablePtr >= 0xffffff8000000000ULL) {
-                    // vtable[0x24] = vtable + 0x24*8 = vtable + 0x120
-                    gR1bObj1A38Vtable24 = *reinterpret_cast<const UInt64*>(vtablePtr + 0x120);
-                }
-            }
-        }
-        // provider 的 AAPL,aux-power-connected：存在性 + 类型 + 值（R1b 报告 §6 项 2）
-        // 这里的 provider 是 configureDevice 的参数（IOPCIDevice*），但检查在清理分支里用的是 this+0x1f40（framebuffer 服务）。
-        // 我们捕获 this+0x1f40 指向的服务对象，并在正常上下文里安全调用 getProperty。
-        if (gR1bCfgDevF1F40 >= 0xffffff7f80000000ULL) {
-            IOService* fbSvc = reinterpret_cast<IOService*>(gR1bCfgDevF1F40);
-            OSObject* propObj = fbSvc->getProperty("AAPL,aux-power-connected");
-            if (propObj != nullptr) {
-                gR1bAuxPowerExists = true;
-                // 简化类型识别：用 metaClass 指针低位做类型码（1=OSData,2=OSNumber,3=OSBoolean,0=其它）
-                OSMetaClass* mc = propObj->getMetaClass();
-                const char* clsName = mc ? mc->getClassName() : nullptr;
-                UInt32 typeCode = 0;
-                UInt64 value = 0;
-                if (clsName) {
-                    if (strcmp(clsName, "OSData") == 0) {
-                        typeCode = 1;
-                        OSData* data = OSDynamicCast(OSData, propObj);
-                        if (data) {
-                            const void* bytes = data->getBytesNoCopy();
-                            UInt32 len = data->getLength();
-                            if (bytes && len >= 8) {
-                                value = *reinterpret_cast<const UInt64*>(bytes);
-                            } else if (bytes && len > 0) {
-                                // 不足 8 字节，逐字节拼装
-                                const UInt8* b = static_cast<const UInt8*>(bytes);
-                                for (UInt32 i = 0; i < len; ++i) {
-                                    value |= (UInt64)b[i] << (i * 8);
-                                }
-                            }
-                        }
-                    } else if (strcmp(clsName, "OSNumber") == 0) {
-                        typeCode = 2;
-                        OSNumber* num = OSDynamicCast(OSNumber, propObj);
-                        if (num) { value = num->unsigned64BitValue(); }
-                    } else if (strcmp(clsName, "OSBoolean") == 0) {
-                        typeCode = 3;
-                        OSBoolean* b = OSDynamicCast(OSBoolean, propObj);
-                        if (b) { value = b->getValue() ? 1 : 0; }
-                    }
-                }
-                gR1bAuxPowerType = typeCode;
-                gR1bAuxPowerValue = value;
             }
         }
     }

@@ -47,22 +47,26 @@ extern UInt64 gAccelProbeCalls;
 extern UInt64 gAccelProbeRet;
 extern UInt64 gAccelProbeScoreIn;
 extern UInt64 gAccelProbeScoreOut;
-// R1'-b 最小读数探针（`-NRedR1Probe`，默认关）——由 X5000.cpp 捕获、此处 panic 输出
+// R1' 最小读数探针（`-NRedR1Probe`，默认关）——由 X5000.cpp 捕获、此处（已验证的失败出口）输出。
+//  全部为纯内存标量：不读 GPU/SMN 寄存器、不调 Apple 方法（手册 §9.1 允许形态）。
 extern bool        gR1bProbeEnabled;
+extern UInt64      gR1bCfgDevCalls;
+extern UInt64      gR1bCfgDevRetNZ;
 extern UInt64      gR1bCfgDevSelf;
 extern UInt64      gR1bCfgDevProvider;
-extern UInt64      gR1bCfgDevF1F10;
-extern UInt64      gR1bCfgDevF1F14;
-extern UInt64      gR1bCfgDevF1F18;
-extern UInt64      gR1bCfgDevF1F58;
-extern UInt64      gR1bCfgDevF1F40;
-extern bool        gR1bAuxPowerExists;
-extern UInt32      gR1bAuxPowerType;
-extern UInt64      gR1bAuxPowerValue;
-extern UInt64      gR1bKeyObjFirstField;
-extern UInt64      gR1bObj1A38;
+extern UInt64      gR1bCfgDevRet;
+extern UInt64      gR1bZeroMask;
+extern UInt64      gR1bF1F40;
+extern UInt64      gR1bF1F28;
+extern UInt64      gR1bF1F30;
+extern UInt64      gR1bF1A68;
+extern UInt64      gR1bF1A40;
+extern UInt64      gR1bF1A38;
+extern UInt64      gR1bF1F10;
+extern UInt64      gR1bF1E88;
+extern UInt64      gR1bF368;
 extern UInt64      gR1bObj1A38Vtable;
-extern UInt64      gR1bObj1A38Vtable24;
+extern UInt64      gR1bKeyObjFirstField;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
@@ -1633,40 +1637,37 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
                                static_cast<unsigned long long>(gMaDummy));
         nredPPTrace(b, n);
     }
-    // ─── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
-    //  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
-    //  仅读取已捕获的标量，**不读 GPU 寄存器、不调 Apple 方法、不解引用未校验指针**。
-    //  新值必须新开探针位，不得改动既有已冻结格式串（手册 §4A 纪律 3）。
+    // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
+    //  判据见 X5000.cpp 全局量处的说明（失败出口 ↔ 特征字段的对应表）。
+    //  预读所有标量为局部变量（panic 实参禁调 singleton() 等可能加锁的函数）。
     if (checkKernelArgument("-NRedR1Probe") && gR1bProbeEnabled) {
-        // 预读所有标量为局部变量（§16.68：panic 实参禁调 singleton() 等可能加锁函数）
-        const UInt64  cfgSelf      = gR1bCfgDevSelf;
-        const UInt64  cfgProv      = gR1bCfgDevProvider;
-        const UInt64  f1f10        = gR1bCfgDevF1F10;
-        const UInt64  f1f14        = gR1bCfgDevF1F14;
-        const UInt64  f1f18        = gR1bCfgDevF1F18;
-        const UInt64  f1f58        = gR1bCfgDevF1F58;
-        const UInt64  f1f40        = gR1bCfgDevF1F40;
-        const bool    auxExists    = gR1bAuxPowerExists;
-        const UInt32  auxType      = gR1bAuxPowerType;
-        const UInt64  auxValue     = gR1bAuxPowerValue;
-        const UInt64  keyFirst     = gR1bKeyObjFirstField;
-        const UInt64  obj1a38      = gR1bObj1A38;
-        const UInt64  obj1a38Vt    = gR1bObj1A38Vtable;
-        const UInt64  obj1a38Vt24  = gR1bObj1A38Vtable24;
-        const UInt64  vCalls       = gMaCalls;
-        const UInt64  vIri         = gMaIri;
-        const UInt64  vDummy       = gMaDummy;
+        const UInt64 calls   = gR1bCfgDevCalls;
+        const UInt64 retNZ   = gR1bCfgDevRetNZ;
+        const UInt64 cfgSelf = gR1bCfgDevSelf;
+        const UInt64 cfgProv = gR1bCfgDevProvider;
+        const UInt64 lastRet = gR1bCfgDevRet;
+        const UInt64 zeroMsk = gR1bZeroMask;
+        const UInt64 f1f40   = gR1bF1F40;
+        const UInt64 f1f28   = gR1bF1F28;
+        const UInt64 f1f30   = gR1bF1F30;
+        const UInt64 f1a68   = gR1bF1A68;
+        const UInt64 f1a40   = gR1bF1A40;
+        const UInt64 f1a38   = gR1bF1A38;
+        const UInt64 f1f10   = gR1bF1F10;
+        const UInt64 f1e88   = gR1bF1E88;
+        const UInt64 f368    = gR1bF368;
+        const UInt64 vt1a38  = gR1bObj1A38Vtable;
+        const UInt64 keyF0   = gR1bKeyObjFirstField;
 
-        panic("NRed R1b probe: cfgSelf=%llx cfgProv=%llx | f1f10=%llx f1f14=%llx f1f18=%llx f1f58=%llx f1f40=%llx "
-              "| aux: exists=%d type=%u val=%llx | keyObjFirst=%llx | obj1a38=%llx vt=%llx vt24=%llx "
-              "| ma calls=%llu iri=%llu dummy=%llu | orig1:%s orig2:%s orig3:%s",
+        panic("NRed R1 probe: calls=%llu retNZ=%llu lastRet=%llu self=%llx prov=%llx | zeroMask=%llx "
+              "| f1f40=%llx f1f28=%llx f1f30=%llx f1a68=%llx f1a40=%llx f1a38=%llx "
+              "| f1f10=%llx f1e88=%llx f368=%llx | vt1a38=%llx keyF0=%llx",
+              calls, retNZ, lastRet,
               cfgSelf, cfgProv,
-              f1f10, f1f14, f1f18, f1f58, f1f40,
-              auxExists ? 1 : 0, auxType, auxValue,
-              keyFirst,
-              obj1a38, obj1a38Vt, obj1a38Vt24,
-              vCalls, vIri, vDummy,
-              fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+              zeroMsk,
+              f1f40, f1f28, f1f30, f1a68, f1a40, f1a38,
+              f1f10, f1e88, f368,
+              vt1a38, keyF0);
         // panic 不返回
     }
     // ─── ⛔ 已删除：乙线 T7 寄存器探针族（`-NRedFwProbe` / `-NRedFwProbe2` / `-NRedFwProbe3`）───
