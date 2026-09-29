@@ -68,6 +68,27 @@ extern UInt64      gR1bF1E88;
 extern UInt64      gR1bF368;
 extern UInt64      gR1bObj1A38Vtable;
 extern UInt64      gR1bKeyObjFirstField;
+// R1'-B30 身份探针（`-NRedR1B30Probe`，默认关）——由 X5000.cpp 捕获、此处（已验证的失败出口）输出。
+//  全部为纯内存标量 + provider 属性三项：不读 GPU/SMN 寄存器、不调 Apple 方法（手册 §9.1 允许形态）。
+extern bool        gR1b30ProbeArmed;
+extern UInt64      gR1b30Base;
+extern UInt64      gR1b30SelfVptr;
+extern UInt64      gR1b30SelfVptrZvm;
+extern UInt64      gR1b30SlotB20Target;
+extern UInt64      gR1b30SlotB20Zvm;
+extern UInt64      gR1b30SlotB28Target;
+extern UInt64      gR1b30SlotB28Zvm;
+extern UInt64      gR1b30SlotB30Target;
+extern UInt64      gR1b30SlotB30Zvm;
+extern UInt64      gR1b30Vt1A68;
+extern UInt64      gR1b30Vt1A68Zvm;
+extern UInt64      gR1b30Vt1A40;
+extern UInt64      gR1b30Vt1A40Zvm;
+extern UInt64      gR1b30F1A38;
+extern UInt64      gR1b30Prov;
+extern UInt64      gR1b30McDeclared, gR1b30McKind, gR1b30McValue;
+extern UInt64      gR1b30AuxDeclared, gR1b30AuxKind, gR1b30AuxValue;
+extern UInt64      gR1b30AuxOk;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
@@ -111,22 +132,25 @@ static void nredPPTrace(char* const buf, const int n)
 //     在那里读**不可能掩盖成功**（手册 §4A；作战计划 T7 卡纪律）。
 //  ⛔ 门控默认关 ⇒ 不带该 boot-arg 时本探针**一次 MMIO 都不会发生**。
 //
-//  MMIO 通道：`NRed::rmmioPtr`（`NRed.cpp:105` 映射的 BAR5；`readReg32Ext` 同一条通道）。
+//  MMIO 通道：`NRed::readReg32Raw` / `writeReg32Raw`（2026-09-29 新增的最小公开访问器；
+//  `rmmioPtr` 本身是**私有成员** —— `NRed.hpp:45` 在 `public:`(`:55`) 之前 —— 故必须走访问器。
 //  ⚠️ 刻意**不复用** `NRed::readReg32Ext`：那个原语缺锁、且无法注入 `SmnCallbacks`；
 //     本探针用 `SmnReadProbe.hpp` 的序列（写索引→回读校验→读数据），与 Linux 规范一致。
 //
 //  ⚠️ 锁回调留空（`nullptr`）：本探针在 `handleCriticalError`（崩溃流程、多 CPU 已停、
 //     锁状态未知）中执行，**不能**在此取 IOLock（可能睡眠/死锁 —— 手册 §7.3 教训）。
 //     `SmnIndirectAccess` 已支持 nullptr；"缺锁"是本轮的**已知限制**，已登记进交付报告。
-struct SmnProbeCtx { volatile UInt32* mmio; };   // 仅装一个指针，零分配
 
-static UInt32 smnProbeReadReg(void* const ctx, const UInt32 off)
+// 回调为**无状态**的（不用 ctx）：直接转发到 NRed 的公开访问器。
+//   这样连"把裸指针交给外部结构体"这一步都省掉，`volatile` 语义不外泄
+//   （`R1B30ProbeImpl` 的建议，与本节初衷一致）。
+static UInt32 smnProbeReadReg(void*, const UInt32 off)
 {
-    return static_cast<const SmnProbeCtx*>(ctx)->mmio[off];
+    return NRed::singleton().readReg32Raw(off);
 }
-static void smnProbeWriteReg(void* const ctx, const UInt32 off, const UInt32 val)
+static void smnProbeWriteReg(void*, const UInt32 off, const UInt32 val)
 {
-    static_cast<const SmnProbeCtx*>(ctx)->mmio[off] = val;
+    NRed::singleton().writeReg32Raw(off, val);
 }
 
 static const UInt8 kCailAsicCapsTablePattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
@@ -1700,6 +1724,47 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               vt1a38, keyF0);
         // panic 不返回
     }
+    // ─── R1'-B30 身份探针（`-NRedR1B30Probe`，默认关）─────────────────────────
+    //  判据与设计见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
+    //  门控：`gR1b30ProbeArmed` 已含 `checkKernelArgument("-NRedR1B30Probe")` 的判定结果
+    //  格式串为本探针专属（新开探针位），与既有 R1 探针的冻结串**互不相关**。
+    //  本探针 panic 首行的前缀刻意选为 `NRed R1B30 probe:`（"R1B30" 与既有串的"R1 probe"
+    //  之间**没有空格分隔**）⇒ `decoded.txt` 的自动断言无论按 `startswith` 还是按子串
+    //  `contains` 判读，二者都不会互相误命中。
+    if (gR1b30ProbeArmed) {
+        // 铁律：panic 实参只能是已求值的局部变量
+        const UInt64 base    = gR1b30Base;
+        const UInt64 selfVt  = gR1b30SelfVptr;
+        const UInt64 selfZvm = gR1b30SelfVptrZvm;
+        const UInt64 sB20T   = gR1b30SlotB20Target;
+        const UInt64 sB20Z   = gR1b30SlotB20Zvm;
+        const UInt64 sB28T   = gR1b30SlotB28Target;
+        const UInt64 sB28Z   = gR1b30SlotB28Zvm;
+        const UInt64 sB30T   = gR1b30SlotB30Target;
+        const UInt64 sB30Z   = gR1b30SlotB30Zvm;
+        const UInt64 v1a68   = gR1b30Vt1A68;
+        const UInt64 v1a68Z  = gR1b30Vt1A68Zvm;
+        const UInt64 v1a40   = gR1b30Vt1A40;
+        const UInt64 v1a40Z  = gR1b30Vt1A40Zvm;
+        const UInt64 f1a38   = gR1b30F1A38;
+        const UInt64 prov    = gR1b30Prov;
+        const UInt64 mcD     = gR1b30McDeclared, mcK = gR1b30McKind, mcV = gR1b30McValue;
+        const UInt64 auxD    = gR1b30AuxDeclared, auxK = gR1b30AuxKind, auxV = gR1b30AuxValue;
+        const UInt64 auxOk   = gR1b30AuxOk;
+        // 判读锚点（离线手工比对用，**不是**被测值）：
+        //   `mcV` 以"长度<<56 | 前 11 字节大端"编码 ⇒ `"IOAccelerator"`（13 字节）应为
+        //   `0x0d` 后接 `49 4f 41 63 63 65 6c 65 72 61 74`（"IOAccelerat"）⇒ `mcV = 0x0d494f416363656c65657261ULL`。
+        panic("NRed R1B30 probe: base=%llx | selfVt=%llx selfZvm=%llx "
+              "| b20T=%llx b20Z=%llx b28T=%llx b28Z=%llx b30T=%llx b30Z=%llx "
+              "| v1a68=%llx v1a68Z=%llx v1a40=%llx v1a40Z=%llx f1a38=%llx "
+              "| prov=%llx mcD=%llu mcK=%llu mcV=%llx auxD=%llu auxK=%llu auxV=%llx auxOk=%llu",
+              base,
+              selfVt, selfZvm,
+              sB20T, sB20Z, sB28T, sB28Z, sB30T, sB30Z,
+              v1a68, v1a68Z, v1a40, v1a40Z, f1a38,
+              prov, mcD, mcK, mcV, auxD, auxK, auxV, auxOk);
+        // panic 不返回
+    }
     // ─── 乙线「只读单点规范 SMN 访问」探针（门控 `-NRedSmnRead1`，默认关）─────────────
     //  目的（规格书 §4.3 的二分问题）：**"按规范序列、单点、不回读索引，读一个已知寄存器，
     //  能不能安全拿到值？"** —— 这是决策点 D1 批准后要做的**第一件事**（最小的一次硬件接触），
@@ -1726,19 +1791,18 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //    ③ 两个探针**不同时开**：本块置于所有既有探针块**之后**，且在 `-NRedProbePPLIB` 之前；
     //    ④ 门控为假时**一次 MMIO 都不发生**（以下 `if` 是第一道门）。
     if (checkKernelArgument("-NRedSmnRead1")) {
-        // 取值来源只读：`rmmioPtr` 由 `NRed::hwLateInit` 映射（BAR5）；非空由 PANIC_COND 保证。
+        // 前置判据：BAR5 必须已映射（`NRed::hwLateInit` 做映射；`rmmioPtr` 是私有成员，
+        //   故用公开的 `hasRmmio()` 判定，绝不触碰裸指针）。
         // 注意：`hwLateInit` 可能**尚未**执行到（本函数挂在加速器失败出口，晚于它）——
-        //   为稳妥仍做一次空指针判定，未映射则跳过（不构造 null 访问）。
-        volatile UInt32* const mmio = NRed::singleton().rmmioPtr;
-        if (mmio != nullptr) {
-            SmnProbeCtx ctx{mmio};
+        //   为稳妥仍做一次判定，未映射则跳过（`readReg32Raw` 本身也有兜底，但语义上那是"读不到"）。
+        if (NRed::singleton().hasRmmio()) {
             fw::SmnCallbacks cb{};
             cb.readReg    = &smnProbeReadReg;
             cb.writeReg   = &smnProbeWriteReg;
             cb.lock       = nullptr;   // 崩溃上下文不得取锁（见上方说明）
             cb.unlock     = nullptr;
             cb.delayUs    = nullptr;
-            cb.ctx        = &ctx;
+            cb.ctx        = nullptr;   // 回调无状态（直接转发到 NRed 访问器）
             cb.maxRetries = fw::kSmnProbeMaxRetries;   // = 0
 
             const fw::SmnProbeReadings r = fw::runSmnReadProbe(cb);

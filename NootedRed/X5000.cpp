@@ -23,6 +23,7 @@
 #include <kern/debug.h>    // panic()（第八步加速器 start 探针）
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSObject.h>
+#include <libkern/c++/OSString.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSBoolean.h>
@@ -182,6 +183,51 @@ UInt64      gR1bF1E88            = 0;      // this+0x1E88（bit5 = 早退族印�
 UInt64      gR1bF368             = 0;      // this+0x368
 UInt64      gR1bObj1A38Vtable    = 0;      // f1a38 所指对象的 vtable 指针（纯读，供离线定名）
 UInt64      gR1bKeyObjFirstField = 0;      // *0x1ed118 所指对象的首字段
+
+// ─── R1'-B30 身份探针（`-NRedR1B30Probe`，默认关）─────────────────────────────
+//  目的（规格书 = `docs/子任务/乙线R1探针判读报告.md` §4；并由
+//  `docs/子任务/乙线configureDevice-stub解析报告.md` §9 收窄）：
+//  第 78 轮已把 `configureDevice` 的失败出口钉死为 `0x346e`，即
+//  `call *0xb30(this, provider)` 返回 0。§9.1 已离线解出该槽的**静态**目标 =
+//  `__ZN37AMDRadeonX5000_AMDGraphicsAccelerator23createStatisticsManagerEv`（本 kext，归零 vm 0x61be），
+//  且已核实真机绑定的子类 `AMDRadeonX5000_AMDVega10GraphicsAccelerator` **未覆写**这三槽。
+//  §9.2 进一步把"返回 0"归到两条路径：
+//    A. `0x61dd test %rbx,%rbx / je 0x61fe`：分配器（经 stub 0x903c）返回 NULL；
+//    B. `0x61eb call *0x118(%rax) / test %al,%al / jne 0x6200`：新对象 `vtable[0x118]`（槽 0x23）返回 false
+//       ⇒ `0x61fb call *0x28`（release）⇒ 归零。兄弟槽 0xb20/0xb28 每次拿到新鲜堆指针 ⇒ 倾向路径 B。
+//  本探针要**用一次只读读数**把这两点钉死：① `this` 的 vptr 归零 vm（验证"运行时 vptr == 静态 _ZTV + slide"）；
+//  ② 三个槽的**运行时目标**地址（与离线静态值对照）；③ provider 上的两个属性（`IOMatchCategory` /
+//  `AAPL,aux-power-connected` 三要素）；④ 兄弟槽结果对象的 vptr 归零 vm（给 0xb20/0xb28 定名）。
+//
+//  纪律（手册 §9.1 允许形态，逐条）：
+//    · **纯内存字段读 + IORegistry 属性读**：不读任何 GPU/SMN 寄存器；
+//    · **不调用任何 Apple 方法**——包括不通过 `call *槽` 调用 vtable（规则明令），因此路径 B 的
+//      "谁返回了 false"**不在本探针内取**，改为读三个槽的运行时目标地址后**离线定名**（见报告）；
+//    · **不写任何内存**（除本组全局量自身）；默认关时**零副作用**（`checkKernelArgument` 一处门控）。
+//  注意：`checkKernelArgument` 只在捕获路径调用一次，结果存入 `gR1b30ProbeArmed`，输出侧不再判定，
+//    从而保证"默认关 ⇒ 连 boot-arg 都不再被查询"。
+bool        gR1b30ProbeArmed     = false;
+UInt64      gR1b30Base           = 0;      // 捕获时使用的 kext 基址（= gX5000Slide）
+UInt64      gR1b30SelfVptr       = 0;      // *(UInt64*)this  —— 纯内存读
+UInt64      gR1b30SelfVptrZvm    = 0;      // selfVptr − gX5000Slide
+UInt64      gR1b30SlotB20Target  = 0;      // *(this->vptr + 0xb20)
+UInt64      gR1b30SlotB20Zvm     = 0;      // slotB20Target − gX5000Slide
+UInt64      gR1b30SlotB28Target  = 0;      // *(this->vptr + 0xb28)
+UInt64      gR1b30SlotB28Zvm     = 0;
+UInt64      gR1b30SlotB30Target  = 0;      // *(this->vptr + 0xb30)  ← 失败槽
+UInt64      gR1b30SlotB30Zvm     = 0;
+UInt64      gR1b30Vt1A68         = 0;      // *(this+0x1a68) —— 0xb20 返回对象的 vptr
+UInt64      gR1b30Vt1A68Zvm      = 0;
+UInt64      gR1b30Vt1A40         = 0;      // *(this+0x1a40) —— 0xb28 返回对象的 vptr
+UInt64      gR1b30Vt1A40Zvm      = 0;
+UInt64      gR1b30F1A38          = 0;      // this+0x1a38（本机为 0）
+// provider 属性三要素（存在性 / 类型 / 值三元组）：0 = 不存在（getProperty 返回空），
+//   存在时 `*Declared` = 1（即 `declared`），`*Kind` 见下方属性探针块：1 = OSBoolean，2 = OSNumber，
+//   3 = OSData，4 = OSString，0 = 其它 OSMetaClass 类型（存在但不可自证为数值）。
+UInt64      gR1b30Prov = 0;
+UInt64      gR1b30McDeclared = 0, gR1b30McKind = 0, gR1b30McValue = 0;   // "IOMatchCategory"
+UInt64      gR1b30AuxDeclared = 0, gR1b30AuxKind = 0, gR1b30AuxValue = 0; // "AAPL,aux-power-connected"
+UInt64      gR1b30AuxOk  = 0;      // 属性探针块是否**整体**成功执行（provider 为内核指针且非空）
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
@@ -1275,6 +1321,102 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                 if (gotPtr >= 0xffffff8000000000ULL) {
                     gR1bKeyObjFirstField = *reinterpret_cast<const UInt64*>(gotPtr);
                 }
+            }
+        }
+    }
+    // ─── R1'-B30 身份探针捕获（`-NRedR1B30Probe`，默认关）────────────────────────
+    //  见文件头全局量处的说明：**纯内存读 + 一次属性读**，不调 Apple 方法、不读寄存器、不写内存。
+    //  存放于 `wrapConfigureDevice` 的**最终失败出口**（`0x346e` 的对应物），保证读数取的是
+    //  第 78 轮判定的那一次 `configureDevice` 返回。
+    if (checkKernelArgument("-NRedR1B30Probe") && s >= 0xffffff7f80000000ULL) {
+        gR1b30ProbeArmed = true;
+        gR1b30Base       = gX5000Slide;
+        // ① this 的 vptr（纯内存读）⇒ 归零 vm 用于与静态 `__ZTV` 对照
+        const UInt64 selfVt = *reinterpret_cast<const UInt64*>(s);
+        gR1b30SelfVptr = selfVt;
+        if (gX5000Slide != 0 && selfVt >= 0xffffff7f80000000ULL && selfVt > gX5000Slide) {
+            gR1b30SelfVptrZvm = selfVt - gX5000Slide;
+        }
+        // ② vtable 三槽的**运行时目标**（只读槽值，**绝不 call**）⇒ 与离线静态目标对照
+        if (selfVt >= 0xffffff7f80000000ULL) {
+            gR1b30SlotB20Target = *reinterpret_cast<const UInt64*>(selfVt + 0xB20);
+            gR1b30SlotB28Target = *reinterpret_cast<const UInt64*>(selfVt + 0xB28);
+            gR1b30SlotB30Target = *reinterpret_cast<const UInt64*>(selfVt + 0xB30);
+            if (gX5000Slide != 0) {
+                if (gR1b30SlotB20Target > gX5000Slide) { gR1b30SlotB20Zvm = gR1b30SlotB20Target - gX5000Slide; }
+                if (gR1b30SlotB28Target > gX5000Slide) { gR1b30SlotB28Zvm = gR1b30SlotB28Target - gX5000Slide; }
+                if (gR1b30SlotB30Target > gX5000Slide) { gR1b30SlotB30Zvm = gR1b30SlotB30Target - gX5000Slide; }
+            }
+        }
+        // ③ 兄弟槽结果对象的 vptr（给 0xb20/0xb28 定名；纯内存读，不调用其任何方法）
+        const UInt64 o1a68 = load64(s, 0x1A68);
+        const UInt64 o1a40 = load64(s, 0x1A40);
+        if (o1a68 >= 0xffffff7f80000000ULL) {
+            const UInt64 vt = *reinterpret_cast<const UInt64*>(o1a68);
+            gR1b30Vt1A68 = vt;
+            if (gX5000Slide != 0 && vt >= 0xffffff7f80000000ULL && vt > gX5000Slide) {
+                gR1b30Vt1A68Zvm = vt - gX5000Slide;
+            }
+        }
+        if (o1a40 >= 0xffffff7f80000000ULL) {
+            const UInt64 vt = *reinterpret_cast<const UInt64*>(o1a40);
+            gR1b30Vt1A40 = vt;
+            if (gX5000Slide != 0 && vt >= 0xffffff7f80000000ULL && vt > gX5000Slide) {
+                gR1b30Vt1A40Zvm = vt - gX5000Slide;
+            }
+        }
+        gR1b30F1A38 = load64(s, 0x1A38);
+        // ④ provider 属性（**只读**）：`IOMatchCategory` 与 `AAPL,aux-power-connected` 三项。
+        //    与安全位置处的 `readBoolAttr` 同一形态：只调用 IOKit 的 `IOService::getProperty`，
+        //    并只对**属性值对象自身**用原生的 OSBoolean/OSNumber/OSData/OSString 取值
+        //    （`declared` 与 `value` 均为 OSMetaClass 的原生访问器，不属 Apple 驱动虚方法）。
+        {
+            const UInt64 provU = reinterpret_cast<UInt64>(provider);
+            if (provU >= 0xffffff7f80000000ULL) {
+                gR1b30Prov = provU;
+                auto* const provSvc = reinterpret_cast<IOService*>(provider);
+                auto probeAttr = [provSvc](const char* const key, UInt64& decl, UInt64& kind, UInt64& val) {
+                    OSMetaClassBase* const o = provSvc->getProperty(key);
+                    if (o == nullptr) { return; }
+                    decl = 1;
+                    if (OSDynamicCast(OSBoolean, o) != nullptr) {
+                        kind = 1;
+                        val  = (static_cast<OSBoolean*>(o))->getValue() ? 1 : 0;
+                        return;
+                    }
+                    if (auto* const num = OSDynamicCast(OSNumber, o)) {
+                        kind = 2;
+                        val  = num->unsigned64BitValue();
+                        return;
+                    }
+                    if (auto* const dat = OSDynamicCast(OSData, o)) {
+                        kind = 3;
+                        // 只取首字节（限长读；不假定长度）
+                        val  = (dat->getLength() >= 1) ? static_cast<UInt64>(*static_cast<const UInt8*>(dat->getBytesNoCopy())) : 0;
+                        return;
+                    }
+                    if (auto* const str = OSDynamicCast(OSString, o)) {
+                        kind = 4;
+                        // 值用**与机器字长无关**的编码：长度（≤15）+ 前 11 字节。
+                        //  首字节放长度，既避免 NUL 截断歧义，也让 `val != 0` 自身即"非空字符串"判据。
+                        //  这样离线判读只需按 ASCII 手工比对，不依赖任何哈希实现：
+                        //    "IOAccelerator" (13 字节) ⇒ val = 0x0d + "IOAccelerat" 的 11 字节。
+                        const char* const s2 = str->getCStringNoCopy();
+                        if (s2 != nullptr && s2[0] != '\0') {
+                            UInt64 v = 0;
+                            UInt64 n = 0;
+                            for (const char* p = s2; *p != '\0' && n < 15; ++p, ++n) {
+                                v = (v << 8) | static_cast<UInt64>(static_cast<UInt8>(*p));
+                            }
+                            val = (static_cast<UInt64>(n) << 56) | (v & 0x00FFFFFFFFFFFFFFULL);
+                        }
+                        return;
+                    }
+                    kind = 0;   // 存在但为其它 OSMetaClass 类型
+                };
+                probeAttr("IOMatchCategory", gR1b30McDeclared, gR1b30McKind, gR1b30McValue);
+                probeAttr("AAPL,aux-power-connected", gR1b30AuxDeclared, gR1b30AuxKind, gR1b30AuxValue);
+                gR1b30AuxOk = 1;
             }
         }
     }

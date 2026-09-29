@@ -87,6 +87,35 @@ public:
      */
     UInt32 readReg32Ext(UInt32 addr) const;
 
+    /**
+     * 乙线探针用的**最小公开 MMIO 直读/直写**（2026-09-29 加）。
+     *
+     * 为什么需要它：`FwBringup/RegSinkKernel.hpp` 的 `SmnCallbacks` 需要一对"按 dword 偏移
+     * 读写 BAR5"的裸回调（它自己负责 SMN 间接序列：写索引 → 回读校验 → 读数据）。
+     * 调用点（`X6000FB.cpp` 的 `-NRedSmnRead1` 探针）必须能拿到这对回调，而
+     * `rmmioPtr` 是**私有成员**（`NRed.hpp:45`，`public:` 之前）⇒ 加这两个薄访问器。
+     *
+     * ⚠️ 语义边界（务必分清，勿误用）：
+     *   · 本访问器**只做** `rmmioPtr[dwordOffset]` 的裸访问，**不含**任何越窗判断、
+     *     **不含** SMN 间接通道（`PCIE_INDEX2/DATA2`）逻辑——那是 `readReg32Ext` 的职责；
+     *     若把 SMN 字节地址直接丢进来，它会被当成 dword 索引（正是历史
+     *     `readReg32` 间接分支那个 bug 的形态）。
+     *   · 仅供**已获所有者批准的**探针/规范访问器使用；常规功能路径请用
+     *     `readReg32`/`writeReg32`/`readReg32Ext`。
+     *
+     * @param dwordOffset 相对 BAR5 映射基址的 **dword 索引**（不是字节地址）
+     *
+     * ⛔ 调用方**必须**先用 `hasRmmio()` 确认已映射（`hwLateInit()` 之前为 false，
+     *    未映射时本函数会返回 0 / 空写而不是崩溃，但语义上那是"读不到"）。
+     */
+    bool   hasRmmio() const { return this->rmmioPtr != nullptr; }
+    UInt32 readReg32Raw(UInt32 dwordOffset) const {
+        return this->rmmioPtr != nullptr ? this->rmmioPtr[dwordOffset] : 0;
+    }
+    void writeReg32Raw(UInt32 dwordOffset, UInt32 value) const {
+        if (this->rmmioPtr != nullptr) { this->rmmioPtr[dwordOffset] = value; }
+    }
+
     /// 映射窗口长度（**以 dword 计**）——供探针做"已知值 oracle"扫描用；未映射时返回 0。
     UInt32 getRmmioLengthDw() const {
         return this->rmmio != nullptr ? static_cast<UInt32>(this->rmmio->getLength() / sizeof(UInt32)) : 0;
