@@ -22,6 +22,7 @@
 #include <StageMark.hpp>
 #include <kern/debug.h>    // panic() 声明（Probe D1 v2 崩溃出口注入）
 #include <IOKit/IOReturn.h>
+#include <libkern/c++/OSData.h>        // R1'-Diag：点 B 复读 `ATY,bin_image`（OSData 判定）
 #include <IOKit/IOService.h>          // 第八步加速器探针：读 provider 的属性（LoadAccelerator 等）
 #include <libkern/c++/OSBoolean.h>    // 第八步加速器探针：属性值的真假判定
 #include <libkern/c++/OSDictionary.h> // 加速器补注册：serviceMatching 的匹配字典
@@ -1219,6 +1220,54 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                    static_cast<unsigned long long>(lAcc), static_cast<unsigned long long>(c7960),
                    static_cast<unsigned long long>(hsD8));
         }
+    }
+    // ─── R1'-Diag：HWServices 两接口字段 + `ATY,bin_image` 更晚复读（`-NRedDiagProvider`，默认关）──
+    //  判别 P5 后半判据：`node+0xd0`（CAIL 接口）/`node+0xd8`（TTL 接口）是否非 0
+    //  （`乙线R1-P5作用点专项.md` §1.2：getTtl/getCail = 读 node+0xd8/node+0xd0）。
+    //  本点位于 PP powerUp —— **远晚于** `AMDHardware::init`/`setupCAIL` ⇒ 此处对
+    //  `ATY,bin_image` 的复读是"最终稳态"：若点 A 的 e 相位没有、x 相位有（窗口内写入），
+    //  本点给出"最终是否还在"的第三时点判据（写后是否又被抹除）。provider 取法与既有
+    //  `-NRedAccelProbe` 块（:1129 `o20->getProvider()`）**逐字同形**（已在真机多轮跑过）。
+    //  安全：`self+0x50`/`self+0x20` 均为纯内存读；`getProvider()`/`getProperty()` 为 IOKit
+    //  只读访问器（与 :1129-1139 既有代码同一形态）；不调 Apple 驱动虚方法、不写内存、
+    //  不碰寄存器；三重内核地址校验后才解引用。落盘复用 L1（SYSLOG）/L2。
+    if (checkKernelArgument("-NRedDiagProvider")) {
+        const UInt64 dSelf = reinterpret_cast<UInt64>(self);
+        UInt64 dNode = 0, dCail = 0, dTtl = 0;
+        if (dSelf >= 0xffffff7f80000000ULL) {
+            dNode = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(dSelf) + 0x50);
+            if (dNode >= 0xffffff7f80000000ULL) {
+                dCail = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(dNode) + 0xD0);
+                dTtl  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(dNode) + 0xD8);
+            }
+        }
+        SYSLOG("X6000FB", "R1PDiag hws: self=%llx node=%llx cail=%llx ttl=%llx",
+               static_cast<unsigned long long>(dSelf), static_cast<unsigned long long>(dNode),
+               static_cast<unsigned long long>(dCail), static_cast<unsigned long long>(dTtl));
+        // `ATY,bin_image` 更晚复读：controller=self+0x20 → getProvider()（与 :1129 同形）。
+        UInt64 dProv = 0, bDecl = 0, bIsData = 0, bLen = 0, bInRange = 0;
+        if (dSelf >= 0xffffff7f80000000ULL) {
+            const UInt64 dCtl = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(dSelf) + 0x20);
+            if (dCtl >= 0xffffff7f80000000ULL) {
+                auto* const prov = OSDynamicCast(IOService, reinterpret_cast<IOService*>(dCtl)->getProvider());
+                if (prov != nullptr) {
+                    dProv = reinterpret_cast<UInt64>(prov);
+                    OSMetaClassBase* const bio = prov->getProperty("ATY,bin_image");
+                    if (bio != nullptr) {
+                        bDecl = 1;
+                        if (auto* const bd = OSDynamicCast(OSData, bio)) {
+                            bIsData = 1;
+                            bLen    = bd->getLength();
+                            if (bLen >= 1 && bLen <= 0x20000ULL) { bInRange = 1; }
+                        }
+                    }
+                }
+            }
+        }
+        SYSLOG("X6000FB", "R1PDiag binB: self=%llx prov=%llx decl=%llu isData=%llu len=%llu inRange=%llu",
+               static_cast<unsigned long long>(dSelf), static_cast<unsigned long long>(dProv),
+               static_cast<unsigned long long>(bDecl), static_cast<unsigned long long>(bIsData),
+               static_cast<unsigned long long>(bLen), static_cast<unsigned long long>(bInRange));
     }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);

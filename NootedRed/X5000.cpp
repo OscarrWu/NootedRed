@@ -1287,6 +1287,127 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 //  ⇒ 注册段跳过 ⇒ `start` 返回失败。
 //  本组探针回答"configureDevice 是否被调用、initLinkToPeer 查到什么、返回值如何"。
 //  只读字段 + 记录入参/返回值；落盘通道（`-NRedAccelLog`），hook 无条件安装。
+// ─── R1'-Diag 只读诊断探针的读数函数（`-NRedDiagProvider`，默认关）──────────────────
+//  目的：判别 P8（`ATY,bin_image`）与 P5（HWServices 服务匹配）当前是否已满足，
+//    避免在不知情时花真机轮次做注入。依据：`docs/子任务/乙线R1-P8实现前置评估.md` §1.2
+//    （setupCAIL 读 provider 的 `ATY,bin_image`，三出口 8-2/8-3/8-4）与
+//    `docs/子任务/乙线R1-P5作用点专项.md` §1.2（getTtl/getCail = 节点 +0xd8/+0xd0）。
+//  时序（2026-09-30 复审，指令级证据，见 `tmp/re/diagprobe_*`）：
+//    configureDevice(kc 0x4b3a306) @0x4b3a45d call *0xb30 = createHWInterface
+//    (0x4b3d25c) @0x4b3d2d1 call *0x118 = AMDGFX9Hardware::init (0x4b9a72e)
+//    → AMDRTHardware::init (0x4b954be) → AMDHardware::init (0x4ba9cea)
+//    @0x4ba9f1d call *0x660 = setupCAIL (0x4babee4) —— **全链同步嵌套在
+//    configureDevice 内** ⇒ wrapConfigureDevice 的出口读数（x 相位）在 setupCAIL **之后**，
+//    入口读数（e 相位）在 setupCAIL **之前** ⇒ 用 e/x 两个相位把 setupCAIL 夹住。
+//  判读：
+//    · e 相位读到 `ATY,bin_image` 存在 ⇒ setupCAIL 一定看到（P8 已满足）；
+//    · e/x 双相位都读不到 ⇒ setupCAIL 也读不到（P8 8-2 失败，**决定性**）；
+//    · e 读不到而 x 读到 ⇒ 属性在 configureDevice 窗口内被写入（生产者时序存疑）⇒
+//      须与点 B（powerUp，更晚）及 framebuffer 的 readAtomBios SYSLOG 联合判读。
+//  安全上下文：只读 IORegistry 属性（`IOService::getProperty` + OSMetaClass 原生取值器）
+//    与裸内存字段；不调 Apple 驱动虚方法、不读寄存器、不写内存、不构造对象。
+//    落点与既有 `-NRedR1B30Probe` / `-NRedEngTblProbe` 同函数（R1B30 已真机第 79 轮实跑）。
+//    落盘复用 L1（SYSLOG）/L2，不新建通道。
+static void diagProviderDump(const char* const phase, void* const provider, const UInt64 selfAddr, const UInt64 ret)
+{
+    const UInt64 provU = reinterpret_cast<UInt64>(provider);
+    SYSLOG("X5000", "R1PDiag enter: ph=%s self=%llx prov=%llx ret=%llu", phase,
+           static_cast<unsigned long long>(selfAddr), static_cast<unsigned long long>(provU),
+           static_cast<unsigned long long>(ret));
+    if (provU < 0xffffff7f80000000ULL) {
+        SYSLOG("X5000", "R1PDiag skip: ph=%s prov=%llx", phase, static_cast<unsigned long long>(provU));
+        return;
+    }
+    auto* const provSvc = reinterpret_cast<IOService*>(provider);
+    auto probeAttr = [provSvc](const char* const key, UInt64& decl, UInt64& kind, UInt64& val) {
+        OSMetaClassBase* const o = provSvc->getProperty(key);
+        if (o == nullptr) { return; }
+        decl = 1;
+        if (OSDynamicCast(OSBoolean, o) != nullptr) {
+            kind = 1;
+            val  = (static_cast<OSBoolean*>(o))->getValue() ? 1 : 0;
+            return;
+        }
+        if (auto* const num = OSDynamicCast(OSNumber, o)) {
+            kind = 2;
+            val  = num->unsigned64BitValue();
+            return;
+        }
+        if (auto* const dat = OSDynamicCast(OSData, o)) {
+            kind = 3;
+            val  = (dat->getLength() >= 1) ? static_cast<UInt64>(*static_cast<const UInt8*>(dat->getBytesNoCopy())) : 0;
+            return;
+        }
+        if (auto* const str = OSDynamicCast(OSString, o)) {
+            kind = 4;
+            const char* const s2 = str->getCStringNoCopy();
+            if (s2 != nullptr && s2[0] != '\0') {
+                UInt64 v = 0;
+                UInt64 n = 0;
+                // 值编码（**前 7 字节**）：`val = (编码字符数<<56) | 前 7 字符(大端)`。
+                //  ⚠️ 2026-09-30 独立复核发现：首版沿用 R1B30 的 `n < 15` 写法，但
+                //  `UInt64` 只容纳 8 字节，15 次左移会把**前 8 字节溢出丢弃** ⇒ 实得
+                //  "后 7 字节"（如 "IOAccelerator" 得 "lerator"），与注释声称的"前 11 字节"不符。
+                //  ⇒ 本轮改为 `n < 7`：7 字节 × 8 位 = 56 位，恰好不溢出 ⇒ 得**前 7 字符**。
+                for (const char* p = s2; *p != '\0' && n < 7; ++p, ++n) {
+                    v = (v << 8) | static_cast<UInt64>(static_cast<UInt8>(*p));
+                }
+                val = (static_cast<UInt64>(n) << 56) | (v & 0x00FFFFFFFFFFFFFFULL);
+            }
+            return;
+        }
+        kind = 0;   // 存在但为其它 OSMetaClass 类型
+    };
+    const char* const keys[] = {"IOMatchCategory", "LoadHWServices", "LoadAccelerator", "LoadPlugIn",
+                                "ATY,VRAM,total",  "ATY,bin_image"};
+    for (size_t ki = 0; ki < arrsize(keys); ++ki) {
+        UInt64 d = 0, k = 0, v = 0;
+        probeAttr(keys[ki], d, k, v);
+        SYSLOG("X5000", "R1PDiag attr: ph=%s key=%s decl=%llu kind=%llu val=%llx", phase, keys[ki],
+               static_cast<unsigned long long>(d), static_cast<unsigned long long>(k),
+               static_cast<unsigned long long>(v));
+    }
+    // `ATY,bin_image` 专项：OSData 类型、长度（≤0x20000）、前 32 字节（P8 判据）。
+    UInt64 biDecl = 0, biIsData = 0, biLen = 0, biInRange = 0;
+    UInt8  biHead[32] = {0};
+    OSMetaClassBase* const bio = provSvc->getProperty("ATY,bin_image");
+    if (bio != nullptr) {
+        biDecl = 1;
+        if (auto* const bd = OSDynamicCast(OSData, bio)) {
+            biIsData = 1;
+            biLen    = bd->getLength();
+            if (biLen >= 1 && biLen <= 0x20000ULL) { biInRange = 1; }
+            if (const void* const bp = bd->getBytesNoCopy()) {
+                const size_t n = (biLen < 32) ? static_cast<size_t>(biLen) : 32;
+                memcpy(biHead, bp, n);
+            }
+        }
+    }
+    SYSLOG("X5000", "R1PDiag binimg: ph=%s decl=%llu isData=%llu len=%llu inRange=%llu", phase,
+           static_cast<unsigned long long>(biDecl), static_cast<unsigned long long>(biIsData),
+           static_cast<unsigned long long>(biLen), static_cast<unsigned long long>(biInRange));
+    // 前 32 字节，分两行打印（每行 **16 字节** = 32 个十六进制字符）。
+    //  ⚠️ 每 half 只读 `biHead[half*16 + i]`，i < 16 ⇒ 最大下标 31，不越界。
+    for (int half = 0; half < 2; ++half) {
+        char hex[33];
+        for (int i = 0; i < 16; ++i) {
+            const UInt8 b = biHead[half * 16 + i];
+            hex[i * 2]     = "0123456789abcdef"[b >> 4];
+            hex[i * 2 + 1] = "0123456789abcdef"[b & 0xF];
+        }
+        hex[32] = '\0';
+        SYSLOG("X5000", "R1PDiag binhex: ph=%s idx=%d %s", phase, half, hex);
+    }
+    // x 相位追加：`self+0x1a38`（createHWInterface 的持有字段，纯内存读；已内核指针校验）。
+    //  用途 = P8 判读的**前置闸**（复核方问题 2）：e/x 双 absent ⇒ "P8 8-2 失败（决定性）"
+    //  成立的前提是 `setupCAIL` 确实执行过；若 `f1a38 == 0`（对象未建出/已被清 0）则链可能
+    //  止于 P8 之前 ⇒ 结论降级为"P8 注册表层面未满足（条件性）"。只在 x 相位打（e 相位它无意义）。
+    if (phase[0] == 'x' && selfAddr >= 0xffffff7f80000000ULL) {
+        const UInt64 f1a38 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(selfAddr) + 0x1A38);
+        SYSLOG("X5000", "R1PDiag f1a38: ph=%s self=%llx val=%llx", phase,
+               static_cast<unsigned long long>(selfAddr), static_cast<unsigned long long>(f1a38));
+    }
+}
 UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
 {
     const UInt64 s = reinterpret_cast<UInt64>(self);
@@ -1321,6 +1442,13 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
             }
         }
     }
+
+    // ─── R1'-Diag 入口相位（`-NRedDiagProvider`，默认关）──────────────────────────
+    //  e 相位 = `FunctionCast(orgConfigureDevice)` **之前**（setupCAIL 之前）：
+    //   若此处已读到 `ATY,bin_image` ⇒ setupCAIL 必看到 ⇒ P8 已满足（决定性）。
+    //   安全：与出口相位同函数同形态（`diagProviderDump` 只读 provider 属性 + 裸内存字段）；
+    //   `provider` 形参此时原样有效（尚未被 Apple 代码使用）。ret 尚不存在 ⇒ 传 0（仅自证用）。
+    if (checkKernelArgument("-NRedDiagProvider")) { diagProviderDump("e", provider, s, 0); }
 
     UInt64 ret = FunctionCast(wrapConfigureDevice, singleton().orgConfigureDevice)(self, provider);
 
@@ -1464,15 +1592,19 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                     }
                     if (auto* const str = OSDynamicCast(OSString, o)) {
                         kind = 4;
-                        // 值用**与机器字长无关**的编码：长度（≤15）+ 前 11 字节。
-                        //  首字节放长度，既避免 NUL 截断歧义，也让 `val != 0` 自身即"非空字符串"判据。
+                        // 值用**与机器字长无关**的编码：编码字符数（≤7）+ 前 7 字节。
+                        //  首字节放编码字符数，既避免 NUL 截断歧义，也让 `val != 0` 自身即"非空字符串"判据。
+                        //  ⚠️ 2026-09-30 独立复核修正（与 `-NRedDiagProvider` 同型缺陷）：
+                        //    原 `n < 15` 在 `UInt64` 左移 8 次后**前 8 字节溢出丢弃** ⇒ 实得
+                        //    "后 7 字节"（"IOAccelerator" 得 "lerator"），与原注释"前 11 字节"不符。
+                        //    ⇒ 改为 `n < 7`（56 位恰好不溢出）⇒ 得**前 7 字符**。
                         //  这样离线判读只需按 ASCII 手工比对，不依赖任何哈希实现：
-                        //    "IOAccelerator" (13 字节) ⇒ val = 0x0d + "IOAccelerat" 的 11 字节。
+                        //    "IOAccelerator" (13 字节) ⇒ val = 0x07 + "IOAcceler" 的 7 字节。
                         const char* const s2 = str->getCStringNoCopy();
                         if (s2 != nullptr && s2[0] != '\0') {
                             UInt64 v = 0;
                             UInt64 n = 0;
-                            for (const char* p = s2; *p != '\0' && n < 15; ++p, ++n) {
+                            for (const char* p = s2; *p != '\0' && n < 7; ++p, ++n) {
                                 v = (v << 8) | static_cast<UInt64>(static_cast<UInt8>(*p));
                             }
                             val = (static_cast<UInt64>(n) << 56) | (v & 0x00FFFFFFFFFFFFFFULL);
@@ -1537,6 +1669,13 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
             gEngTblReadFail = 1;   // 非 0 但不像内核指针 ⇒ 拒绝读表，如实记录
         }
     }
+    // ─── R1'-Diag 出口相位（`-NRedDiagProvider`，默认关）──────────────────────────
+    //  x 相位 = `FunctionCast(orgConfigureDevice)` **之后**（setupCAIL 之后）：
+    //   若 e 相位读到而 x 相位读不到 ⇒ 属性在 configureDevice 窗口内被**抹除**
+    //   （`removeBiosFromRegistry` 嫌疑，P8 报告 U8-3）——单独作为异常信号；
+    //   若 e/x 双相位都读不到 ⇒ setupCAIL 必读不到 ⇒ **P8 8-2 失败（决定性）**。
+    //   判读规则与依据见函数头部注释与 `docs/子任务/乙线R1-诊断探针实现报告.md` §1.5/§2.1。
+    if (checkKernelArgument("-NRedDiagProvider")) { diagProviderDump("x", provider, s, ret); }
     if (f140 >= 0xffffff7f80000000ULL) { gLastF140 = f140; }   // 供 `start` 入口恢复
     if (checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("X5000",
