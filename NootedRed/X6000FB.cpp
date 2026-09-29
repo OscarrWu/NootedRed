@@ -47,8 +47,27 @@ extern UInt64 gAccelProbeCalls;
 extern UInt64 gAccelProbeRet;
 extern UInt64 gAccelProbeScoreIn;
 extern UInt64 gAccelProbeScoreOut;
+// R1'-b 最小读数探针（`-NRedR1Probe`，默认关）——由 X5000.cpp 捕获、此处 panic 输出
+extern bool        gR1bProbeEnabled;
+extern UInt64      gR1bCfgDevSelf;
+extern UInt64      gR1bCfgDevProvider;
+extern UInt64      gR1bCfgDevF1F10;
+extern UInt64      gR1bCfgDevF1F14;
+extern UInt64      gR1bCfgDevF1F18;
+extern UInt64      gR1bCfgDevF1F58;
+extern UInt64      gR1bCfgDevF1F40;
+extern bool        gR1bAuxPowerExists;
+extern UInt32      gR1bAuxPowerType;
+extern UInt64      gR1bAuxPowerValue;
+extern UInt64      gR1bKeyObjFirstField;
+extern UInt64      gR1bObj1A38;
+extern UInt64      gR1bObj1A38Vtable;
+extern UInt64      gR1bObj1A38Vtable24;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
+
+
+ static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（入口写、探针读）
 
 
 // PP 观测落盘（2026-09-28）：与 HWLibs 侧同一思路——L2（内核 msgbuf）覆盖窗口只有 26–35 s，
@@ -1618,7 +1637,42 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
                                static_cast<unsigned long long>(gMaDummy));
         nredPPTrace(b, n);
     }
+    // ─── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
+    //  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
+    //  仅读取已捕获的标量，**不读 GPU 寄存器、不调 Apple 方法、不解引用未校验指针**。
+    //  新值必须新开探针位，不得改动既有已冻结格式串（手册 §4A 纪律 3）。
+    if (checkKernelArgument("-NRedR1Probe") && gR1bProbeEnabled) {
+        // 预读所有标量为局部变量（§16.68：panic 实参禁调 singleton() 等可能加锁函数）
+        const UInt64  cfgSelf      = gR1bCfgDevSelf;
+        const UInt64  cfgProv      = gR1bCfgDevProvider;
+        const UInt64  f1f10        = gR1bCfgDevF1F10;
+        const UInt64  f1f14        = gR1bCfgDevF1F14;
+        const UInt64  f1f18        = gR1bCfgDevF1F18;
+        const UInt64  f1f58        = gR1bCfgDevF1F58;
+        const UInt64  f1f40        = gR1bCfgDevF1F40;
+        const bool    auxExists    = gR1bAuxPowerExists;
+        const UInt32  auxType      = gR1bAuxPowerType;
+        const UInt64  auxValue     = gR1bAuxPowerValue;
+        const UInt64  keyFirst     = gR1bKeyObjFirstField;
+        const UInt64  obj1a38      = gR1bObj1A38;
+        const UInt64  obj1a38Vt    = gR1bObj1A38Vtable;
+        const UInt64  obj1a38Vt24  = gR1bObj1A38Vtable24;
+        const UInt64  vCalls       = gMaCalls;
+        const UInt64  vIri         = gMaIri;
+        const UInt64  vDummy       = gMaDummy;
 
+        panic("NRed R1b probe: cfgSelf=%llx cfgProv=%llx | f1f10=%llx f1f14=%llx f1f18=%llx f1f58=%llx f1f40=%llx "
+              "| aux: exists=%d type=%u val=%llx | keyObjFirst=%llx | obj1a38=%llx vt=%llx vt24=%llx "
+              "| ma calls=%llu iri=%llu dummy=%llu | orig1:%s orig2:%s orig3:%s",
+              cfgSelf, cfgProv,
+              f1f10, f1f14, f1f18, f1f58, f1f40,
+              auxExists ? 1 : 0, auxType, auxValue,
+              keyFirst,
+              obj1a38, obj1a38Vt, obj1a38Vt24,
+              vCalls, vIri, vDummy,
+              fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+        // panic 不返回
+    }
     // ─── ⛔ 已删除：乙线 T7 寄存器探针族（`-NRedFwProbe` / `-NRedFwProbe2` / `-NRedFwProbe3`）───
     //  2026-09-29 所有者明令：**不得再以探针方式读 AMD 寄存器（无论 Manjaro 侧还是 macOS 侧）**。
     //  事实依据（三次代价，均已实测）：

@@ -23,6 +23,11 @@
 #include <kern/debug.h>    // panic()（第八步加速器 start 探针）
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSObject.h>
+#include <libkern/c++/OSData.h>
+#include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSBoolean.h>
+#include <libkern/c++/OSMetaClass.h>
+#include <string.h>         // strcmp
 #include <mach/i386/vm_param.h>
 #include <mach/i386/vm_types.h>
 #include <mach/kern_return.h>
@@ -143,6 +148,7 @@ X5000::X5000()
 }
 
 // 第八步观测：保存 X5000 kext 的 slide，供探针在运行时定位其内部符号（如 probe 用的属性名 OSSymbol）
+UInt64 gAccelProbeProv    = 0;    // 最后一次 provider 指针
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
@@ -1201,6 +1207,88 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
         f1a68 = load64(s, 0x1A68);
         f1a40 = load64(s, 0x1A40);
     }
+    // ─── R1'-b 最小读数探针捕获（`-NRedR1Probe`，默认关）───────────────────────
+    //  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
+    //  仅在 configureDevice 返回时捕获，**不读 GPU 寄存器、不调 Apple 方法**（panic 处只读已捕获标量）。
+    if (checkKernelArgument("-NRedR1Probe")) {
+        gR1bProbeEnabled = true;
+        gR1bCfgDevSelf = s;
+        gR1bCfgDevProvider = reinterpret_cast<UInt64>(provider);
+        // 读 configureDevice 返回时的四个字段（R1b 报告 §6 项 1、5）
+        if (s >= 0xffffff7f80000000ULL) {
+            auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+                return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+            };
+            gR1bCfgDevF1F10 = load64(s, 0x1F10);
+            gR1bCfgDevF1F14 = load64(s, 0x1F14);
+            gR1bCfgDevF1F18 = load64(s, 0x1F18);
+            gR1bCfgDevF1F58 = load64(s, 0x1F58);
+            gR1bCfgDevF1F40 = load64(s, 0x1F40);  // framebuffer 服务（用于 AAPL,aux-power-connected）
+            // *0x1ed118（GOT 项）所指对象的首字段（R1b 报告 §6 项 3）
+            if (gX5000Slide != 0) {
+                const UInt64 gotAbs = gX5000Slide + 0x1ED118ULL;
+                const UInt64 gotPtr = *reinterpret_cast<const UInt64*>(gotAbs);
+                if (gotPtr >= 0xffffff8000000000ULL) {
+                    gR1bKeyObjFirstField = *reinterpret_cast<const UInt64*>(gotPtr);
+                }
+            }
+            // this+0x1a38 所指对象的 vtable 与 vtable[0x24]（R1b 报告 §6 项 4）
+            const UInt64 obj1a38 = load64(s, 0x1A38);
+            gR1bObj1A38 = obj1a38;
+            if (obj1a38 >= 0xffffff7f80000000ULL) {
+                const UInt64 vtablePtr = *reinterpret_cast<const UInt64*>(obj1a38);
+                gR1bObj1A38Vtable = vtablePtr;
+                if (vtablePtr >= 0xffffff8000000000ULL) {
+                    // vtable[0x24] = vtable + 0x24*8 = vtable + 0x120
+                    gR1bObj1A38Vtable24 = *reinterpret_cast<const UInt64*>(vtablePtr + 0x120);
+                }
+            }
+        }
+        // provider 的 AAPL,aux-power-connected：存在性 + 类型 + 值（R1b 报告 §6 项 2）
+        // 这里的 provider 是 configureDevice 的参数（IOPCIDevice*），但检查在清理分支里用的是 this+0x1f40（framebuffer 服务）。
+        // 我们捕获 this+0x1f40 指向的服务对象，并在正常上下文里安全调用 getProperty。
+        if (gR1bCfgDevF1F40 >= 0xffffff7f80000000ULL) {
+            IOService* fbSvc = reinterpret_cast<IOService*>(gR1bCfgDevF1F40);
+            OSObject* propObj = fbSvc->getProperty("AAPL,aux-power-connected");
+            if (propObj != nullptr) {
+                gR1bAuxPowerExists = true;
+                // 简化类型识别：用 metaClass 指针低位做类型码（1=OSData,2=OSNumber,3=OSBoolean,0=其它）
+                OSMetaClass* mc = propObj->getMetaClass();
+                const char* clsName = mc ? mc->getClassName() : nullptr;
+                UInt32 typeCode = 0;
+                UInt64 value = 0;
+                if (clsName) {
+                    if (strcmp(clsName, "OSData") == 0) {
+                        typeCode = 1;
+                        OSData* data = OSDynamicCast(OSData, propObj);
+                        if (data) {
+                            const void* bytes = data->getBytesNoCopy();
+                            UInt32 len = data->getLength();
+                            if (bytes && len >= 8) {
+                                value = *reinterpret_cast<const UInt64*>(bytes);
+                            } else if (bytes && len > 0) {
+                                // 不足 8 字节，逐字节拼装
+                                const UInt8* b = static_cast<const UInt8*>(bytes);
+                                for (UInt32 i = 0; i < len; ++i) {
+                                    value |= (UInt64)b[i] << (i * 8);
+                                }
+                            }
+                        }
+                    } else if (strcmp(clsName, "OSNumber") == 0) {
+                        typeCode = 2;
+                        OSNumber* num = OSDynamicCast(OSNumber, propObj);
+                        if (num) { value = num->unsigned64BitValue(); }
+                    } else if (strcmp(clsName, "OSBoolean") == 0) {
+                        typeCode = 3;
+                        OSBoolean* b = OSDynamicCast(OSBoolean, propObj);
+                        if (b) { value = b->getValue() ? 1 : 0; }
+                    }
+                }
+                gR1bAuxPowerType = typeCode;
+                gR1bAuxPowerValue = value;
+            }
+        }
+    }
     if (f140 >= 0xffffff7f80000000ULL) { gLastF140 = f140; }   // 供 `start` 入口恢复
     if (checkKernelArgument("-NRedAccelLog")) {
         SYSLOG("X5000",
@@ -1231,7 +1319,28 @@ UInt64 gAccelProbeCalls   = 0;    // probe 被调用次数
 UInt64 gAccelProbeRet     = 0;    // 最后一次返回对象指针
 UInt64 gAccelProbeScoreIn = 0;    // 入口 score
 UInt64 gAccelProbeScoreOut = 0;   // 出口 score（0xffffffff = *score 被置 -1 ⇒ 明确拒绝）
-UInt64 gAccelProbeProv    = 0;    // 最后一次 provider 指针
+// ─── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
+//  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
+//  仅在 configureDevice 返回时捕获内存字段与属性，**不读 GPU 寄存器、不调 Apple 方法**（panic 处只读已捕获标量）。
+bool        gR1bProbeEnabled      = false;
+UInt64      gR1bCfgDevSelf        = 0;      // configureDevice 的 this（加速器对象）
+UInt64      gR1bCfgDevProvider    = 0;      // configureDevice 的 provider 参数（IOPCIDevice*）
+UInt64      gR1bCfgDevF1F10       = 0;      // this+0x1F10
+UInt64      gR1bCfgDevF1F14       = 0;      // this+0x1F14
+UInt64      gR1bCfgDevF1F18       = 0;      // this+0x1F18
+UInt64      gR1bCfgDevF1F58       = 0;      // this+0x1F58
+UInt64      gR1bCfgDevF1F40       = 0;      // this+0x1F40（framebuffer 服务，用于读 AAPL,aux-power-connected）
+// provider 的 AAPL,aux-power-connected：存在性/类型/值（在 configureDevice 上下文捕获）
+bool        gR1bAuxPowerExists    = false;
+UInt32      gR1bAuxPowerType      = 0;      // 简化类型码：1=OSData,2=OSNumber,3=OSBoolean,0=失败/其它
+UInt64      gR1bAuxPowerValue     = 0;      // 值：OSData 取首 8 字节；OSNumber 取数值；OSBoolean 取 0/1
+// *0x1ed118（GOT 项）所指对象的首字段
+UInt64      gR1bKeyObjFirstField  = 0;
+// this+0x1a38 所指对象的 vtable 指针与 vtable[0x24] 目标地址
+UInt64      gR1bObj1A38           = 0;      // this+0x1A38 指向的对象指针
+UInt64      gR1bObj1A38Vtable     = 0;      // 该对象的 vtable 指针（对象首字段）
+UInt64      gR1bObj1A38Vtable24   = 0;      // vtable[0x24] = vtable + 0x120 处的目标地址
+
 
 // ─── 第八步观测探针：加速器 `probe`（**纯观测**，定位"零实例"之因）──────────────
 //  背景：第 12 轮实测加速器类**零实例**；第 13 轮证明 `probe` **确实被调用**（该轮 panic 太早、
