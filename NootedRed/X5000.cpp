@@ -150,23 +150,28 @@ X5000::X5000()
 // 第八步观测：保存 X5000 kext 的 slide，供探针在运行时定位其内部符号（如 probe 用的属性名 OSSymbol）
 UInt64 gAccelProbeProv    = 0;    // 最后一次 provider 指针
 
-// ── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）的全局量：**在此定义**（X5000 侧捕获），
-//    X6000FB.cpp 以 extern 引用并在失败出口 panic 输出。只存标量，不读 GPU 寄存器。 ──
-bool   gR1bProbeEnabled    = false;
-UInt64 gR1bCfgDevSelf      = 0;
-UInt64 gR1bCfgDevProvider  = 0;
-UInt64 gR1bCfgDevF1F10     = 0;
-UInt64 gR1bCfgDevF1F14     = 0;
-UInt64 gR1bCfgDevF1F18     = 0;
-UInt64 gR1bCfgDevF1F58     = 0;
-UInt64 gR1bCfgDevF1F40     = 0;
-bool   gR1bAuxPowerExists  = false;
-UInt32 gR1bAuxPowerType    = 0;
-UInt64 gR1bAuxPowerValue   = 0;
-UInt64 gR1bKeyObjFirstField = 0;
-UInt64 gR1bObj1A38         = 0;
-UInt64 gR1bObj1A38Vtable   = 0;
-UInt64 gR1bObj1A38Vtable24 = 0;
+// ─── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
+//  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
+//  仅在 configureDevice 返回时捕获内存字段与属性，**不读 GPU 寄存器、不调 Apple 方法**
+//  （panic 处只读已捕获的标量）。定义放在此处（早于使用点），X6000FB.cpp 以 extern 引用。
+bool        gR1bProbeEnabled      = false;
+UInt64      gR1bCfgDevSelf        = 0;      // configureDevice 的 this（加速器对象）
+UInt64      gR1bCfgDevProvider    = 0;      // configureDevice 的 provider 参数（IOPCIDevice*）
+UInt64      gR1bCfgDevF1F10       = 0;      // this+0x1F10
+UInt64      gR1bCfgDevF1F14       = 0;      // this+0x1F14
+UInt64      gR1bCfgDevF1F18       = 0;      // this+0x1F18
+UInt64      gR1bCfgDevF1F58       = 0;      // this+0x1F58
+UInt64      gR1bCfgDevF1F40       = 0;      // this+0x1F40（framebuffer 服务，用于读 AAPL,aux-power-connected）
+// provider 的 AAPL,aux-power-connected：存在性/类型/值（在 configureDevice 上下文捕获）
+bool        gR1bAuxPowerExists    = false;
+UInt32      gR1bAuxPowerType      = 0;      // 简化类型码：1=OSData,2=OSNumber,3=OSBoolean,0=失败/其它
+UInt64      gR1bAuxPowerValue     = 0;      // 值：OSData 取首 8 字节；OSNumber 取数值；OSBoolean 取 0/1
+// *0x1ed118（GOT 项）所指对象的首字段
+UInt64      gR1bKeyObjFirstField  = 0;
+// this+0x1a38 所指对象的 vtable 指针与 vtable[0x24] 目标地址
+UInt64      gR1bObj1A38           = 0;      // this+0x1A38 指向的对象指针
+UInt64      gR1bObj1A38Vtable     = 0;      // 该对象的 vtable 指针（对象首字段）
+UInt64      gR1bObj1A38Vtable24   = 0;      // vtable[0x24] = vtable + 0x120 处的目标地址
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
@@ -1337,27 +1342,6 @@ UInt64 gAccelProbeCalls   = 0;    // probe 被调用次数
 UInt64 gAccelProbeRet     = 0;    // 最后一次返回对象指针
 UInt64 gAccelProbeScoreIn = 0;    // 入口 score
 UInt64 gAccelProbeScoreOut = 0;   // 出口 score（0xffffffff = *score 被置 -1 ⇒ 明确拒绝）
-// ─── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
-//  依据：`docs/子任务/乙线R1b-360f检查语义分析.md` §6（真机最小判据集）
-//  仅在 configureDevice 返回时捕获内存字段与属性，**不读 GPU 寄存器、不调 Apple 方法**（panic 处只读已捕获标量）。
-bool        gR1bProbeEnabled      = false;
-UInt64      gR1bCfgDevSelf        = 0;      // configureDevice 的 this（加速器对象）
-UInt64      gR1bCfgDevProvider    = 0;      // configureDevice 的 provider 参数（IOPCIDevice*）
-UInt64      gR1bCfgDevF1F10       = 0;      // this+0x1F10
-UInt64      gR1bCfgDevF1F14       = 0;      // this+0x1F14
-UInt64      gR1bCfgDevF1F18       = 0;      // this+0x1F18
-UInt64      gR1bCfgDevF1F58       = 0;      // this+0x1F58
-UInt64      gR1bCfgDevF1F40       = 0;      // this+0x1F40（framebuffer 服务，用于读 AAPL,aux-power-connected）
-// provider 的 AAPL,aux-power-connected：存在性/类型/值（在 configureDevice 上下文捕获）
-bool        gR1bAuxPowerExists    = false;
-UInt32      gR1bAuxPowerType      = 0;      // 简化类型码：1=OSData,2=OSNumber,3=OSBoolean,0=失败/其它
-UInt64      gR1bAuxPowerValue     = 0;      // 值：OSData 取首 8 字节；OSNumber 取数值；OSBoolean 取 0/1
-// *0x1ed118（GOT 项）所指对象的首字段
-UInt64      gR1bKeyObjFirstField  = 0;
-// this+0x1a38 所指对象的 vtable 指针与 vtable[0x24] 目标地址
-UInt64      gR1bObj1A38           = 0;      // this+0x1A38 指向的对象指针
-UInt64      gR1bObj1A38Vtable     = 0;      // 该对象的 vtable 指针（对象首字段）
-UInt64      gR1bObj1A38Vtable24   = 0;      // vtable[0x24] = vtable + 0x120 处的目标地址
 
 
 // ─── 第八步观测探针：加速器 `probe`（**纯观测**，定位"零实例"之因）──────────────
