@@ -43,27 +43,6 @@ static const UInt8 kStartHWEnginesOriginal[] = {0x40, 0x83, 0xF0, 0x02};
 static const UInt8 kStartHWEnginesMask[]     = {0xF0, 0xFF, 0xF0, 0xFF};
 static const UInt8 kStartHWEnginesPatched[]  = {0x40, 0x83, 0xF0, 0x01};
 
-// ─── R1'-CwiRevB 判别实验的字节补丁（门控 `-NRedCwiRevB`，默认关）─────────────
-//  目标：`createHWInterface`（归零 VM 0x625c）内 `0x62d9` 的 `je 0x62e4`（路径 B 的跳过点）。
-//  原码（11 字节，从 0x62d9 起）：
-//    74 09                je     0x62e4             ; ← 路径 (B) 的"跳过置位"分支
-//    80 8b 89 1e 00 00 01 orb    $0x1,0x1e89(%rbx)  ; 成功印记
-//    eb 1d                jmp    0x6301
-//  做法：把**位移字节** `09` 改为 `00` ⇒ `74 00` = `je 0x62db`（跳到下一条）
-//    ⇒ 等价于"**永不跳走**"，顺序执行到 `0x62db` 置位。
-//    · **只改 1 个字节**（第 2 字节），严格满足"只改 1 字节"的约束；
-//    · 指令宽度不变（`74 xx` 仍是 2 字节）⇒ **不破坏后续指令边界**；
-//    · 离线 objdump 验证（本报告 §12）：`74 00 | 80 8b … | eb 1d` 与预期一致。
-//    （备选 `90 90`（两条 nop）语义相同但**要改 2 个字节**，未采用。）
-//  唯一性【客观观测】：该 11 字节窗口在 X5000 macho 内命中 **1 次**（`d.count(pat) == 1`）；
-//    4 字节子窗口 `74 09 80 8b` 亦唯一。
-//  ⚠️ 用 `MaskedLookupPatch`（**按模式搜索**，而非按绝对地址写）⇒ 结构上**不可能补错位置**，
-//    且它内部自带上锁与写保护处理（沿用 `-NRedBypassTtl` 的成功先例，见 `X6000FB.cpp:595-600`）。
-static const UInt8 kCwiRevBGateOriginal[] = {
-    0x74, 0x09, 0x80, 0x8B, 0x89, 0x1E, 0x00, 0x00, 0x01, 0xEB, 0x1D};
-static const UInt8 kCwiRevBGatePatched[] = {
-    0x74, 0x00, 0x80, 0x8B, 0x89, 0x1E, 0x00, 0x00, 0x01, 0xEB, 0x1D};
-
 // The check in `Addr::Lib::Create` on <=10.15 and 13.4+ is `familyId == 0x8D` instead of `familyId - 0x8D < 2`.
 // Change the 0x8D (AI) to 0x8E (RV).
 static const UInt8 kAddrLibCreateOriginal[] = {0x41, 0x81, 0x7D, 0x08, 0x8D, 0x00, 0x00, 0x00};
@@ -277,32 +256,6 @@ UInt64      gR1cwiF1E89Lo      = 0;   // 同上，低 8 位（局部标量，便
 UInt64      gR1cwiF1A38        = 0;   // this+0x1A38（既有读数的复核；只读值本身）
 UInt64      gR1cwiCalls        = 0;   // 本探针观测到的调用次数
 UInt64      gR1cwiF1E89ZeroMask = 0;  // 累积：曾出现 bit0 == 0 则置 1（跨次调用，便于判稳定）
-
-// ─── R1'-CwiRevB 判别实验（`-NRedCwiRevB`，默认关）─────────────────────────────
-//  目的：用**一次 1 字节的代码补丁**把 `createHWInterface`（`vptr+0xb40`，归零 VM `0x625c`）的
-//  失败路径 (A) 与 (B) 一刀切开。
-//  依据（离线逐字节核实，见报告 §12）：
-//    · `0x6290: 74 6f` = `je 0x6301`  → **路径 (A)**（`newHWInterface` 返回 NULL）的跳出点；
-//    · `0x62d9: 74 09` = `je 0x62e4`  → **路径 (B)**（`call *0x118` 返回假）的跳过点；
-//    · `0x62db: 80 8b 89 1e 00 00 01` = `orb $0x1,0x1e89(%rbx)` → **成功印记**。
-//  做法：把 `0x62d9` 的 `74 09` 改成 `eb 09`（`je`→`jmp`）**无条件跳到 `0x62db` 置位**。
-//  判据（清晰二分）：
-//    bit0 == 1 ⇒ 补丁走到了 `0x62db` ⇒ **原失败确为路径 (B)**（(A) 的 `je` 未被改，仍会跳出）；
-//    bit0 == 0 ⇒ 补丁未生效或落在 (A) ⇒ **原失败为路径 (A)**。
-//  安全性：
-//    · 只改 **1 个字节**（`74`→`eb`），**不新增任何调用**、不调 Apple 方法、不读寄存器；
-//    · **前置校验**：目标字节**必须**恰为 `74 09`（连同下一字节），否则**拒绝补丁**并如实记录
-//      （防"补错位置"这一最危险的情形）；
-//    · **(A) 情形下行为与不打补丁完全相同**（(A) 的 `je` 未改，仍在 `0x6290` 跳出）⇒ 无害；
-//    · 回滚：门控关（默认）⇒ 一次写都不发生；已补丁时可用记录的 `gCwiRevBOrigByte` 还原。
-//  ⚠️ 目标落在 `__text`（`S_ATTR_PURE_INSTRUCTIONS`，只读）⇒ 必须经项目既有的
-//    `MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock)` 窗口写入，**不得裸写**。
-bool        gCwiRevBEnabled    = false;   // 门控是否生效（且补丁前置校验通过）
-UInt64      gCwiRevBPatchAddr  = 0;       // 实际补丁的**运行时**地址（= gX5000Slide + 0x62D9）
-UInt64      gCwiRevBOrigByte   = 0;       // 原字节（应为 0x74；供回滚与日志）
-UInt64      gCwiRevBOrigByte1  = 0;       // 原下一字节（应为 0x09；用于"四字节锚"复核）
-UInt64      gCwiRevBApplied    = 0;       // 1 = 已成功补丁；0 = 未补丁
-UInt64      gCwiRevBRefused    = 0;       // 1 = 因前置校验不通过而**拒绝**补丁
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
@@ -314,34 +267,6 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     if (kextRadeonX5000.loadIndex != id) { return; }
 
     gX5000Slide = slide;
-
-    // ─── R1'-CwiRevB 判别实验（门控 `-NRedCwiRevB`，默认关）────────────────────────
-    //  见文件头常量处的说明：只改**1 个字节**（`0x62d9` 的 `je` 位移 `09` → `00`）。
-    //  写入路径沿用 `-NRedBypassTtl` 的成功先例：`MaskedLookupPatch`（**按模式搜索**）
-    //  ⇒ 结构上不可能补错位置；上锁与 `__text` 写保护由该机制内部处理
-    //  （⚠️ 因此**不得**自行包在 `setKernelWriting` 窗口内 —— 手册 §5.8 / `X6000FB.cpp:596-597`）。
-    //  前置校验：模式命中数必须为 **1**（`MaskedLookupPatch` 以 count=1 表达），
-    //    若失败（字节与预期不符 / 命中 0 或 >1 处）⇒ 该机制返回 false ⇒ 记 `gCwiRevBRefused = 1`
-    //    并**如实记录**，**绝不**继续（不硬来、不 fallback 到绝对地址写）。
-    if (checkKernelArgument("-NRedCwiRevB")) {
-        const PenguinWizardry::MaskedLookupPatch cwiRevBPatch{&kextRadeonX5000, kCwiRevBGateOriginal,
-                                                              kCwiRevBGatePatched, 1};
-        if (cwiRevBPatch.apply(patcher, slide, size)) {
-            gCwiRevBEnabled  = true;
-            gCwiRevBApplied  = 1;
-            gCwiRevBRefused  = 0;
-            gCwiRevBOrigByte = kCwiRevBGateOriginal[0];    // = 0x74（补丁前首字节）
-            gCwiRevBOrigByte1 = kCwiRevBGateOriginal[1];   // = 0x09（补丁前位移字节）
-            // 运行时地址 = slide + (kc绝对 − 成员 fileoff) = slide + 归零 vm(0x62D9)
-            gCwiRevBPatchAddr = reinterpret_cast<UInt64>(slide) + 0x62D9ULL;
-            SYSLOG("X5000", "CWIREVB: 1-byte patch applied at slide+0x62D9 (orig 0x74 0x09 -> 0x74 0x00)");
-        } else {
-            gCwiRevBEnabled   = false;
-            gCwiRevBApplied   = 0;
-            gCwiRevBRefused   = 1;   // 前置校验不通过 / 模式未命中（**如实记录，不硬来**）
-            SYSLOG("X5000", "CWIREVB: REFUSED (pattern did not match uniquely); no byte written");
-        }
-    }
 
     DBGLOG("X5000", "processKext: X5000 matched, begin (id=%zu slide=0x%llX size=0x%zX)", id, slide, size);
 
@@ -1531,10 +1456,7 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
     // ─── R1'-Cwi 探针捕获（`-NRedR1CwiProbe`，默认关）────────────────────────────
     //  见文件头全局量处的说明：**只加一个 8 字节读**（`this+0x1e89`），外加复核既有的 `this+0x1a38`。
     //  ⚠️ 只读 `this` 自身的两个偏移；**不解引用** `this+0x1a38` 所指对象（可能为 NULL）。
-    //  CwiRevB 实验（`-NRedCwiRevB`）**复用本块的同一读数**（同一 `this+0x1e89`），故两个门控
-    //  任一开启都置 `gR1cwiProbeArmed`；输出侧再按各自的门控区分打印哪条格式串。
-    if ((checkKernelArgument("-NRedR1CwiProbe") || checkKernelArgument("-NRedCwiRevB")) &&
-        s >= 0xffffff7f80000000ULL) {
+    if (checkKernelArgument("-NRedR1CwiProbe") && s >= 0xffffff7f80000000ULL) {
         gR1cwiProbeArmed = true;
         gR1cwiBase       = gX5000Slide;
         gR1cwiSelf       = s;

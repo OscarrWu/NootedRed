@@ -99,15 +99,6 @@ extern UInt64      gR1cwiF1E89Lo;
 extern UInt64      gR1cwiF1A38;
 extern UInt64      gR1cwiCalls;
 extern UInt64      gR1cwiF1E89ZeroMask;
-// R1'-CwiRevB 判别实验（`-NRedCwiRevB`，默认关）——补丁状态由 X5000.cpp 记录、此处输出。
-//  ⚠️ 该实验**不是**纯只读探针：它在门控开启时对 X5000 `__text` 做 **1 字节数据补丁**；
-//     默认关时一次写都不发生（见 X5000.cpp 的补丁块）。
-extern bool        gCwiRevBEnabled;
-extern UInt64      gCwiRevBPatchAddr;
-extern UInt64      gCwiRevBOrigByte;
-extern UInt64      gCwiRevBOrigByte1;
-extern UInt64      gCwiRevBApplied;
-extern UInt64      gCwiRevBRefused;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
@@ -1806,31 +1797,6 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               calls, base, self,
               f1e89, f1e89l, bit0, zMask,
               f1a38);
-        // panic 不返回
-    }
-    // ─── R1'-CwiRevB 判别实验读数（`-NRedCwiRevB`，默认关）─────────────────────
-    //  与 R1Cwi **共用** `this+0x1e89` 的读数（同一捕获块），但**新开格式串**，便于自动断言区分：
-    //  ⛔ 三条已投产的 R 系串（R1 / R1B30 / R1Cwi）与 `SmnRead1` 等均**逐字节未动**；
-    //     本串判别段为 `CwiRevB probe:`（**不含 `R1`**）⇒ 与它们**互不为子串**（报告 §12 给出穷举矩阵）。
-    //  门控：`gCwiRevBEnabled`（= 补丁**已生效**）⇒ 本块**只在实验真的做了补丁时**才 panic，
-    //        避免"门控误写却报出无意义读数"。
-    if (gCwiRevBEnabled) {
-        // 铁律：panic 实参只能是已求值的局部变量
-        const UInt64 applied = gCwiRevBApplied;
-        const UInt64 refused = gCwiRevBRefused;
-        const UInt64 paddr   = gCwiRevBPatchAddr;
-        const UInt64 ob0     = gCwiRevBOrigByte;
-        const UInt64 ob1     = gCwiRevBOrigByte1;
-        const UInt64 f1e89   = gR1cwiF1E89;
-        const UInt64 f1e89l  = gR1cwiF1E89Lo;
-        const UInt64 f1a38   = gR1cwiF1A38;
-        const UInt64 calls   = gR1cwiCalls;
-        const UInt64 zMask   = gR1cwiF1E89ZeroMask;
-        const UInt64 bit0    = f1e89 & 0x1ULL;   // 成功印记
-        panic("NRed CwiRevB probe: applied=%llu refused=%llu addr=%llx orig=%02llx%02llx "
-              "| calls=%llu bit0=%llu f1e89=%llx f1e89Lo=%llx zeroMask=%llu f1a38=%llx",
-              applied, refused, paddr, ob0, ob1,
-              calls, bit0, f1e89, f1e89l, zMask, f1a38);
         // panic 不返回
     }
     // ─── 乙线「只读单点规范 SMN 访问」探针（门控 `-NRedSmnRead1`，默认关）─────────────
