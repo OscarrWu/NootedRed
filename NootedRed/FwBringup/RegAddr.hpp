@@ -3,7 +3,7 @@
 // 乙线（自建固件层）所有 PSP/SMU 邮箱寄存器的寻址都经本文件的 smnAddr() 计算，
 // 等价于 Linux 的 RREG32_SOC15_EXT / WREG32_SOC15_EXT。
 //
-// ── 公式与依据（全部来自 oldfiles-handoff/reference/linux/ 的 amdgpu 源码）────
+/// ── 公式与依据（底本已迁移至 srcs/linux-amdgpu-ref/，原 oldfiles-handoff/reference/linux/）────
 //
 // 1. 地址公式 —— RREG32_SOC15_EXT（amdgpu/soc15_common.h:201-204）：
 //        SMN_字节地址 = ( 段基址[reg##_BASE_IDX] + 寄存器偏移 ) * 4 + smn_base64

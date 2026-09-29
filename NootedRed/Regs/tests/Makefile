@@ -3,13 +3,14 @@
 # 用法（从「项目根」或「驱动仓库根 src/」执行均可，路径自动推导）：
 #   make -f src/NootedRed/Regs/tests/Makefile test          # 项目根
 #   make -f NootedRed/Regs/tests/Makefile test              # src/ 内
-#   make -f src/NootedRed/Regs/tests/Makefile regen-truth   # 需要 Linux 参考树
+#   make -f src/NootedRed/Regs/tests/Makefile regen-truth   # 需要 Linux 参考树 (srcs/linux-amdgpu-ref/ 或 oldfiles-handoff/)
 #   make -f src/NootedRed/Regs/tests/Makefile clean
 #
 # 被测对象：Regs/DCN314.hpp 的常量值（路线图第二步验收）。
 # 真值表 dcn314_truth.txt 由 mk_check.py 从 Linux dcn_3_1_4_offset.h / _sh_mask.h 生成，
 # 已随仓库入库（257 条），因此 test 目标**不依赖 oldfiles-handoff**、可离线复查；
 # 仅当需要重新生成真值表（Linux 参考树更新后）才用 regen-truth。
+# 底本优先级：srcs/linux-amdgpu-ref/ (本地迁移副本，gitignore) > oldfiles-handoff/reference/linux/ (将来可能删除)。
 # 布局参照 src/NootedRed/PixelDiv/Makefile。
 
 CXX      ?= g++
@@ -41,7 +42,7 @@ $(BUILDDIR)/dcn314_truth.txt: $(TRUTH)
 	@mkdir -p $(BUILDDIR)
 	cp $< $@
 
-# 重新生成真值表：需要 Linux 参考树（oldfiles-handoff/reference/linux）。
+# 重新生成真值表：需要 Linux 参考树 (srcs/linux-amdgpu-ref/ 优先，回退 oldfiles-handoff/reference/linux/)。
 # 生成后需人工确认差异并提交 dcn314_truth.txt。
 regen-truth:
 	python3 $(REGDIR)/tests/mk_check.py > $(TRUTH)

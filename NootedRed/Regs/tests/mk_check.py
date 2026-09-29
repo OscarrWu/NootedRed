@@ -4,16 +4,33 @@
 # 逐字节核对：每个条目都给出头文件里的宏名，test_dcn314_regs.cpp 以此比对。
 #
 # 用法：python3 src/NootedRed/Regs/tests/mk_check.py > build/dcn314_truth.txt
+# 底本优先级：1) srcs/linux-amdgpu-ref/ (本地迁移副本，gitignore) 2) oldfiles-handoff/reference/linux/ (原交接资料，将来可能删除)
 
 import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
-REF = ROOT / "oldfiles-handoff/reference/linux/drivers/gpu/drm/amd/include/asic_reg/dcn"
+
+def _find_ref_root() -> Path:
+    """返回 Linux 参考源码根目录：优先 srcs/，回退 oldfiles-handoff/。"""
+    primary = ROOT / "srcs/linux-amdgpu-ref"
+    fallback = ROOT / "oldfiles-handoff/reference/linux"
+    if primary.is_dir():
+        return primary
+    if fallback.is_dir():
+        return fallback
+    raise FileNotFoundError(
+        "找不到 Linux amdgpu 参考源码。请先获取底本：\n"
+        "  1) 推荐：从上游 Linux 内核 (v7.2.0 / 45c13f3) 同步至 srcs/linux-amdgpu-ref/\n"
+        "  2) 兼容：保留 oldfiles-handoff/reference/linux/ (将来可能被删除)\n"
+        f"  当前检查路径：{primary} / {fallback}"
+    )
+
+REF_ROOT = _find_ref_root()
+REF = REF_ROOT / "drivers/gpu/drm/amd/include/asic_reg/dcn"
 OFF = (REF / "dcn_3_1_4_offset.h").read_text()
 MASK = (REF / "dcn_3_1_4_sh_mask.h").read_text()
-SEG = (ROOT / "oldfiles-handoff/reference/linux/drivers/gpu/drm/amd/include/yellow_carp_offset.h").read_text()
-
+SEG = (REF_ROOT / "drivers/gpu/drm/amd/include/yellow_carp_offset.h").read_text()
 
 def offval(macro: str) -> int:
     m = re.search(rf"^#define {macro}\s+(0x[0-9a-fA-F]+)", OFF, re.M)
