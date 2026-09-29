@@ -89,6 +89,16 @@ extern UInt64      gR1b30Prov;
 extern UInt64      gR1b30McDeclared, gR1b30McKind, gR1b30McValue;
 extern UInt64      gR1b30AuxDeclared, gR1b30AuxKind, gR1b30AuxValue;
 extern UInt64      gR1b30AuxOk;
+// R1'-Cwi 探针（`-NRedR1CwiProbe`，默认关）——由 X5000.cpp 捕获、此处（已验证的失败出口）输出。
+//  纯内存标量：不读 GPU/SMN 寄存器、不调 Apple 方法（手册 §9.1 允许形态）。
+extern bool        gR1cwiProbeArmed;
+extern UInt64      gR1cwiBase;
+extern UInt64      gR1cwiSelf;
+extern UInt64      gR1cwiF1E89;
+extern UInt64      gR1cwiF1E89Lo;
+extern UInt64      gR1cwiF1A38;
+extern UInt64      gR1cwiCalls;
+extern UInt64      gR1cwiF1E89ZeroMask;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
@@ -1763,6 +1773,30 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               sB20T, sB20Z, sB28T, sB28Z, sB30T, sB30Z,
               v1a68, v1a68Z, v1a40, v1a40Z, f1a38,
               prov, mcD, mcK, mcV, auxD, auxK, auxV, auxOk);
+        // panic 不返回
+    }
+    // ─── R1'-Cwi 探针（`-NRedR1CwiProbe`，默认关）─────────────────────────────
+    //  判据与依据见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
+    //  门控：`gR1cwiProbeArmed` 已含 `checkKernelArgument("-NRedR1CwiProbe")` 的判定结果
+    //  格式串为本探针专属（新开探针位），与既有两条 R 系已投产串**互不为子串**：
+    //  三条串的独有段分别是 R1 后紧跟空格、R1B30、R1Cwi，任意两者都不构成子串包含关系
+    //  （已用穷举矩阵核验，见报告 §11）。
+    if (gR1cwiProbeArmed) {
+        // 铁律：panic 实参只能是已求值的局部变量
+        const UInt64 base   = gR1cwiBase;
+        const UInt64 self   = gR1cwiSelf;
+        const UInt64 f1e89  = gR1cwiF1E89;
+        const UInt64 f1e89l = gR1cwiF1E89Lo;
+        const UInt64 f1a38  = gR1cwiF1A38;
+        const UInt64 calls  = gR1cwiCalls;
+        const UInt64 zMask  = gR1cwiF1E89ZeroMask;
+        const UInt64 bit0   = f1e89 & 0x1ULL;   // 成功印记（0x62db 的 `orb $0x1,0x1e89`）
+        panic("NRed R1Cwi probe: calls=%llu base=%llx self=%llx "
+              "| f1e89=%llx f1e89Lo=%llx bit0=%llu zeroMask=%llu "
+              "| f1a38=%llx",
+              calls, base, self,
+              f1e89, f1e89l, bit0, zMask,
+              f1a38);
         // panic 不返回
     }
     // ─── 乙线「只读单点规范 SMN 访问」探针（门控 `-NRedSmnRead1`，默认关）─────────────

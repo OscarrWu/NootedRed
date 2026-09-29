@@ -228,6 +228,34 @@ UInt64      gR1b30Prov = 0;
 UInt64      gR1b30McDeclared = 0, gR1b30McKind = 0, gR1b30McValue = 0;   // "IOMatchCategory"
 UInt64      gR1b30AuxDeclared = 0, gR1b30AuxKind = 0, gR1b30AuxValue = 0; // "AAPL,aux-power-connected"
 UInt64      gR1b30AuxOk  = 0;      // 属性探针块是否**整体**成功执行（provider 为内核指针且非空）
+
+// ─── R1'-Cwi 探针（`-NRedR1CwiProbe`，默认关）─────────────────────────────────
+//  目的（第 79 轮判读修订后）：把 `configureDevice` 失败出口 `0x346e` 的**下游**再切一刀。
+//  修订（本报告 §11 独立复现）：槽 `vptr+0xb30` 的**运行时目标归零 VM = 0x61be**，
+//  该函数（`createStatisticsManager` 族工厂）在 `0x61e2` 走 `call *0x118` 后**不写** `this+0x1a38`；
+//  真正写 `this+0x1a38` 的是槽 `vptr+0xb40`（归零 VM **0x625c** = `createHWInterface`）。
+//  ① `0x6280 call *0xb40(this)`（子类覆写的 `newHWInterface()`）
+//  ② `0x6286 this+0x1a38 = 结果`
+//  ③ `0x62d1 call *0x118(结果->vptr)` ⇒ 通过则 `0x62db orb $0x1,0x1e89(this)` 并 `jmp 0x6301`
+//  ④ 不通过则 `0x62f0 call *0x28`（release）后 `0x62f6` 显式清 `this+0x1a38`
+//  真机 `this+0x1a38 == 0` ⇒ 失败在 (A) 分配返回 0（`0x6290 je 0x6301`）或 (B) `0x62d1` 返回假。
+//  **本探针只加一个 8 字节读**：`this+0x1e89`。
+//  依据【客观观测】：全 `__text` 内 `0x1e89(` 只出现 **1 次**，正是 `0x62db` 的 `orb $0x1`；
+//  且它在函数内是 `0x62d1` 检查通过后的**唯一成功印记**（`0x62e4` 起的失败路径不写它）。
+//  ⇒ `bit0 == 1` ⇒ 走通了 (B) 的"通过"分支；`bit0 == 0` ⇒ 停在 (A) 或 (B) 的失败分支。
+//
+//  纪律（手册 §9.1 允许形态）：纯内存字段读——不读任何 GPU/SMN 寄存器、**不调用任何 Apple 方法**
+//    （含不 `call *槽`）、不写任何内存；默认关时零副作用。
+//  ⚠️ 只读 `this` 自身的 `+0x1e89` 与已有的 `+0x1a38` **值本身**；
+//    **绝不**解引用 `this+0x1a38` 所指对象（`f1a38 == 0` 时那是 NULL ⇒ 会解引用空指针）。
+bool        gR1cwiProbeArmed   = false;
+UInt64      gR1cwiBase         = 0;   // 捕获时的 kext 基址（= gX5000Slide）
+UInt64      gR1cwiSelf         = 0;   // 最后一次 configureDevice 的 this
+UInt64      gR1cwiF1E89        = 0;   // this+0x1E89（8 字节整值；bit0 = createHWInterface 成功印记）
+UInt64      gR1cwiF1E89Lo      = 0;   // 同上，低 8 位（局部标量，便于机械判读 bit0）
+UInt64      gR1cwiF1A38        = 0;   // this+0x1A38（既有读数的复核；只读值本身）
+UInt64      gR1cwiCalls        = 0;   // 本探针观测到的调用次数
+UInt64      gR1cwiF1E89ZeroMask = 0;  // 累积：曾出现 bit0 == 0 则置 1（跨次调用，便于判稳定）
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
@@ -1424,6 +1452,21 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                 gR1b30AuxOk = 1;
             }
         }
+    }
+    // ─── R1'-Cwi 探针捕获（`-NRedR1CwiProbe`，默认关）────────────────────────────
+    //  见文件头全局量处的说明：**只加一个 8 字节读**（`this+0x1e89`），外加复核既有的 `this+0x1a38`。
+    //  ⚠️ 只读 `this` 自身的两个偏移；**不解引用** `this+0x1a38` 所指对象（可能为 NULL）。
+    if (checkKernelArgument("-NRedR1CwiProbe") && s >= 0xffffff7f80000000ULL) {
+        gR1cwiProbeArmed = true;
+        gR1cwiBase       = gX5000Slide;
+        gR1cwiSelf       = s;
+        ++gR1cwiCalls;
+        // 本块自带的读指针 helper（与 B30 块同一形态；**不得**依赖其它块内的同名 lambda）。
+        const UInt64 f1e89 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(s) + 0x1E89);
+        gR1cwiF1E89   = f1e89;
+        gR1cwiF1E89Lo = f1e89 & 0xFFULL;
+        if ((f1e89 & 0x1ULL) == 0) { gR1cwiF1E89ZeroMask = 1; }
+        gR1cwiF1A38 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(s) + 0x1A38);
     }
     if (f140 >= 0xffffff7f80000000ULL) { gLastF140 = f140; }   // 供 `start` 入口恢复
     if (checkKernelArgument("-NRedAccelLog")) {
