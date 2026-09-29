@@ -27,15 +27,19 @@
 //   ⛔ 不做 `PCIE_INDEX2` 回读、不碰 `PCIE_INDEX_HI`（地址 < 2^32）、不重试（`maxRetries = 0`）。
 //   **不带门控时：一次 MMIO 都不会发生**（调用方在门控为假时根本不进本文件）。
 //
-// 约束：header-only、零动态分配、无异常、不含 IOKit 之外的内核头（本文件**完全不含内核头**）。
-// 命名空间 `fw`，与 `FwBringup/` 下其它模块一致。
+// 约束：header-only、零动态分配、无异常，**kext 环境可编译**。
+//  ⛔ 本文件被 `X6000FB.cpp` 包含 ⇒ 进 kext 构建路径 ⇒ **禁止** `<cstdint>`/`<cstddef>`/`std::`
+//     （kext 构建环境无 libc++；依据 CI run #220 的 `'cstdint' file not found` 与项目既有约定
+//     `DisplaySeq/Dcn314DccgSeq.hpp:23`）。一律用 `<stdint.h>` + 全局类型名。
+//     `../Regs/PSP13.hpp` 提供 `UInt32`（走 `<IOKit/IOTypes.h>`，两环境同源），此处不再引入标准库头。
+//  命名空间 `fw`，与 `FwBringup/` 下其它模块一致。
 
 #pragma once
 
 #include "RegAddr.hpp"
 #include "RegSinkKernel.hpp"
 #include "../Regs/PSP13.hpp"
-#include <cstdint>
+#include <stdint.h>
 
 namespace fw {
 

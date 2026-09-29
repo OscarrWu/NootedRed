@@ -14,13 +14,20 @@
 // 约束：header-only、零动态分配、无异常、不直接依赖 IOKit
 //       （MMIO 通过函数指针 + void* 上下文注入），命名空间 fw，
 //       可在用户态用 mock 回调编译测试。
+//
+// ⛔ **kext 环境可编译**（2026-09-29 CI run #220 修复）：本文件曾被编进 kext 路径后失败于
+//    `fatal error: 'cstdint' file not found` —— kext 构建环境（MacKernelSDK）**没有 libc++**，
+//    因此**禁止** `<cstdint>` / `<cstddef>` / `std::`；一律用 C 头 **`<stdint.h>` / `<stddef.h>`**
+//    与全局类型名（`uint32_t` / `uint64_t`）。这与项目既有约定完全一致，见
+//    `DisplaySeq/Dcn314DccgSeq.hpp:23` 与 `DisplaySeq/Dcn314OdmSeq.hpp:16` 的同句禁令；
+//    离线测试侧由 `tests/IOKit/IOTypes.h` 提供 kext 类型替身，故用户态与 kext 两环境同源可编译。
 
 #pragma once
 
 #include "../DisplaySeq/RegSink.hpp"
 #include "../DisplaySeq/RegOp.hpp"
 #include "RegAddr.hpp"
-#include <cstdint>
+#include <stdint.h>
 
 namespace fw {
 
