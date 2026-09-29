@@ -17,7 +17,6 @@
 #include <vector>
 #include <cassert>
 #include <cstdint>
-#include <functional>
 #include <iostream>
 
 using namespace fw;
@@ -38,10 +37,10 @@ struct MockContext {
     bool lockCalled = false;
     bool unlockCalled = false;
     uint32_t lastError = 0;
-    
+
     // 预置读返回值（按调用顺序消费）
     void pushReadReturn(uint32_t v) { readReturns.push_back(v); }
-    
+
     uint32_t mmioRead(uint32_t offset) {
         calls.push_back({CallRecord::Read, offset, 0});
         if (readIndex < readReturns.size()) {
@@ -49,14 +48,14 @@ struct MockContext {
         }
         return 0xFFFFFFFF;  // 默认返回全 1（模拟总线错误）
     }
-    
+
     void mmioWrite(uint32_t offset, uint32_t value) {
         calls.push_back({CallRecord::Write, offset, value});
     }
-    
+
     void lock() { lockCalled = true; }
     void unlock() { unlockCalled = true; }
-    
+
     void reset() {
         calls.clear();
         readReturns.clear();
@@ -64,7 +63,7 @@ struct MockContext {
         lockCalled = false;
         unlockCalled = false;
     }
-    
+
     // 断言调用序列匹配
     void assertCalls(const std::vector<CallRecord>& expected, const char* testName) {
         if (calls.size() != expected.size()) {
@@ -93,13 +92,44 @@ struct MockContext {
         }
         std::cout << "[" << testName << "] PASS: call sequence matches (" << calls.size() << " calls)\n";
     }
-    
+
     void assertLockUnlock(const char* testName) {
         assert(lockCalled && "lock not called");
         assert(unlockCalled && "unlock not called");
         std::cout << "[" << testName << "] PASS: lock/unlock called\n";
     }
 };
+
+// ── 静态回调桥接函数（零分配：普通函数指针 + void* 上下文）──
+
+static uint32_t mockReadReg(void* p, uint32_t offset) {
+    return static_cast<MockContext*>(p)->mmioRead(offset);
+}
+
+static void mockWriteReg(void* p, uint32_t offset, uint32_t value) {
+    static_cast<MockContext*>(p)->mmioWrite(offset, value);
+}
+
+static void mockLock(void* p) {
+    static_cast<MockContext*>(p)->lock();
+}
+
+static void mockUnlock(void* p) {
+    static_cast<MockContext*>(p)->unlock();
+}
+
+// 构造 SmnCallbacks（delayUs 留 nullptr，maxRetries 可指定）
+static SmnCallbacks makeCallbacks(MockContext* ctx, uint32_t maxRetries = 3) {
+    SmnCallbacks cb{};
+    cb.readReg = &mockReadReg;
+    cb.writeReg = &mockWriteReg;
+    cb.lock = &mockLock;
+    cb.unlock = &mockUnlock;
+    cb.delayUs = nullptr;
+    cb.ctx = ctx;
+    cb.maxRetries = maxRetries;
+    return cb;
+}
 
 // RegSeq 需要外部缓冲区
 static RegOp g_seqBuffer[256];
@@ -111,20 +141,14 @@ static void test_normal_read() {
     MockContext ctx;
     ctx.pushReadReturn(0x090FF244);  // 回读 PCIE_INDEX2
     ctx.pushReadReturn(0xDEADBEEF);  // 读 PCIE_DATA2
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        3
-    });
-    
+
+    RegSinkKernel sink(makeCallbacks(&ctx));
+
     uint32_t val = sink.read(fw::smnAddr(0x91));
-    
+
     assert(val == 0xDEADBEEF);
     assert(sink.lastError() == SmnAccessError::None);
-    
+
     ctx.assertCalls({
         {CallRecord::Write, kPcieIndex2Offset, 0x090FF244},
         {CallRecord::Read,  kPcieIndex2Offset, 0},
@@ -138,20 +162,14 @@ static void test_normal_write() {
     MockContext ctx;
     ctx.pushReadReturn(0x090FF244);  // 回读 PCIE_INDEX2
     ctx.pushReadReturn(0xCAFEBABE);  // 回读 PCIE_DATA2（写后 flush）
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        3
-    });
-    
+
+    RegSinkKernel sink(makeCallbacks(&ctx));
+
     sink.write(fw::smnAddr(0x91), 0xCAFEBABE);
-    
+
     assert(sink.lastError() == SmnAccessError::None);
     assert(sink.lastValue() == 0xCAFEBABE);
-    
+
     ctx.assertCalls({
         {CallRecord::Write, kPcieIndex2Offset, 0x090FF244},
         {CallRecord::Read,  kPcieIndex2Offset, 0},
@@ -165,25 +183,19 @@ static void test_normal_write() {
 static void test_high_address_hi_written_and_cleared() {
     MockContext ctx;
     const uint64_t highAddr = 0x1090FF244ull;
-    
+
     ctx.pushReadReturn(0x090FF244);  // 回读 INDEX2
     ctx.pushReadReturn(0x01);        // 回读 INDEX_HI
     ctx.pushReadReturn(0x12345678);  // 读 DATA2
     ctx.pushReadReturn(0x00);        // 回读 INDEX_HI 清零确认
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        3
-    });
-    
+
+    RegSinkKernel sink(makeCallbacks(&ctx));
+
     auto result = sink.read64(highAddr);
-    
+
     assert(*result == 0x12345678);
     assert(result.error == SmnAccessError::None);
-    
+
     ctx.assertCalls({
         {CallRecord::Write, kPcieIndex2Offset,  0x090FF244},
         {CallRecord::Read,  kPcieIndex2Offset,  0},
@@ -203,18 +215,13 @@ static void test_index_readback_mismatch_retry_exhaust() {
         ctx.pushReadReturn(0x00000000);  // 回读 INDEX2 返回 0 ≠ 写入值
         ctx.pushReadReturn(0xDEADBEEF);  // DATA2（不会被读到）
     }
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-    });
+
+    RegSinkKernel sink(makeCallbacks(&ctx));
     uint32_t val = sink.read(fw::smnAddr(0x91));
-    
+
     assert(val == 0xFFFFFFFF);
     assert(sink.lastError() == SmnAccessError::IndexWriteFail);  // 重试耗尽返回最后一个错误
-    
+
     // 验证共尝试 4 次（每次：W INDEX2 → R INDEX2）
     assert(ctx.calls.size() == 4 * 2);  // 4 attempts × 2 mmio calls each
     assert(ctx.lockCalled && ctx.unlockCalled);
@@ -225,22 +232,16 @@ static void test_index_readback_mismatch_retry_exhaust() {
 static void test_hi_readback_mismatch() {
     MockContext ctx;
     const uint64_t highAddr = 0x1090FF244ull;
-    
+
     ctx.pushReadReturn(0x090FF244);  // 回读 INDEX2 OK
     ctx.pushReadReturn(0xFF);        // 回读 INDEX_HI 不匹配
     ctx.pushReadReturn(0x12345678);  // DATA2
     ctx.pushReadReturn(0x00);        // 清零确认
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        0  // maxRetries=0 → 仅尝试 1 次，直接返回 HiWriteFail
-    });
-    
+
+    RegSinkKernel sink(makeCallbacks(&ctx, 0));  // maxRetries=0 → 仅尝试 1 次，直接返回 HiWriteFail
+
     auto result = sink.read64(highAddr);
-    
+
     assert(*result == 0xFFFFFFFF);
     assert(result.error == SmnAccessError::HiWriteFail);
     std::cout << "[test_hi_readback_mismatch] PASS: HiWriteFail error\n";
@@ -249,20 +250,14 @@ static void test_hi_readback_mismatch() {
 // ⑥ 错误路径：写数据后回读不匹配（单次尝试）
 static void test_data_write_readback_mismatch() {
     MockContext ctx;
-    
+
     ctx.pushReadReturn(0x090FF244);  // 回读 INDEX2 OK
     ctx.pushReadReturn(0x00000000);  // 回读 DATA2 不匹配
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        0  // maxRetries=0
-    });
-    
+
+    RegSinkKernel sink(makeCallbacks(&ctx, 0));  // maxRetries=0
+
     auto err = sink.write64(fw::smnAddr(0x91), 0xCAFEBABE);
-    
+
     assert(err == SmnAccessError::DataWriteFail);
     std::cout << "[test_data_write_readback_mismatch] PASS: DataWriteFail error\n";
 }
@@ -271,22 +266,16 @@ static void test_data_write_readback_mismatch() {
 static void test_hi_clear_readback_nonzero() {
     MockContext ctx;
     const uint64_t highAddr = 0x1090FF244ull;
-    
+
     ctx.pushReadReturn(0x090FF244);  // 回读 INDEX2
     ctx.pushReadReturn(0x01);        // 回读 INDEX_HI
     ctx.pushReadReturn(0x12345678);  // 读 DATA2
     ctx.pushReadReturn(0x01);        // 回读 INDEX_HI 清零确认 → 失败
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        0  // maxRetries=0
-    });
-    
+
+    RegSinkKernel sink(makeCallbacks(&ctx, 0));  // maxRetries=0
+
     auto result = sink.read64(highAddr);
-    
+
     assert(*result == 0xFFFFFFFF);
     assert(result.error == SmnAccessError::HiClearFail);
     std::cout << "[test_hi_clear_readback_nonzero] PASS: HiClearFail error\n";
@@ -299,19 +288,13 @@ static void test_poll_timeout() {
         ctx.pushReadReturn(0x090FF244);  // 回读 INDEX2 匹配
         ctx.pushReadReturn(0x00000000);  // 读 DATA2 返回 0（busy）
     }
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        3
-    });
+
+    RegSinkKernel sink(makeCallbacks(&ctx));
     sink.setPollLimits(5, 0);
-    
+
     RegOp pollOp = regPollUntilNot(fw::smnAddr(0x91), 0x0, "poll_test");
     bool ok = sink.execute(pollOp);
-    
+
     assert(!ok);  // 超时返回 false
     // Poll 超时不设置 lastError（最后一次 read 成功返回 0），仅靠返回值判断
     assert(sink.lastError() == SmnAccessError::None);
@@ -327,19 +310,13 @@ static void test_poll_success() {
     }
     ctx.pushReadReturn(0x090FF244);
     ctx.pushReadReturn(0x00000001);
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        3
-    });
+
+    RegSinkKernel sink(makeCallbacks(&ctx));
     sink.setPollLimits(10, 0);
-    
+
     RegOp pollOp = regPollUntilNot(fw::smnAddr(0x91), 0x0, "poll_test");
     bool ok = sink.execute(pollOp);
-    
+
     assert(ok);
     assert(sink.lastValue() == 0x01);
     assert(sink.lastError() == SmnAccessError::None);
@@ -357,23 +334,17 @@ static void test_execute_all_sequence() {
     ctx.pushReadReturn(0x00000000);
     ctx.pushReadReturn(0x090FF244);
     ctx.pushReadReturn(0x00000001);
-    
-    RegSinkKernel sink({
-        [&](uint32_t o) { return ctx.mmioRead(o); },
-        [&](uint32_t o, uint32_t v) { ctx.mmioWrite(o, v); },
-        [&]() { ctx.lock(); },
-        [&]() { ctx.unlock(); },
-        3
-    });
+
+    RegSinkKernel sink(makeCallbacks(&ctx));
     sink.setPollLimits(10, 0);
-    
+
     RegSeq seq(g_seqBuffer, 256);
     seq.push(regWrite(fw::smnAddr(0x91), 0xCAFEBABE, "write"));
     seq.push(regRead(fw::smnAddr(0x91), "read"));
     seq.push(regPollUntilNot(fw::smnAddr(0x91), 0x0, "poll"));
-    
+
     size_t executed = sink.executeAll(seq);
-    
+
     assert(executed == 3);
     assert(sink.lastError() == SmnAccessError::None);
     std::cout << "[test_execute_all_sequence] PASS: executeAll runs full sequence\n";
@@ -383,7 +354,7 @@ static void test_execute_all_sequence() {
 
 int main() {
     std::cout << "=== RegSinkKernel 离线单元测试 ===\n\n";
-    
+
     test_normal_read();
     test_normal_write();
     test_high_address_hi_written_and_cleared();
@@ -394,7 +365,7 @@ int main() {
     test_poll_timeout();
     test_poll_success();
     test_execute_all_sequence();
-    
+
     std::cout << "\n=== 所有测试通过 ===\n";
     return 0;
 }

@@ -149,6 +149,24 @@ X5000::X5000()
 
 // 第八步观测：保存 X5000 kext 的 slide，供探针在运行时定位其内部符号（如 probe 用的属性名 OSSymbol）
 UInt64 gAccelProbeProv    = 0;    // 最后一次 provider 指针
+
+// ── R1'-b 最小读数探针（`-NRedR1Probe`，默认关）的全局量：**在此定义**（X5000 侧捕获），
+//    X6000FB.cpp 以 extern 引用并在失败出口 panic 输出。只存标量，不读 GPU 寄存器。 ──
+bool   gR1bProbeEnabled    = false;
+UInt64 gR1bCfgDevSelf      = 0;
+UInt64 gR1bCfgDevProvider  = 0;
+UInt64 gR1bCfgDevF1F10     = 0;
+UInt64 gR1bCfgDevF1F14     = 0;
+UInt64 gR1bCfgDevF1F18     = 0;
+UInt64 gR1bCfgDevF1F58     = 0;
+UInt64 gR1bCfgDevF1F40     = 0;
+bool   gR1bAuxPowerExists  = false;
+UInt32 gR1bAuxPowerType    = 0;
+UInt64 gR1bAuxPowerValue   = 0;
+UInt64 gR1bKeyObjFirstField = 0;
+UInt64 gR1bObj1A38         = 0;
+UInt64 gR1bObj1A38Vtable   = 0;
+UInt64 gR1bObj1A38Vtable24 = 0;
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
