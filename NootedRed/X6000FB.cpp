@@ -99,6 +99,18 @@ extern UInt64      gR1cwiF1E89Lo;
 extern UInt64      gR1cwiF1A38;
 extern UInt64      gR1cwiCalls;
 extern UInt64      gR1cwiF1E89ZeroMask;
+// R1'-EngTbl 探针（`-NRedEngTblProbe`，默认关）——由 X5000.cpp 捕获、此处输出。
+//  纯内存标量：不读 GPU/SMN 寄存器、不调 Apple 方法（手册 §9.1 允许形态）。
+extern bool        gEngTblArmed;
+extern UInt64      gEngTblBase;
+extern UInt64      gEngTblSelf;
+extern UInt64      gEngTblHw;
+extern UInt64      gEngTblHwVptr;
+extern UInt64      gEngTblHwZvm;
+extern UInt64      gEngTblCalls;
+extern UInt64      gEngTblNonNull;
+extern UInt64      gEngTblReadFail;
+extern UInt64      gEngTblSlot[];   // 16 槽（X5000.cpp 定义）
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
@@ -1797,6 +1809,35 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               calls, base, self,
               f1e89, f1e89l, bit0, zMask,
               f1a38);
+        // panic 不返回
+    }
+    // ─── R1'-EngTbl 探针（`-NRedEngTblProbe`，默认关）───────────────────────────
+    //  判据与依据见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
+    //  门控：`gEngTblArmed` 已含 `checkKernelArgument("-NRedEngTblProbe")` 的判定结果
+    //  （捕获侧只在门控为真时才置位）⇒ 本处**不再查询 boot-arg**（默认关 ⇒ 此路径不存在）。
+    //  格式串为本探针专属（新开探针位），与既有已投产串**互不为子串**（判别段 `EngTbl probe:`）。
+    if (gEngTblArmed) {
+        // 铁律：panic 实参只能是已求值的局部变量
+        const UInt64 base   = gEngTblBase;
+        const UInt64 self   = gEngTblSelf;
+        const UInt64 hw     = gEngTblHw;
+        const UInt64 hwVt   = gEngTblHwVptr;
+        const UInt64 hwZvm  = gEngTblHwZvm;
+        const UInt64 calls  = gEngTblCalls;
+        const UInt64 nonnul = gEngTblNonNull;
+        const UInt64 rfail  = gEngTblReadFail;
+        // 前 16 槽逐个求值到局部标量（不在 panic 实参里索引数组）
+        const UInt64 s00 = gEngTblSlot[0],  s01 = gEngTblSlot[1],  s02 = gEngTblSlot[2],  s03 = gEngTblSlot[3];
+        const UInt64 s04 = gEngTblSlot[4],  s05 = gEngTblSlot[5],  s06 = gEngTblSlot[6],  s07 = gEngTblSlot[7];
+        const UInt64 s08 = gEngTblSlot[8],  s09 = gEngTblSlot[9],  s10 = gEngTblSlot[10], s11 = gEngTblSlot[11];
+        const UInt64 s12 = gEngTblSlot[12], s13 = gEngTblSlot[13], s14 = gEngTblSlot[14], s15 = gEngTblSlot[15];
+        panic("NRed EngTbl probe: calls=%llu base=%llx self=%llx | hw=%llx hwVt=%llx hwZvm=%llx "
+              "| nonNull=%llu readFail=%llu | s0..3=%llx %llx %llx %llx | s4..7=%llx %llx %llx %llx "
+              "| s8..11=%llx %llx %llx %llx | s12..15=%llx %llx %llx %llx",
+              calls, base, self, hw, hwVt, hwZvm,
+              nonnul, rfail,
+              s00, s01, s02, s03, s04, s05, s06, s07,
+              s08, s09, s10, s11, s12, s13, s14, s15);
         // panic 不返回
     }
     // ─── 乙线「只读单点规范 SMN 访问」探针（门控 `-NRedSmnRead1`，默认关）─────────────

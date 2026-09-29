@@ -256,6 +256,40 @@ UInt64      gR1cwiF1E89Lo      = 0;   // 同上，低 8 位（局部标量，便
 UInt64      gR1cwiF1A38        = 0;   // this+0x1A38（既有读数的复核；只读值本身）
 UInt64      gR1cwiCalls        = 0;   // 本探针观测到的调用次数
 UInt64      gR1cwiF1E89ZeroMask = 0;  // 累积：曾出现 bit0 == 0 则置 1（跨次调用，便于判稳定）
+
+// ─── R1'-EngTbl 探针（`-NRedEngTblProbe`，默认关）──────────────────────────────
+//  目的：把一条**离线推理**变成**真机实测**——`AMDHardware` 的**引擎槽表**（`+0x3b8` 起、
+//    按 `engineType` 索引的 8 字节指针数组）在本机是否**全为空**。
+//  依据（离线逐指令核实，见报告 §13）：
+//    · `AMDHardware::getHWChannel(eAMD_HW_ENGINE_TYPE, eAMD_HW_RING_TYPE)`（归零 VM `0x747f4`）：
+//        `747fa: mov 0x3b8(%rdi,%rax,8),%rdi`   ← **引擎槽表 = this+0x3b8 + engineType*8**
+//        `74802: test %rdi,%rdi`
+//        `74805: je 0x74816`                    ← 槽为 0 ⇒
+//        `74816: xor %eax,%eax; ret`            ← **返回 0**
+//      ⇒【客观观测】**"返回 0" ⟺ "该 engineType 的槽为 NULL"**，与任务描述一致。
+//    · **可达性（本探针的关键收获）**：`createAccelChannels`（归零 VM `0x1e8c`）在
+//        `1eeb: mov 0x1a38(%rax),%rdi`（rax = accelerator 的 this）
+//        `1ef8: call *0x328(%rax)`            ← 在 `this+0x1a38` 上调 `vtable[0x328]`
+//      而 `vtable[0x328]` 正是 `AMDHardware::getHWChannel`（`__ZTV26AMDRadeonX5000_AMDHardware`
+//      = kc `0x4d480e0`，槽 `+0x328` 目标 = kc `0x4bab7f4` = 归零 VM `0x747f4`；**子类
+//      `AMDGFX9Hardware` 的同一槽也指向它**）
+//      ⇒ **`configureDevice` 的 `this+0x1a38` 就是 `AMDHardware`（或其子类）实例**
+//      ⇒ **无需调用任何方法、无需找单例**：直接从我们已有的 `this` 读 `+0x1a38`，即得 `AMDHardware*`。
+//  ⇒ 读法（全程只读内存）：`this+0x1a38` → 该对象的 `+0x3b8 + i*8`（i = 0..N-1）。
+//  纪律：纯内存字段读——不读寄存器、**不调用任何 Apple 方法**（含不 `call *槽`）、不写内存；
+//    每个解引用前做内核地址范围校验；默认关时零副作用。
+bool        gEngTblArmed   = false;
+UInt64      gEngTblBase    = 0;    // 捕获时的 kext 基址（= gX5000Slide）
+UInt64      gEngTblSelf    = 0;    // configureDevice 的 this
+UInt64      gEngTblHw      = 0;    // this+0x1a38（= AMDHardware*；0 表示该对象不存在）
+UInt64      gEngTblHwVptr  = 0;    // *(AMDHardware*) 首字段 = vptr（纯读，供离线定名）
+UInt64      gEngTblHwZvm   = 0;    // 上者 − gX5000Slide（归零 VM；与 _ZTV 对照）
+UInt64      gEngTblCalls   = 0;    // 本探针观测到的调用次数
+// 前 N 个引擎槽（N = 16，**不扫描整表**）。全 0 ⇒ "引擎从未建立" 被实测证实。
+static constexpr UInt32 kEngTblSlots = 16;
+UInt64      gEngTblSlot[kEngTblSlots] = {0};
+UInt64      gEngTblNonNull = 0;    // 前 N 槽中非 0 的个数（0 ⇒ 全空）
+UInt64      gEngTblReadFail = 0;   // 1 = 因指针不合法而**拒绝**读表（如实记录）
 UInt64 gX5000Slide = 0;
 
 // 第八步实验用：记录 `configureDevice` 成功查到的 framebuffer 服务（`this+0x1f40`），
@@ -1467,6 +1501,41 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
         gR1cwiF1E89Lo = f1e89 & 0xFFULL;
         if ((f1e89 & 0x1ULL) == 0) { gR1cwiF1E89ZeroMask = 1; }
         gR1cwiF1A38 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(s) + 0x1A38);
+    }
+    // ─── R1'-EngTbl 探针捕获（`-NRedEngTblProbe`，默认关）─────────────────────────
+    //  见文件头全局量处的说明：**纯内存读**（不调方法、不读寄存器、不写内存）。
+    //  读法：`this+0x1a38`（= AMDHardware*）→ 该对象 `+0x3b8 + i*8`（i = 0..15）。
+    //  ⚠️ 三重校验后才解引用：① `this` 为内核指针；② `this+0x1a38` 非 0 且为内核指针；
+    //     ③ 每个槽读之前不再额外校验（槽本身可以是 0 —— 那正是我们要测的东西）。
+    //  ⛔ 不 `call` 任何槽：`this+0x1a38` 的 vptr 只**读**其首字段，绝不调用。
+    if (checkKernelArgument("-NRedEngTblProbe") && s >= 0xffffff7f80000000ULL) {
+        gEngTblArmed = true;
+        gEngTblBase  = gX5000Slide;
+        gEngTblSelf  = s;
+        ++gEngTblCalls;
+        auto rd64 = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+        const UInt64 hw = rd64(s, 0x1A38);      // = AMDHardware*（本机应为 0）
+        gEngTblHw = hw;
+        // 只有 hw 是合法内核指针时才继续（`hw == 0` 时**不解引用**）
+        if (hw >= 0xffffff7f80000000ULL) {
+            const UInt64 hwVt = rd64(hw, 0x000);   // 只读首字段（vptr），**不调用**
+            gEngTblHwVptr = hwVt;
+            if (gX5000Slide != 0 && hwVt >= 0xffffff7f80000000ULL && hwVt > gX5000Slide) {
+                gEngTblHwZvm = hwVt - gX5000Slide;
+            }
+            // 前 16 个引擎槽（**不扫描整表**）
+            UInt64 nn = 0;
+            for (UInt32 i = 0; i < kEngTblSlots; ++i) {
+                const UInt64 v = rd64(hw, 0x3B8ULL + static_cast<UInt64>(i) * 8ULL);
+                gEngTblSlot[i] = v;
+                if (v != 0) { ++nn; }
+            }
+            gEngTblNonNull = nn;
+        } else if (hw != 0) {
+            gEngTblReadFail = 1;   // 非 0 但不像内核指针 ⇒ 拒绝读表，如实记录
+        }
     }
     if (f140 >= 0xffffff7f80000000ULL) { gLastF140 = f140; }   // 供 `start` 入口恢复
     if (checkKernelArgument("-NRedAccelLog")) {
