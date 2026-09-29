@@ -1331,6 +1331,11 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
     if (checkKernelArgument("-NRedR1B30Probe") && s >= 0xffffff7f80000000ULL) {
         gR1b30ProbeArmed = true;
         gR1b30Base       = gX5000Slide;
+        // 本块自带的读指针 helper：**不得**依赖 R1 探针块内的同名 lambda（那是块作用域，
+        //  在本块不可见——CI #222 的 `use of undeclared identifier 'load64'` 即由此而来）。
+        auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
         // ① this 的 vptr（纯内存读）⇒ 归零 vm 用于与静态 `__ZTV` 对照
         const UInt64 selfVt = *reinterpret_cast<const UInt64*>(s);
         gR1b30SelfVptr = selfVt;
