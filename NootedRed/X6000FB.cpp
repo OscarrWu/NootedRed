@@ -41,6 +41,7 @@
 #include <mach/i386/vm_types.h>
 #include <mach/kern_return.h>
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（PP 观测落盘，见下方 helper）
+#include <FwBringup/SmnReadProbe.hpp>   // 乙线「只读单点规范 SMN 访问」探针（门控 -NRedSmnRead1，默认关）
 
 // 第八步观测：加速器 `probe` 的读数（由 X5000.cpp 记录、在此处【安全位置】输出）
 extern UInt64 gAccelProbeCalls;
@@ -97,6 +98,35 @@ static void nredPPTrace(char* const buf, const int n)
         snprintf(name, sizeof(name), "/var/log/NRedPP-%03u.log", seq++);
         FileIO::writeBufferToFile(name, buf, len);
     }
+}
+
+// ─── 乙线「只读单点规范 SMN 访问」探针（门控 `-NRedSmnRead1`，默认关）─────────────────
+//  序列逻辑在 `FwBringup/SmnReadProbe.hpp`（header-only，离线已逐条断言）；这里只提供
+//  **真机侧的三个回调**（把序列落到 BAR5 上的 `PCIE_INDEX2` / `PCIE_DATA2`）+ 调用点。
+//  依据：docs/子任务/乙线SMN单点验证设计.md §4.3（1 点 + 1 空白对照、不回读索引、不重试）；
+//        docs/子任务/乙线SMN安全访问调查.md §3.3（规范序列）。
+//  ⛔ 本探针**只读**：写只发生在**索引寄存器** `PCIE_INDEX2`（间接读的必要前提）；
+//     `PCIE_DATA2` 只被**读**、从不被写 ⇒ 对任何 PSP/SMU/GPU 功能寄存器都没有写。
+//  ⛔ 挂载点只允许是**已验证的失败出口**（`wrapHandleCriticalError`，Apple 已判定失败之后）——
+//     在那里读**不可能掩盖成功**（手册 §4A；作战计划 T7 卡纪律）。
+//  ⛔ 门控默认关 ⇒ 不带该 boot-arg 时本探针**一次 MMIO 都不会发生**。
+//
+//  MMIO 通道：`NRed::rmmioPtr`（`NRed.cpp:105` 映射的 BAR5；`readReg32Ext` 同一条通道）。
+//  ⚠️ 刻意**不复用** `NRed::readReg32Ext`：那个原语缺锁、且无法注入 `SmnCallbacks`；
+//     本探针用 `SmnReadProbe.hpp` 的序列（写索引→回读校验→读数据），与 Linux 规范一致。
+//
+//  ⚠️ 锁回调留空（`nullptr`）：本探针在 `handleCriticalError`（崩溃流程、多 CPU 已停、
+//     锁状态未知）中执行，**不能**在此取 IOLock（可能睡眠/死锁 —— 手册 §7.3 教训）。
+//     `SmnIndirectAccess` 已支持 nullptr；"缺锁"是本轮的**已知限制**，已登记进交付报告。
+struct SmnProbeCtx { volatile UInt32* mmio; };   // 仅装一个指针，零分配
+
+static UInt32 smnProbeReadReg(void* const ctx, const UInt32 off)
+{
+    return static_cast<const SmnProbeCtx*>(ctx)->mmio[off];
+}
+static void smnProbeWriteReg(void* const ctx, const UInt32 off, const UInt32 val)
+{
+    static_cast<const SmnProbeCtx*>(ctx)->mmio[off] = val;
 }
 
 static const UInt8 kCailAsicCapsTablePattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
@@ -1669,6 +1699,70 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               f1f10, f1e88, f368,
               vt1a38, keyF0);
         // panic 不返回
+    }
+    // ─── 乙线「只读单点规范 SMN 访问」探针（门控 `-NRedSmnRead1`，默认关）─────────────
+    //  目的（规格书 §4.3 的二分问题）：**"按规范序列、单点、不回读索引，读一个已知寄存器，
+    //  能不能安全拿到值？"** —— 这是决策点 D1 批准后要做的**第一件事**（最小的一次硬件接触），
+    //  它用最小代价回答"经 `PCIE_INDEX2/DATA2` 的间接通道在本机到底能不能用"。
+    //
+    //  读数集（**固定 2 点**，规格书 §4.3「读数个数」条的上限是 3，此处取最小可行集）：
+    //    ① `MP0_SMN_C2PMSG_81`（`0x0091`，PSP SOS 存活标志；Linux `psp_v13_0_is_sos_alive()`）
+    //    ② 空白对照（同公式、同通道、同序列，偏移 = 0 ⇒ 字节地址 `0x090FF000`）
+    //  序列表（**共 4 次 MMIO**，逐条 = `SmnReadProbe.hpp` 的定义）：
+    //    写 `PCIE_INDEX2`=0x090FF244 → 读 `PCIE_DATA2` → 写 `PCIE_INDEX2`=0x090FF000 → 读 `PCIE_DATA2`
+    //  ⛔ **无任何 `PCIE_DATA2` 写** ⇒ 无任何功能寄存器写；**无循环、无扫描、无矩阵、无重试**。
+    //
+    //  判据（规格书 §4.3）：
+    //    A. 正常 panic/重启 + reg≠ffffffff ⇒ 规范单点读**可用**（B 类获首个真机支持）
+    //    B. 正常 panic/重启 + reg==ffffffff ⇒ 通道**通但目标未译码/未就绪**（本轮仍算成功）
+    //    C. 再次卡死（0 分片/无 panic/不自动重启）⇒ 规范单点读亦不可用 ⇒ 立即执行 §4.4 处置
+    //   对照守则：blank **必须 ≠ reg**；若两者相等，说明两次读落在同一字节地址（地址算错/
+    //             索引写入未生效）⇒ 本轮读数整体不可信。
+    //
+    //  ⚠️ 纪律（逐条，违反即撤销本轮）：
+    //    ① 实参**全部是已求值的局部标量**（铁律：禁止在 `panic()` 实参里调 `singleton()` 等可能加锁者）；
+    //    ② **新开探针位**（新 boot-arg + **新格式串**），既不改动也不复用任何既有已冻结格式串
+    //       （手册 §4A 纪律 3；尤其是 `-NRedR1Probe` / `-NRedProbePanic` / `-NRedProbePPLIB` 三条）；
+    //    ③ 两个探针**不同时开**：本块置于所有既有探针块**之后**，且在 `-NRedProbePPLIB` 之前；
+    //    ④ 门控为假时**一次 MMIO 都不发生**（以下 `if` 是第一道门）。
+    if (checkKernelArgument("-NRedSmnRead1")) {
+        // 取值来源只读：`rmmioPtr` 由 `NRed::hwLateInit` 映射（BAR5）；非空由 PANIC_COND 保证。
+        // 注意：`hwLateInit` 可能**尚未**执行到（本函数挂在加速器失败出口，晚于它）——
+        //   为稳妥仍做一次空指针判定，未映射则跳过（不构造 null 访问）。
+        volatile UInt32* const mmio = NRed::singleton().rmmioPtr;
+        if (mmio != nullptr) {
+            SmnProbeCtx ctx{mmio};
+            fw::SmnCallbacks cb{};
+            cb.readReg    = &smnProbeReadReg;
+            cb.writeReg   = &smnProbeWriteReg;
+            cb.lock       = nullptr;   // 崩溃上下文不得取锁（见上方说明）
+            cb.unlock     = nullptr;
+            cb.delayUs    = nullptr;
+            cb.ctx        = &ctx;
+            cb.maxRetries = fw::kSmnProbeMaxRetries;   // = 0
+
+            const fw::SmnProbeReadings r = fw::runSmnReadProbe(cb);
+
+            // 判读用局部标量（**先求值、后传参**；本块之外不再有任何调用）。
+            const UInt64 vRegAddr  = r.regAddr;
+            const UInt64 vRegVal   = r.regValue;
+            const UInt64 vBlankAddr = r.blankAddr;
+            const UInt64 vBlankVal = r.blankValue;
+            const UInt64 vRegErr   = r.regError;
+            const UInt64 vBlankErr = r.blankError;
+            const UInt64 vRetries  = r.retries;
+            const UInt64 vRegOff   = fw::kSmnProbeRegOffset;
+            const UInt64 vBlankOff = fw::kSmnProbeBlankOffset;
+            const UInt64 vSame     = (vRegVal == vBlankVal) ? 1u : 0u;   // 对照守则：必须为 0
+
+            // ⛔ 新开格式串（一次性定稿，此后冻结）。字段刻意压到最少（手册 §4.3 分片余量纪律）。
+            panic("NRed SmnRead1: reg(off=%x addr=%x)=%x err=%u | blank(off=%x addr=%x)=%x err=%u "
+                  "| same=%u retries=%u",
+                  vRegOff, vRegAddr, vRegVal, static_cast<UInt32>(vRegErr),
+                  vBlankOff, vBlankAddr, vBlankVal, static_cast<UInt32>(vBlankErr),
+                  static_cast<UInt32>(vSame), static_cast<UInt32>(vRetries));
+            // panic 不返回
+        }
     }
     // ─── ⛔ 已删除：乙线 T7 寄存器探针族（`-NRedFwProbe` / `-NRedFwProbe2` / `-NRedFwProbe3`）───
     //  2026-09-29 所有者明令：**不得再以探针方式读 AMD 寄存器（无论 Manjaro 侧还是 macOS 侧）**。
