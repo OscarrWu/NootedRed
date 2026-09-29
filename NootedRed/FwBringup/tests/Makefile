@@ -22,10 +22,11 @@ SEQDIR    = $(ROOT)NootedRed/DisplaySeq
 INCLUDES  = -I$(ROOT)NootedRed -I$(FWBDIR)/tests
 BUILDDIR  = $(FWBDIR)/tests/build
 
-# 显式目标清单（T3 SMU13 邮箱 + T5 PSP13 ring/bringup）
+# 显式目标清单（T3 SMU13 邮箱 + T5 PSP13 ring/bringup + RegSinkKernel）
 T3_TEST  = test_smu13_mailbox
 T5_TESTS = test_psp13_ring test_psp13_bringup
-TESTS    = $(addprefix $(BUILDDIR)/,$(T3_TEST) $(T5_TESTS))
+T6_TESTS = test_reg_sink_kernel
+TESTS    = $(addprefix $(BUILDDIR)/,$(T3_TEST) $(T5_TESTS) $(T6_TESTS))
 
 test: $(TESTS)
 	@echo "── 运行 SMU13 邮箱 / PSP13 bringup 离线单元测试 ──"
