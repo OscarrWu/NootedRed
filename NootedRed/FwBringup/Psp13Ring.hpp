@@ -109,12 +109,16 @@ struct GfxCmdResp {
     uint32_t resp_offset;        // +20  (RBI only)
     uint32_t resp_buf_size;      // +24  (RBI only)
 
-    // +28: union psp_gfx_commands
-    uint32_t cmd_payload[4];     // +28..+43
+    // +28: union psp_gfx_commands（psp_gfx_if.h:387-403，占 +28..+864）
+    // ⚠️ cmd_payload 按「本模块用到的最大命令负载」开足：
+    //    cmd_load_ta（LOAD_TA/LOAD_ASD）需 6 个 dword（psp_gfx_if.h:131-143），
+    //    cmd_setup_tmr 需 6 个 dword（psp_gfx_if.h:191-207）。16 个 dword 覆盖
+    //    两者，余量为后续命令预留；reserved_1 相应压缩，响应区仍固定在 +864。
+    uint32_t cmd_payload[16];     // +28..+91
 
-    uint8_t  reserved_1[864 - 28 - 16]; // padding to +864
+    uint8_t  reserved_1[864 - 28 - 64]; // padding to +864
 
-    // +864: struct psp_gfx_resp
+    // +864: struct psp_gfx_resp（psp_gfx_if.h:448-461）
     uint32_t resp_status;        // +864
     uint32_t resp_session_id;    // +868
     uint32_t resp_fw_addr_lo;    // +872

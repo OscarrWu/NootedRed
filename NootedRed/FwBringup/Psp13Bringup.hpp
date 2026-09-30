@@ -33,7 +33,7 @@
 
 #include "Psp13Ring.hpp"
 #include "Regs/PSP13.hpp"
-
+#include "FwUcodeHeader.hpp"
 namespace fw {
 
 // =============================================================================
@@ -307,15 +307,38 @@ inline void prepLoadTocCmd(GfxCmdResp* cmd,
     cmd->cmd_payload[2]   = size;
 }
 
+/// 等 Linux psp_init_toc_microcode (amdgpu_psp.c:3986-4008)
+///
+/// Linux 先解析 TOC 的 common_firmware_header，只把 payload 切片
+/// （`data + ucode_array_offset_bytes` 起、`ucode_size_bytes` 长）存入
+/// `psp->toc.start_addr/.size_bytes`；之后 `psp_load_toc` 送的就是这个切片。
+/// 本实现同样只送 payload —— 与整文件相比，fw_pri 偏移 0 处是 payload 起始
+/// 而非头字节，LOAD_TOC 帧的 `toc_size` 是 payload 长而非文件长。
+///
+/// @return 0 成功；-1 头无效或切片越界（离线防御：Linux 靠固件配套保证）
+inline int tocPayloadSlice(const uint8_t* toc_data, uint32_t toc_size,
+                           const uint8_t** out_payload, uint32_t* out_size) {
+    CommonFwHeader hdr;
+    if (!parseCommonFwHeader(toc_data, toc_size, &hdr)) return -1;
+    if (hdr.ucode_array_offset_bytes > toc_size ||
+        hdr.ucode_size_bytes > toc_size - hdr.ucode_array_offset_bytes) {
+        return -1;
+    }
+    *out_payload = toc_data + hdr.ucode_array_offset_bytes;
+    *out_size    = hdr.ucode_size_bytes;
+    return 0;
+}
+
 /// 等 Linux psp_load_toc (amdgpu_psp.c:855-878)
 ///
 /// 步骤：
-///   1. copyFw(toc) → fw_pri_buf
-///   2. 构造 LOAD_TOC 帧
-///   3. 帧拷贝到 cmd_buf
-///   4. submit 到环
-///   5. wait fence
-///   6. 从 resp.tmr_size 读出 tmr_size
+///   1. 解析 common header，取 payload 切片（tocPayloadSlice）
+///   2. copyFw(payload) → fw_pri_buf（Linux 拷的是 `psp->toc.start_addr`）
+///   3. 构造 LOAD_TOC 帧（`toc_size` = payload 长）
+///   4. 帧拷贝到 cmd_buf
+///   5. submit 到环
+///   6. wait fence
+///   7. 从 resp.tmr_size 读出 tmr_size
 inline int loadToc(display::RegSink& sink,
                    RingState* ring,
                    uint8_t* fw_pri_buf,
@@ -325,16 +348,22 @@ inline int loadToc(display::RegSink& sink,
                    uint64_t cmd_buf_mc_addr,
                    uint64_t fence_mc_addr,
                    uint32_t* out_tmr_size) {
-    // copy fw
-    int ret = copyFw(fw_pri_buf, toc_data, toc_size);
+    // 切片：只送 payload（等 Linux psp_init_toc_microcode, amdgpu_psp.c:3986-4008）
+    const uint8_t* payload = nullptr;
+    uint32_t       payload_size = 0;
+    int ret = tocPayloadSlice(toc_data, toc_size, &payload, &payload_size);
     if (ret != 0) return ret;
 
-    // 准备命令帧
+    // copy payload（Linux 拷贝源 = psp->toc.start_addr，即切片起点）
+    ret = copyFw(fw_pri_buf, payload, payload_size);
+    if (ret != 0) return ret;
+
+    // 准备命令帧（toc_size = payload 长）
     GfxCmdResp cmd;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
-    prepLoadTocCmd(&cmd, fw_pri_mc_addr, toc_size);
+    prepLoadTocCmd(&cmd, fw_pri_mc_addr, payload_size);
 
     // 拷贝命令到环的命令缓冲
     cmdBufCopy(ring, &cmd);
@@ -491,6 +520,198 @@ inline int executeLoadIpFw(display::RegSink& sink,
     const GfxCmdResp* resp = cmdBufGet(ring);
     if (resp->resp_status == kTeeSuccess) return 0;
     return static_cast<int>(resp->resp_status);
+}
+
+// ---------- 6b. TA 解析 + ASD 装载 ----------
+
+/// TA 子固件描述（等 Linux `psp->asd_context.bin_desc`，amdgpu_psp.c:4306-4315）
+struct TaBinDesc {
+    uint32_t fw_version;    // 子固件版本（desc->fw_version）
+    uint32_t offset_bytes;  // 子固件相对 TA 文件起始的偏移
+    uint32_t size_bytes;    // 子固件大小
+    bool     found;         // 是否在 TA 头里找到该类型
+};
+
+/// 等 Linux psp_init_ta_microcode → parse_ta_v2_microcode (amdgpu_psp.c:4414-4440)
+/// + parse_ta_bin_descriptor 的 ASD 分支 (amdgpu_psp.c:4310-4316)
+///
+/// 只提取 ASD（TA_FW_TYPE_PSP_ASD=1）；本机实测 `psp_13_0_4_ta.bin` 含
+/// desc[0]=ASD size=217344（XGMI/RAS/HDCP/DTM/RAP 等其它 TA 类型乙线暂不装载，
+/// 需要时再补）。子固件起始 = ta 头 + desc.offset_bytes + header.ucode_array_offset_bytes
+/// （等 amdgpu_psp.c:4306-4308）。
+///
+/// @return 0 成功（含「未找到 ASD」，此时 out->found=false）；-1 头不是 v2.0 或越界
+inline int parseTaAsd(const uint8_t* ta_data, uint32_t ta_size, TaBinDesc* out) {
+    if (!ta_data || !out) return -1;
+
+    CommonFwHeader hdr;
+    if (!parseCommonFwHeader(ta_data, ta_size, &hdr)) return -1;
+    // 等 parse_ta_v2_microcode:4423-4424 —— 头版本必须为 2
+    if (hdr.header_version_major != 2) return -1;
+
+    uint32_t count = 0;
+    if (!readU32Le(ta_data, ta_size, 32, &count)) return -1;
+    // 等 parse_ta_v2_microcode:4426（UCODE_MAX_PSP_PACKAGING=26：
+    //   ((sizeof(union amdgpu_firmware_header)=0x100 - 32 - 4)/16)*2，
+    //   amdgpu_ucode.h:473）；TA 文件实测 count=3
+    if (count >= 26) return -1;
+
+    out->found = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        PspFwBinDesc desc;
+        if (!pspFwBinDescAt(ta_data, ta_size, i, &desc)) return -1;
+        if (desc.fw_type == kTaFwTypePspAsd) {
+            // 子固件偏移 = ucode_array_offset_bytes + desc.offset_bytes（amdgpu_psp.c:4306-4308）
+            // 两次边界检查都先防 uint32 下溢/回绕：
+            //   1) ucode_array_offset_bytes 自身必须 ≤ ta_size
+            //   2) desc.offset_bytes 必须 ≤ ta_size - ucode_array_offset_bytes（否则加法回绕）
+            if (hdr.ucode_array_offset_bytes > ta_size) return -1;
+            if (desc.offset_bytes > ta_size - hdr.ucode_array_offset_bytes) return -1;
+            const uint32_t off = hdr.ucode_array_offset_bytes + desc.offset_bytes;
+            if (desc.size_bytes > ta_size - off) return -1;
+            out->fw_version  = desc.fw_version;
+            out->offset_bytes = off;
+            out->size_bytes  = desc.size_bytes;
+            out->found       = true;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/// 等 Linux psp_asd_initialize 的两个提前返回条件 (amdgpu_psp.c:1683-1689)
+///
+///  1. SRIOV 或 ASD 子固件不存在 ⇒ 跳过
+///  2. 无显示硬件 且 MP0 ≥ 13.0.10 ⇒ 跳过
+/// Phoenix（13.0.4）：非 SRIOV、有显示硬件、MP0 < 13.0.10 ⇒ 全部不成立 ⇒ 需要装载
+/// @param asd_found ASD 子固件是否已从 TA 解析出来
+inline bool asdLoadRequired(bool sriov, bool has_display_hw,
+                            uint32_t mp0_major, uint32_t mp0_minor,
+                            bool asd_found) {
+    if (sriov || !asd_found) return false;
+    if (!has_display_hw &&
+        (mp0_major > 13 || (mp0_major == 13 && mp0_minor >= 10))) {
+        return false;
+    }
+    return true;
+}
+
+/// 等 Linux psp_prep_ta_load_cmd_buf (amdgpu_psp.c:1771-1785)，
+/// ASD 专用参数来自 psp_asd_initialize (amdgpu_psp.c:1691-1693)：
+///   - cmd_id      = GFX_CMD_ID_LOAD_ASD（ta_load_type）
+///   - app_phy_*   = fw_pri_mc_addr（ASD 子固件已拷入 fw_pri）
+///   - app_len     = ASD 子固件大小
+///   - cmd_buf_*   = shared_mc_addr=0、cmd_buf_len=PSP_ASD_SHARED_MEM_SIZE=0
+///                   （amdgpu_psp.c:1691-1692；amdgpu_psp.h:70）
+inline void prepLoadAsdCmd(GfxCmdResp* cmd,
+                           uint64_t fw_mc_addr,
+                           uint32_t fw_size) {
+    cmd->cmd_id          = GFX_CMD_ID_LOAD_ASD;
+    cmd->cmd_payload[0]  = static_cast<uint32_t>(fw_mc_addr & 0xFFFFFFFF);
+    cmd->cmd_payload[1]  = static_cast<uint32_t>((fw_mc_addr >> 32) & 0xFFFFFFFF);
+    cmd->cmd_payload[2]  = fw_size;
+    cmd->cmd_payload[3]  = 0; // cmd_buf_phy_addr_lo
+    cmd->cmd_payload[4]  = 0; // cmd_buf_phy_addr_hi
+    cmd->cmd_payload[5]  = 0; // cmd_buf_len（PSP_ASD_SHARED_MEM_SIZE=0）
+}
+
+/// 等 Linux psp_ta_load (amdgpu_psp.c:1830-1862) 的 ASD 形态
+///
+/// 步骤：copyFw(ASD) → 构造 LOAD_ASD 帧 → cmd_buf 拷贝 → submit → fence → 解码响应。
+/// 门控（asdLoadRequired）由调用方在 M4 决定；本原语默认可用。
+///
+/// @return 0 成功；-1 超时/环错误；>0 TEE 错误码
+inline int executeLoadAsd(display::RegSink& sink,
+                          RingState* ring,
+                          const TaBinDesc& asd,
+                          uint64_t fw_pri_mc_addr,
+                          uint64_t cmd_buf_mc_addr,
+                          uint64_t fence_mc_addr) {
+    if (!asd.found) return -1;
+
+    GfxCmdResp cmd;
+    for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
+        reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
+    }
+
+    // ASD 子固件已由调用方拷入 fw_pri（等 Linux psp_ta_load:1837-1842）
+    // asd.offset_bytes/size_bytes 为相对 TA 文件起始的切片信息；
+    // fw_pri_mc_addr 指向 fw_pri 缓冲（ASD 数据已就位）。
+
+    prepLoadAsdCmd(&cmd, fw_pri_mc_addr, asd.size_bytes);
+    cmdBufCopy(ring, &cmd);
+
+    int ret = ringSubmitFrame(ring, sink, cmd_buf_mc_addr, fence_mc_addr);
+    if (ret != 0) return ret;
+
+    ret = ringWaitForFence(ring, sink, ring->fence_value);
+    if (ret != 0) return -1; // 超时
+
+    const GfxCmdResp* resp = cmdBufGet(ring);
+    if (resp->resp_status == kTeeSuccess) return 0;
+    return static_cast<int>(resp->resp_status);
+}
+
+// ---------- 6c. RLC autoload ----------
+
+/// 等 Linux psp_rlc_autoload_start (amdgpu_psp.c:3896-3909)
+///
+/// cmd-id-only 帧：acquire_psp_cmd_buf 的 memset 后只写 cmd_id，其余字段全 0
+/// （mac-amdgpu psp_v14_0.cpp:1370-1394 同构注释：buf_size/buf_version 故意留 0）。
+/// 触发时机（Linux psp_load_non_psp_fw:3575-3583）：autoload_supported 且刚送完
+/// AMDGPU_UCODE_ID_RLC_G ⇒ 告知 PSP 所有 GFX 固件已就位，可启动 per-IP autoload。
+inline void prepAutoloadRlcCmd(GfxCmdResp* cmd) {
+    cmd->cmd_id = GFX_CMD_ID_AUTOLOAD_RLC;
+}
+
+/// RLC autoload 帧发送（cmd-id-only + 完整提交流程）
+///
+/// @return 0 成功；-1 超时/环错误；>0 TEE 错误码
+inline int rlcAutoloadStart(display::RegSink& sink,
+                            RingState* ring,
+                            uint64_t cmd_buf_mc_addr,
+                            uint64_t fence_mc_addr) {
+    GfxCmdResp cmd;
+    for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
+        reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
+    }
+    prepAutoloadRlcCmd(&cmd);
+
+    cmdBufCopy(ring, &cmd);
+
+    int ret = ringSubmitFrame(ring, sink, cmd_buf_mc_addr, fence_mc_addr);
+    if (ret != 0) return ret;
+
+    ret = ringWaitForFence(ring, sink, ring->fence_value);
+    if (ret != 0) return -1; // 超时
+
+    const GfxCmdResp* resp = cmdBufGet(ring);
+    if (resp->resp_status == kTeeSuccess) return 0;
+    return static_cast<int>(resp->resp_status);
+}
+
+/// 等 Linux gfx_v11_0_wait_for_rlc_autoload_complete (gfx_v11_0.c:3104-3133)
+///
+/// 轮询 `cp_status==0 且 BOOTLOAD_COMPLETE==1`，预算 kRegPollUs 轮（1M×1µs）。
+/// gfx1103（GC 11.0.3）用 regRLC_RLCS_BOOTLOAD_STATUS=0x4e82
+/// （gc_11_0_0_offset.h:10418，BASE_IDX=1；11.0.1/11.0.4/11.5.x/11.7.x 才用 0x4e7e
+///  变体，11.0.3 不在该清单内）。BOOTLOAD_COMPLETE=bit31（gc_11_0_0_sh_mask.h:36305-36310）。
+///
+/// ⚠️ 绝对地址 = (GC_BASE + 0x4e82) × 4：GC_BASE 来自 IP discovery，离线未知
+///    （NRed.cpp:112-115 已证静态表推导的 MMHUB 基址读回 0xFFFFFFFF 走不通），
+///    故由调用方在 GC_BASE 就绪后传入绝对字节地址；等待缺失不影响发帧本身。
+///
+/// @return 0 完成；-1 超时
+inline int waitRlcAutoloadComplete(display::RegSink& sink,
+                                   display::RegAddr cp_stat_addr,
+                                   display::RegAddr bootload_status_addr) {
+    for (uint32_t i = 0; i < kRegPollUs; ++i) {
+        const uint32_t cp_status    = sink.read(cp_stat_addr);
+        const uint32_t bootload     = sink.read(bootload_status_addr);
+        if (cp_status == 0 && (bootload & 0x80000000u) != 0) return 0;
+        sink.delayMicroseconds(1);
+    }
+    return -1;
 }
 
 // ---------- 主流程 ----------
