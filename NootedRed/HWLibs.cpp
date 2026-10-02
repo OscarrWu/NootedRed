@@ -2365,6 +2365,23 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
 
     SYSLOG_COND(ADDPR(debugEnabled), "HWLibs", "Ignore error about unsupported SMU HW version.");
 
+    // ─── 区分性日志（技术决策 agent 逐字规格，2026-10-03；**只追加、不改既有串**）───────
+    //  背景：根因链已闭合到「SMU/SWIP init 失败 → `ttl_hw_init` 返回 false → `status=4`
+    //   → `TTL::initialize` 提前返回 → `m_hTtl(+0x38)`/`pTtlSetPowerState(+0x5F8)` 未装配
+    //   → `getRtsInfo` 失败 → panic」，但**尚不知是哪个子调用失败** ⇒ 本行把判定所需的三要素
+    //   一次带出（判读用途逐条见规格）：
+    //    · `ret`          = `org` 调用返回码 ⇒ 判"Apple 原路径是否确实报 unsupported、报的什么码"
+    //    · `ipVersion.major/.minor` = Apple 上报的 SMU IP 版本 ⇒ 判"Apple 是否根本不认识这颗芯片"
+    //    · `effectiveMajor` / `phoenix` = **自证用**（预期恒 13 / 1；若非 ⇒ 说明分支判断有异）
+    //  ⛔ **纯观测**：不打印指针、**不改返回值**、**不改控制流** —— 本行插在
+    //     `return kCAILResultOK;` **之前**，其下一条语句与返回值（常量）逐字未动；
+    //     既有串 `Ignore error about unsupported SMU HW version.` 仅在**其后追加**、未改动。
+    //  ⛔ 亦**不**为"消除日志/绕过检查"而改任何判定（治症状属禁止项）。
+    //  ⚠️ 规格的逐字代码块用 `%d`，其上方注释又建议 `ret` 用 `%#x`——两者冲突；
+    //    本实现**照逐字代码块**（`%d`）定稿（以"逐字规格"为准），已在交付中报告该分歧。
+    SYSLOG_COND(ADDPR(debugEnabled), "HWLibs", "smu fp list: ret=%d ipVer=%d.%d effMajor=%d phoenix=%d", ret,
+                ipVersion.major, ipVersion.minor, effectiveMajor,
+                NRed::singleton().getAttributes().isPhoenix() ? 1 : 0);
     return kCAILResultOK;
 }
 
