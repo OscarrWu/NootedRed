@@ -43,6 +43,7 @@
 #include <mach/kern_return.h>
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（PP 观测落盘，见下方 helper）
 #include <FwBringup/SmnReadProbe.hpp>   // 乙线「只读单点规范 SMN 访问」探针（门控 -NRedSmnRead1，默认关）
+#include <FwBringup/NbioFbEnProbe.hpp>   // 乙线 B 方案·序①「NBIO BIF_FB_EN 写入探针」（门控 -NRedNbioFbEn，默认关）
 
 // 第八步观测：加速器 `probe` 的读数（由 X5000.cpp 记录、在此处【安全位置】输出）
 extern UInt64 gAccelProbeCalls;
@@ -168,6 +169,22 @@ static UInt64 sP3P14ReDevId  = 0;
 static UInt64 sP3P14ReVendId = 0;
 static UInt64 sP3P14ReCalled = 0;
 static int    sP3P14ReValid  = 0;
+// ─── NBIO `BIF_FB_EN` 写入探针的复读通道（乙线 B 方案·序①；门控 `-NRedNbioFbEn`）─────
+//  写入定义（所有者已批准本次写入，逐次批准）：`regBIF_BX1_BIF_FB_EN` 写 `0x3`。
+//    偏移 0x0100、BASE_IDX 2（SEG2 基址 0x00000D20）⇒ dword 0xE20 ⇒ **字节 0x3880**；
+//    512 KiB 窗口内（0x3880 < 0x80000）⇒ **A 类直写**，不经间接通道。
+//  时序：写入点 = `wrapPpHelperPowerUp` 入口、**S1 复读块之后 / org 调用之前**。
+//    ⇒ P3/P14 的复读先落（写入前的状态），写入效果紧随其后，二者同轮可归因。
+//  写死在此的**全部硬件访问上界**（供判读逐条核对；无循环/无扫描/无矩阵/无重试）：
+//    窗口内（A 类）：读 fbEn ×1 → **写 fbEn = 0x3 ×1** → 读 fbEn ×1（写后读回）
+//                    + 阳性对照 3 次（写 PCIE_INDEX2 ×1、读 PCIE_INDEX2 ×1、读 PCIE_DATA2 ×1）
+//    越窗（B 类，间接）：真读点 ×1、阴性对照 ×1 ⇒ 每次 = 写索引 + 回读索引 + 读数据 = 3 次 MMIO
+//  ⛔ 对 `PCIE_DATA2` 零写入 ⇒ 对 PSP/SMU/GPU 任何**功能寄存器**零写入。
+//  形态与 `-NRedSmnRead1`（本文件 SmnRead1 块）逐字同形：回调为无状态转发、锁回调留空
+//    （`nullptr`）、`maxRetries = 0`；结果只缓存进文件静态量，由 panic 文本带出。
+//  默认零开销：`sNbioWrValid` 只在门控命中时被置 1 ⇒ `wrapHandleCriticalError` 那个 `if` 恒假。
+static fw::NbioFbEnReadings sNbioWrReadings{};
+static UInt64 sNbioWrValid = 0;
 // PP 侧读数（2026-09-28 第 30 轮定稿）：只保留"写日志 + 立即落一拍"两条通道。
 //   为什么不缓存给别的文件捎带：PP 包装函数的实际执行时刻（~34.5 s）**晚于** IP 探针
 //   （26–27 s），捎带机制在时间上根本排不上；而周期拍（每 1 s）的下一拍落在 panic 之后。
@@ -220,6 +237,30 @@ static UInt32 smnProbeReadReg(void*, const UInt32 off)
 static void smnProbeWriteReg(void*, const UInt32 off, const UInt32 val)
 {
     NRed::singleton().writeReg32Raw(off, val);
+}
+
+// ─── NBIO `BIF_FB_EN` 写入探针的三回调（门控 `-NRedNbioFbEn`）────────────────────────
+//  与上方 `smnProbeReadReg/WriteReg` **同一形态**（无状态转发到 NRed 的公开访问器）。
+//  分工（与 `fw::NbioFbEnCallbacks` 逐字对应）：
+//    · `nbioFbEnReadDw` / `nbioFbEnWriteDw`：**dword 索引**口径的窗口内直访
+//      （`readReg32Raw` / `writeReg32Raw`），用于 BIF_FB_EN 的"读原值 → 写 → 读回"。
+//      ⚠️ dword 索引 `0xE20` 已含段基址 `NBIO_BASE_2`（0xD20）⇒ 与 `readReg32Raw` 的
+//      `rmmioPtr[dwordOffset]` 语义**严格同口径**（本项目 `readReg32` 的窗口内分支亦然）。
+//    · `nbioFbEnReadExt`：**字节地址**口径的越窗间接读（`NRed::readReg32Ext`，`NRed.cpp:270`；
+//      与 Linux `RREG32_PCIE_EXT` 同形态：写 INDEX2 → 回读刷写 → 读 DATA2），
+//      用于判据的越窗 2 点（真读点 / 阴性对照）。
+//    ⛔ 三者**只做转发**：不含窗口判断、不含锁、无重试、无日志（判据全部回传给序列函数）。
+static UInt32 nbioFbEnReadDw(void*, const UInt32 dwordOffset)
+{
+    return NRed::singleton().readReg32Raw(dwordOffset);
+}
+static void nbioFbEnWriteDw(void*, const UInt32 dwordOffset, const UInt32 value)
+{
+    NRed::singleton().writeReg32Raw(dwordOffset, value);
+}
+static UInt32 nbioFbEnReadExt(void*, const UInt32 byteAddr)
+{
+    return NRed::singleton().readReg32Ext(byteAddr);
 }
 
 static const UInt8 kCailAsicCapsTablePattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
@@ -1441,6 +1482,42 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                static_cast<unsigned long long>(rF44), static_cast<unsigned long long>(rDevId),
                static_cast<unsigned long long>(rVendId), static_cast<unsigned long long>(rCalled));
     }
+    // ─── ★ NBIO `BIF_FB_EN` 写入探针（乙线 B 方案·序①；门控 `-NRedNbioFbEn`，默认关）────
+    //  位置理由：**紧跟 S1 复读块之后、`FunctionCast(org)` 之前** ⇒ 本轮读数顺序为
+    //    「P3/P14 复读（写入前状态）→ NBIO 写 0x3 → 写后读回 + 越窗判据」，
+    //    同轮即可把"写入是否生效"与"P3/P14 是否变化"分离开（RM §4.7 判别性纪律）。
+    //  ⛔ 全部硬件访问上界（见文件头静态量处的逐条清单）：**1 次功能寄存器写** + 6 次间接读；
+    //     **无循环/无扫描/无矩阵/无重试**；对 `PCIE_DATA2` 零写入。
+    //  ⚠️ 前置：BAR5 必须已映射（`-NRedSmnRead1` 同款判据）。未映射 ⇒ 一个 MMIO 都不发生，
+    //     `armed=0` 如实记录（**不得**把"没跑"读成"写入失败"）。
+    if (checkKernelArgument("-NRedNbioFbEn")) {
+        auto* const nred = &NRed::singleton();
+        fw::NbioFbEnReadings r{};
+        if (nred->hasRmmio()) {
+            fw::NbioFbEnCallbacks cb{};
+            cb.readDw  = &nbioFbEnReadDw;     // dword 口径：窗口内直读（= 本探针的读回基线）
+            cb.writeDw = &nbioFbEnWriteDw;    // dword 口径：窗口内直写（★ 本轮唯一的功能寄存器写）
+            cb.readExt = &nbioFbEnReadExt;    // 字节口径：越窗间接读（经 PCIE_INDEX2/DATA2）
+            cb.ctx     = nullptr;             // 回调无状态（直接转发到 NRed 访问器）
+            r = fw::runNbioFbEnWriteProbe(cb);
+        }
+        r.armed     = 1;
+        r.hasRmmio  = nred->hasRmmio() ? 1u : 0u;
+        sNbioWrReadings = r;
+        sNbioWrValid    = 1;
+        SYSLOG("X6000FB",
+               "NBIO write re: armed=%u rmmio=%u before=%x wr=%x after=%x | reg=%x val=%x err=%u "
+               "| blank=%x val=%x err=%u same=%u | posIdx=%x wr=%x rb=%x posData=%x | wc=%u retries=%u",
+               static_cast<unsigned>(r.armed), static_cast<unsigned>(r.hasRmmio),
+               static_cast<unsigned>(r.fbEnBefore), static_cast<unsigned>(r.writeVal),
+               static_cast<unsigned>(r.fbEnAfter), static_cast<unsigned>(r.regAddr),
+               static_cast<unsigned>(r.regValue), static_cast<unsigned>(r.regErr),
+               static_cast<unsigned>(r.blankAddr), static_cast<unsigned>(r.blankValue),
+               static_cast<unsigned>(r.blankErr), static_cast<unsigned>(r.same),
+               static_cast<unsigned>(r.posIdx), static_cast<unsigned>(r.posIdxWr),
+               static_cast<unsigned>(r.posIdxRb), static_cast<unsigned>(r.posData),
+               static_cast<unsigned>(r.writeCount), static_cast<unsigned>(r.retries));
+    }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
 }
@@ -1974,6 +2051,46 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 p3Fail = (rCalled != 0 && rDevId == 0xFFFFULL) ? 1u : 0u;
         panic("P3P14 panic re: hw=%llx f30d=%llx wreg=%llx f44=%llx devid=%llx vend=%llx called=%llu p3Fail=%llu",
               rHw, rF30D, rHwReg, rF44, rDevId, rVendId, rCalled, p3Fail);
+        // panic 不返回
+    }
+    // ─── ★ NBIO 写入探针的 panic 文本通道（乙线 B 方案·序①；`-NRedNbioFbEn`）──────────
+    //  数据来源：`wrapPpHelperPowerUp` 的写入块缓存进 `sNbioWrReadings`（纯内存，无落盘）。
+    //  判别段 `NBIO write re:` 与既有全部已投产串**互不为子串**（全库唯一，已核）。
+    //  把 P3 判据（`p3Fail`）**并入本串**：写入效果与 P3 的状态同轮并读，便于归因。
+    //    `p3Fail` 直接读**同 TU** 的 `sP3P14Re*`（S1 的复读静态量，无跨 TU 符号）；
+    //    若 S1 未启用（`sP3P14ReValid == 0`）⇒ `sP3P14ReCalled == 0` ⇒ `p3Fail` 恒 0 且 `called=0`
+    //    如实表明"P3 未复读"，**不得**读成"P3 通过"。
+    //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
+    //   门控判定只用文件静态量，**不调 `checkKernelArgument`**（panic 流程中调用会导致"不自动重启"）。
+    if (sNbioWrValid) {
+        const UInt64 wArmed   = sNbioWrReadings.armed;
+        const UInt64 wRmmio   = sNbioWrReadings.hasRmmio;
+        const UInt64 wBefore  = sNbioWrReadings.fbEnBefore;
+        const UInt64 wWrite   = sNbioWrReadings.writeVal;
+        const UInt64 wAfter   = sNbioWrReadings.fbEnAfter;
+        const UInt64 wRegA    = sNbioWrReadings.regAddr;
+        const UInt64 wRegV    = sNbioWrReadings.regValue;
+        const UInt64 wRegE    = sNbioWrReadings.regErr;
+        const UInt64 wBlkA    = sNbioWrReadings.blankAddr;
+        const UInt64 wBlkV    = sNbioWrReadings.blankValue;
+        const UInt64 wBlkE    = sNbioWrReadings.blankErr;
+        const UInt64 wSame    = sNbioWrReadings.same;
+        const UInt64 wPosIdx  = sNbioWrReadings.posIdx;
+        const UInt64 wPosWr   = sNbioWrReadings.posIdxWr;
+        const UInt64 wPosRb   = sNbioWrReadings.posIdxRb;
+        const UInt64 wPosData = sNbioWrReadings.posData;
+        const UInt64 wCount   = sNbioWrReadings.writeCount;
+        const UInt64 wRetries = sNbioWrReadings.retries;
+        const UInt64 wP3Fail  = (sP3P14ReCalled != 0 && sP3P14ReDevId == 0xFFFFULL) ? 1u : 0u;
+        panic("NBIO write re: armed=%llu rmmio=%llu before=%llx wr=%llx after=%llx | reg=%llx val=%llx err=%llu "
+              "| blank=%llx val=%llx err=%llu same=%llu | posIdx=%llu wr=%llx rb=%llx posData=%llx | "
+              "wc=%llu retries=%llu | p3Fail=%llu",
+              wArmed, wRmmio, wBefore, wWrite, wAfter,
+              wRegA, wRegV, wRegE,
+              wBlkA, wBlkV, wBlkE, wSame,
+              wPosIdx, wPosWr, wPosRb, wPosData,
+              wCount, wRetries,
+              wP3Fail);
         // panic 不返回
     }
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
