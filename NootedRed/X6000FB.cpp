@@ -186,6 +186,32 @@ static int    sP3P14ReValid  = 0;
 //  默认零开销：`sNbioWrValid` 只在门控命中时被置 1 ⇒ `wrapHandleCriticalError` 那个 `if` 恒假。
 static fw::NbioFbEnReadings sNbioWrReadings{};
 static UInt64 sNbioWrValid = 0;
+// ─── TtlAsm 探针：TTL 接口对象及其三字段（`-NRedTtlAsm`，默认关）──────────────────────
+//  权威规格 = 技术决策 agent 出具、主 agent 转达（2026-10-03）；本实现逐字照办。
+//  目的：当前 panic 的**唯一可达失败路** = `*(ttl+0x38) == NULL`
+//  （`getRtsInfo` 返回 `0xe00002bc`「TTL Handle is NULL」）。离线已两度给出弱化的负结果，
+//  无法定论"对象/字段归属" ⇒ 改用**一次纯内存读的真机读数**钉死。
+//  取值来源（规格逐字）：`ttl = *(self+0x50) → *(node+0xd8)`。
+//   ⚠️ 取点选择：在 `wrapPpHelperPowerUp` 内用 `self+0x50` 取 node（与既有 P5 三因子
+//     `sP5ReadoutTtl` **逐字同源**），**不**经 `probeSvc("…HWServicesVega")` 另取 ——
+//     因为 panic 发生在 PP helper 链上，此处取得的才是**喂给失败 `getRtsInfo` 的那个对象**；
+//     用 probeSvc 另取会引入"是否同一实例"的未解歧义（G3 的 DU-2）。
+//  四项**纯内存读**（⛔ 零 MMIO、不调 Apple 虚方法、不碰寄存器、无越窗读）：
+//     · vt     = `*(ttl)`（vptr，供离线定名"这个对象到底是什么类"）
+//     · mHttl  = `*(ttl+0x38)` ← **本探针的目标字段**（NULL ⇒ 唯一可达失败路命中）
+//     · pSetPs = `*(ttl+0x5F8)`
+//     · f970   = `*(ttl+0x970)`
+//  ⚠️ 每个解引用前**各自**做 `>= 0xffffff7f80000000` 合法性校验（沿用既有阈值/铁律 6，
+//    与 G3/S1/P14 同一纪律）：非法则置 **0xFF 哨兵且绝不 rank 解引用** ⇒ 防止访问非法内核地址。
+//  ⚠️ 该阈值的**已知局限**（规格亦登记）：`0xffffffff…` 形态仍会**通过**校验；本轮 4 个读点
+//    均为"对象内字段"（非从外部值派生），风险与 R92 同，未致命。
+//  默认零开销：`sTtlAsmValid` 只在门控命中时被置 1 ⇒ panic 侧那个 `if` 恒假。
+static UInt64 sTtlAsmTtl    = 0;         // *(node+0xD8)
+static UInt64 sTtlAsmVt     = 0xFFULL;   // *(ttl)
+static UInt64 sTtlAsmHttl   = 0xFFULL;   // *(ttl+0x38)
+static UInt64 sTtlAsmPSetPs = 0xFFULL;   // *(ttl+0x5F8)
+static UInt64 sTtlAsmF970   = 0xFFULL;   // *(ttl+0x970)
+static int    sTtlAsmValid  = 0;
 // ─── G3 探针：HWServices 插件节点就绪度（`-NRedPluginNode`，默认关）────────────────────
 //  目的（规格 = `tmp/R91规格-G3探针.md`）：分离 G2‴ §3.3 的两种**同形**情形——
 //   (A) HWLibs 插件**未就绪**（`start` 失败） vs (B) 插件**已就绪**但别处失败。
@@ -1556,6 +1582,43 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                static_cast<unsigned>(sNbioWrReadings.posIdxRb), static_cast<unsigned>(sNbioWrReadings.posData),
                static_cast<unsigned>(sNbioWrReadings.writeCount), static_cast<unsigned>(sNbioWrReadings.retries));
     }
+    // ─── TtlAsm 捕获（`-NRedTtlAsm`，默认关；排本函数既有各块**最后**）──────────────────
+    //  权威规格照办；取法/四项读/校验纪律见文件头静态量处的逐条说明。
+    //  **纯内存读**：不读 GPU/SMN 寄存器、不调 Apple 虚方法、不写任何内存。
+    //  ⚠️ 门控值在此（**正常上下文**）取；panic 侧不再调 `checkKernelArgument`。
+    if (checkKernelArgument("-NRedTtlAsm")) {
+        const UInt64 tSelf = reinterpret_cast<UInt64>(self);
+        UInt64       tTtl = 0, tVt = 0xFFULL, tM = 0xFFULL, tP = 0xFFULL, tF = 0xFFULL;
+        auto rd = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+        if (tSelf >= 0xffffff7f80000000ULL) {
+            const UInt64 tNode = rd(tSelf, 0x50);
+            if (tNode >= 0xffffff7f80000000ULL) {
+                tTtl = rd(tNode, 0xD8);      // = `*(self+0x50) → *(node+0xd8)`
+                if (tTtl >= 0xffffff7f80000000ULL) {
+                    tVt = rd(tTtl, 0x000);   // *(ttl)      vptr
+                    tM  = rd(tTtl, 0x38);    // *(ttl+0x38)  ★ 本探针目标字段（m_hTtl）
+                    tP  = rd(tTtl, 0x5F8);   // *(ttl+0x5F8)
+                    tF  = rd(tTtl, 0x970);   // *(ttl+0x970)
+                }
+                // tTtl 非法 ⇒ 四项保持 0xFF 哨兵（**不解引用**）
+            }
+            // tNode 非法 ⇒ tTtl 保持 0、四项保持 0xFF 哨兵
+        }
+        // tSelf 非法 ⇒ 全部保持初值（tTtl = 0、四项 = 0xFF）
+        sTtlAsmTtl    = tTtl;
+        sTtlAsmVt     = tVt;
+        sTtlAsmHttl   = tM;
+        sTtlAsmPSetPs = tP;
+        sTtlAsmF970   = tF;
+        sTtlAsmValid  = 1;
+        SYSLOG("X6000FB", "NRed TtlAsm cap: ttl=%llx vt=%llx mHttl=%llx pSetPs=%llx f970=%llx",
+               static_cast<unsigned long long>(tTtl), static_cast<unsigned long long>(tVt),
+               static_cast<unsigned long long>(tM), static_cast<unsigned long long>(tP),
+               static_cast<unsigned long long>(tF));
+    }
+
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
 }
@@ -2034,6 +2097,11 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //  `checkKernelArgument`（其内部是 Apple `PE_parse_boot_argn`，在崩溃流程中调用
     //  会导致"不自动重启"）。捕获侧（`X5000.cpp` 的 `wrapConfigureDevice`）自行判同一门控。
     const bool wantG3 = checkKernelArgument("-NRedPluginNode");
+    // ★ TtlAsm 探针门控（新，`-NRedTtlAsm`，默认关）：TTL 接口对象四字段读数。
+    //  与 `wantP5`/`wantG3` **同法**在本函数**入口的正常上下文**取值——panic 路径禁调
+    //  `checkKernelArgument`（其内部是 Apple `PE_parse_boot_argn`，崩溃流程中调用会导致"不自动重启"）。
+    //  捕获侧（`wrapPpHelperPowerUp`）自行判同一门控。
+    const bool wantTtlAsm = checkKernelArgument("-NRedTtlAsm");
 
     // ★ PP 后端对象落盘（2026-09-28）：`powerUp` 自身在返回前就 panic，其"调用后读字段"的探针块
     //  永不执行 ⇒ 把读取搬到这里（panic 前的最后出口）。只读内存，不调用任何 Apple 方法。
@@ -2177,6 +2245,22 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         panic("NRed HwSvc node: hwsvc=%llx plugin=%llx ttlFld=%llx cailFld=%llx hwsvcVt=%llx "
               "ttlVt=%llx cailVt=%llx",
               gHwsvc, gPlugin, gTtl, gCail, gHwsvcVt, gTtlVt, gCailVt);
+        // panic 不返回
+    }
+    // ─── ★ TtlAsm 输出（`-NRedTtlAsm`，默认关；排既有四块 panic **最后**，即第五块）──────
+    //  权威规格照办；数据来源 = `wrapPpHelperPowerUp` 内捕获块写入的 `sTtlAsm*`（纯内存）。
+    //  判别段 `NRed TtlAsm:` 与既有全部已投产串**互不为子串**（全库 grep 复核：`TtlAsm` 零命中）。
+    //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
+    //   门控用入口取好的 `wantTtlAsm`（**不在此处**调 `checkKernelArgument`）。
+    //  ⚠️ 排在最后 ⇒ 若同轮还带了前四块的门控，仍会被前序块抢先（`panic()` 不返回）⇒ 须分轮。
+    if (sTtlAsmValid != 0 && wantTtlAsm) {
+        const UInt64 tTtl = sTtlAsmTtl;
+        const UInt64 tVt  = sTtlAsmVt;
+        const UInt64 tM   = sTtlAsmHttl;
+        const UInt64 tP   = sTtlAsmPSetPs;
+        const UInt64 tF   = sTtlAsmF970;
+        panic("NRed TtlAsm: ttl=%llx vt=%llx mHttl=%llx pSetPs=%llx f970=%llx",
+              tTtl, tVt, tM, tP, tF);
         // panic 不返回
     }
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
