@@ -1492,31 +1492,37 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     //     `armed=0` 如实记录（**不得**把"没跑"读成"写入失败"）。
     if (checkKernelArgument("-NRedNbioFbEn")) {
         auto* const nred = &NRed::singleton();
-        fw::NbioFbEnReadings r{};
+        // ⚠️ **逐字段即时落盘**（复审裁定 (ii) 根治）：把**静态量本身**交给探针函数，
+        //   函数每完成一步就写进对应字段 ⇒ **任意步骤之后 panic，已完成读数都已在
+        //   `sNbioWrReadings` 里**（不再依赖"函数返回后再整体赋值"）。
+        //   `armed` / `hasRmmio` 的落地**前移到调用之前**（裁定 ①-2）：
+        //   若函数体内致死，返回值已不可能回传 ⇒ 若把这两个字段放在返回后写，
+        //   会被误读成"探针根本没跑"。故先清零、先置两个启动判据、**先立 `valid`**，
+        //   再进函数填其余字段 ⇒ "已完成部分"与"探针已启动"**同时可辨**。
+        sNbioWrReadings         = fw::NbioFbEnReadings{};
+        sNbioWrReadings.armed    = 1;
+        sNbioWrReadings.hasRmmio = nred->hasRmmio() ? 1u : 0u;
+        sNbioWrValid             = 1;   // ★ 先立标志：此后任何 panic 都带走已完成读数
         if (nred->hasRmmio()) {
             fw::NbioFbEnCallbacks cb{};
             cb.readDw  = &nbioFbEnReadDw;     // dword 口径：窗口内直读（= 本探针的读回基线）
             cb.writeDw = &nbioFbEnWriteDw;    // dword 口径：窗口内直写（★ 本轮唯一的功能寄存器写）
             cb.readExt = &nbioFbEnReadExt;    // 字节口径：越窗间接读（经 PCIE_INDEX2/DATA2）
             cb.ctx     = nullptr;             // 回调无状态（直接转发到 NRed 访问器）
-            r = fw::runNbioFbEnWriteProbe(cb);
+            fw::runNbioFbEnWriteProbe(cb, &sNbioWrReadings);
         }
-        r.armed     = 1;
-        r.hasRmmio  = nred->hasRmmio() ? 1u : 0u;
-        sNbioWrReadings = r;
-        sNbioWrValid    = 1;
         SYSLOG("X6000FB",
                "NBIO write re: armed=%u rmmio=%u before=%x wr=%x after=%x | reg=%x val=%x err=%u "
                "| blank=%x val=%x err=%u same=%u | posIdx=%x wr=%x rb=%x posData=%x | wc=%u retries=%u",
-               static_cast<unsigned>(r.armed), static_cast<unsigned>(r.hasRmmio),
-               static_cast<unsigned>(r.fbEnBefore), static_cast<unsigned>(r.writeVal),
-               static_cast<unsigned>(r.fbEnAfter), static_cast<unsigned>(r.regAddr),
-               static_cast<unsigned>(r.regValue), static_cast<unsigned>(r.regErr),
-               static_cast<unsigned>(r.blankAddr), static_cast<unsigned>(r.blankValue),
-               static_cast<unsigned>(r.blankErr), static_cast<unsigned>(r.same),
-               static_cast<unsigned>(r.posIdx), static_cast<unsigned>(r.posIdxWr),
-               static_cast<unsigned>(r.posIdxRb), static_cast<unsigned>(r.posData),
-               static_cast<unsigned>(r.writeCount), static_cast<unsigned>(r.retries));
+               static_cast<unsigned>(sNbioWrReadings.armed), static_cast<unsigned>(sNbioWrReadings.hasRmmio),
+               static_cast<unsigned>(sNbioWrReadings.fbEnBefore), static_cast<unsigned>(sNbioWrReadings.writeVal),
+               static_cast<unsigned>(sNbioWrReadings.fbEnAfter), static_cast<unsigned>(sNbioWrReadings.regAddr),
+               static_cast<unsigned>(sNbioWrReadings.regValue), static_cast<unsigned>(sNbioWrReadings.regErr),
+               static_cast<unsigned>(sNbioWrReadings.blankAddr), static_cast<unsigned>(sNbioWrReadings.blankValue),
+               static_cast<unsigned>(sNbioWrReadings.blankErr), static_cast<unsigned>(sNbioWrReadings.same),
+               static_cast<unsigned>(sNbioWrReadings.posIdx), static_cast<unsigned>(sNbioWrReadings.posIdxWr),
+               static_cast<unsigned>(sNbioWrReadings.posIdxRb), static_cast<unsigned>(sNbioWrReadings.posData),
+               static_cast<unsigned>(sNbioWrReadings.writeCount), static_cast<unsigned>(sNbioWrReadings.retries));
     }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);

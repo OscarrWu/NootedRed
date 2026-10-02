@@ -165,53 +165,64 @@ inline SmnCallbacks makeSmnCb(const NbioFbEnCallbacks& cb)
 }
 
 // ── 探针本体 ────────────────────────────────────────────────────────────────────
-
-inline NbioFbEnReadings runNbioFbEnWriteProbe(const NbioFbEnCallbacks& cb)
+//
+// ⚠️ **逐字段即时落盘（2026-10-02 加固，按复审裁定 (ii) 根治）**：
+//   本函数**不**在返回时一次性回传结果，而是把 `out` 指向**调用方的持久存储**
+//   （调用点传 `&sNbioWrReadings`），**每一步执行完立即写入对应字段**
+//   ⇒ **任意步骤之后 panic，已完成步骤的读数都已落在 `out` 里**，绝不丢失。
+//   这解决的故障形态：越窗间接读（④-①/④-②）本身致死时，若结果只在函数局部累计，
+//   "写前原值 / 写后读回"这两个**本轮核心判据**会随栈一起消失 ⇒ 机器死了却拿不到结论
+//   ⇒ 违反 RM §4.7 判别性纪律（写入效果不可归因）。
+//
+//   实现要点：**调用方负责把 `*out` 清零**（调用点用 `= {}` 具名对象或静态量自身初值）；
+//   本函数只填字段，不假设初值。除 `writeCount` 在"回调不全"时被改为 0 外，
+//   其余字段一律**只在对应步骤执行后**才被写 ⇒ 未执行的步骤保持调用方给的初值（0）。
+inline void runNbioFbEnWriteProbe(const NbioFbEnCallbacks& cb, NbioFbEnReadings* const out)
 {
+    if (out == nullptr) { return; }
+    // 静态参数先落（与硬件步骤无关，供判读方核对"这轮跑的是什么"）。
+    out->writeVal   = kFbEnEnableValue;
+    out->regAddr    = kFbEnRegAddr;
+    out->blankAddr  = kFbEnBlankAddr;
+    out->regValue   = kSmnProbeNoValue;
+    out->blankValue = kSmnProbeNoValue;
+    out->retries    = kFbEnMaxRetries;
+    out->writeCount = 1;
     // `readDw` / `writeDw` 是**裸指针访问**：调用方必须已确认映射（`hasRmmio()`）。
     //   本函数不做映射判定（那是调用方的职责，判据在调用点记录），故此处只做非空兜底。
-    NbioFbEnReadings out{};
-    out.writeVal   = kFbEnEnableValue;
-    out.regAddr    = kFbEnRegAddr;
-    out.blankAddr  = kFbEnBlankAddr;
-    out.regValue   = kSmnProbeNoValue;
-    out.blankValue = kSmnProbeNoValue;
-    out.retries    = kFbEnMaxRetries;
-    out.writeCount = 1;
     if (cb.readDw == nullptr || cb.writeDw == nullptr || cb.readExt == nullptr) {
-        out.writeCount = 0;   // 回调不全 ⇒ 一个动作都没做（如实记录，绝不留"半轮"）
-        return out;
+        out->writeCount = 0;   // 回调不全 ⇒ 一个动作都没做（如实记录，绝不留"半轮"）
+        return;
     }
 
     // ① 写前读原值（窗口内直读；支持回滚基线 + 一轮定论 U-3「BIOS 是否已使能」）。
-    out.fbEnBefore = cb.readDw(cb.ctx, kFbEnDwordOffset);
+    out->fbEnBefore = cb.readDw(cb.ctx, kFbEnDwordOffset);
 
     // ② ★ 写入（恰好 1 次）：`0x3880 ← 0x3`。
     cb.writeDw(cb.ctx, kFbEnDwordOffset, kFbEnEnableValue);
 
     // ③ 立即写后读回：== 0x3 ⇒ 写已落地；≠ 0x3（含全 1）⇒ 写被硬件拒绝。
-    out.fbEnAfter = cb.readDw(cb.ctx, kFbEnDwordOffset);
+    out->fbEnAfter = cb.readDw(cb.ctx, kFbEnDwordOffset);
 
     // ④-① 真读点（越窗间接读，PSP SOS 存活位）。
     const SmnReadResult reg = SmnIndirectAccess::read(kFbEnRegAddr, makeSmnCb(cb));
-    out.regValue = reg.value;
-    out.regErr   = static_cast<uint32_t>(reg.error);
+    out->regValue = reg.value;
+    out->regErr   = static_cast<uint32_t>(reg.error);
 
     // ④-② 阴性对照（同公式、同通道，偏移 = 0）。
     const SmnReadResult blank = SmnIndirectAccess::read(kFbEnBlankAddr, makeSmnCb(cb));
-    out.blankValue = blank.value;
-    out.blankErr   = static_cast<uint32_t>(blank.error);
+    out->blankValue = blank.value;
+    out->blankErr   = static_cast<uint32_t>(blank.error);
 
     // ④-③ 阳性对照（**窗口内**，A 类）：`PCIE_INDEX2` 写-回读自证 + `PCIE_DATA2` 直读。
-    out.posIdxWr = kFbEnByteOffset;
+    out->posIdxWr = kFbEnByteOffset;
     cb.writeDw(cb.ctx, PCIE_INDEX2, kFbEnByteOffset);
-    out.posIdxRb = cb.readDw(cb.ctx, PCIE_INDEX2);
-    out.posIdx   = (out.posIdxRb == out.posIdxWr) ? 1u : 0u;
-    out.posData  = cb.readDw(cb.ctx, PCIE_DATA2);
+    out->posIdxRb = cb.readDw(cb.ctx, PCIE_INDEX2);
+    out->posIdx   = (out->posIdxRb == out->posIdxWr) ? 1u : 0u;
+    out->posData  = cb.readDw(cb.ctx, PCIE_DATA2);
 
     // 对照守则：真/空读数必须不同，否则说明两次读落在同一字节地址 ⇒ 本轮读数整体不可信。
-    out.same = (out.regValue == out.blankValue) ? 1u : 0u;
-    return out;
+    out->same = (out->regValue == out->blankValue) ? 1u : 0u;
 }
 
 // ── 编译期自检（四要素与窗口判据）────────────────────────────────────────────────
