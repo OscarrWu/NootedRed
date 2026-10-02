@@ -1269,6 +1269,49 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                static_cast<unsigned long long>(bDecl), static_cast<unsigned long long>(bIsData),
                static_cast<unsigned long long>(bLen), static_cast<unsigned long long>(bInRange));
     }
+    // ─── 补救 A′（乙线 R1，2026-10-02）：P5 三因子**文件直写**（门控同 `pp-selftest`）──────
+    //  立论：`docs/子任务/乙线R1-wrapPpHelperPowerUp未执行调查.md` §4.3「补救 A′」。
+    //  事实依据（同报告 §1.5/§2.1）：本月 85 轮 panic 栈有 `wrapPpHelperPowerUp+0x1316` 帧
+    //  ⇒ 本函数**确实执行**；而同 `if` 块的 `pp-selftest`（写文件）169 处归档命中、`pp-in:`
+    //  （SYSLOG/IOLog）全库 0 命中 ⇒ 断裂的是 msgbuf 输出通道，**不是**本函数未执行。
+    //  ⇒ 取 P5 读数必须绕开 IOLog/msgbuf，走**函数的原生文件写**（与 `pp-selftest` 同一形态）。
+    //  位置：入口、**org 调用（下方 `return`）之前** ⇒ 写完才可能 panic，读数必已落盘。
+    //  三因子读法与既有 `-NRedDiagProvider` 块（`:1234-1246`）**逐字同形**：
+    //  `self+0x50` → node；`node+0xd0` → cail；`node+0xd8` → ttl（纯内存读 + 三重内核地址校验）。
+    //  ⛔ 不读/写任何 GPU/SMN 寄存器，不调 Apple 虚方法，不设探针 panic，不碰 msgbuf。
+    //  门控与 `pp-in:`/`pp-selftest`/本 route **同一块**（`-NRedStagePanic6`/`-NRedRegisterHwSvc`/
+    //  `-NRedAccelProbe`/`-NRedAccelLog`）⇒ 不带这些 boot-arg 时本段一次都不执行。
+    if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")
+        || checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")) {
+        const UInt64 aSelf = reinterpret_cast<UInt64>(self);
+        UInt64       aNode = 0, aCail = 0, aTtl = 0;
+        if (aSelf >= 0xffffff7f80000000ULL) {
+            aNode = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(aSelf) + 0x50);
+            if (aNode >= 0xffffff7f80000000ULL) {
+                aCail = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(aNode) + 0xD0);
+                aTtl  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(aNode) + 0xD8);
+            }
+        }
+        char ppIn[160];
+        // 逐字段独立 `%llx`（不用 `%016llx` 宽度填充——本文件既有落盘串一律用朴素 `%llx`）。
+        const int n = snprintf(ppIn, sizeof(ppIn),
+                               "# pre-org call: line\n"
+                               "self=%llx\nnode=%llx\ncail=%llx\nttl=%llx\n",
+                               static_cast<unsigned long long>(aSelf),
+                               static_cast<unsigned long long>(aNode),
+                               static_cast<unsigned long long>(aCail),
+                               static_cast<unsigned long long>(aTtl));
+        // `# pre-org call: line` 为**自证行**：本函数被多次调用时该首行会按轮次递增，
+        //   用它可判定"文件里的读数是第几次调用写下的"（不改任何既有变量/结构）。
+        static unsigned ppInCallNo = 0;
+        if (n > 0) {
+            char path[64];
+            snprintf(path, sizeof(path), "/var/log/NRedPPIn-%03u.txt", ppInCallNo++);
+            // 与 `pp-selftest` 逐字同形：根 FS 未挂载（`rootvnode` 为空）时**绝不**写文件
+            //   ——`writeBufferToFile` 在根 FS 未挂载时会阻塞内核线程（真机手册 §5.1）。
+            if (rootvnode != nullptr) { FileIO::writeBufferToFile(path, ppIn, static_cast<size_t>(n)); }
+        }
+    }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
 }
