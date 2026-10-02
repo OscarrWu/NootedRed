@@ -137,6 +137,13 @@ private:
     static CAILResult smu13PowerUpConfig(void* ctx);
     static CAILResult smu13InternalHwInit(void* ctx);
     static CAILResult smu13NotifyEvent(void* ctx, TTLEventInput* input);
+
+    // 靶点 A（技术决策 agent 逐字规格，2026-10-03）：SWInit 桥接。
+    //  为什么需要：Apple 的 SMU 框架只回调 `smuInternalSWInitField`；而 `smu13InternalHwInit`
+    //  只被写进 `smuInternalHWInitField`（`case 13` 路径），**从不被 SWInit 回调触发**
+    //  ⇒ 本桥接把它接进 SWInit 路径，使 `smu13InternalHwInit` 经 **Apple 框架回调**被真正执行。
+    //  行为：先跑既有 `smuInternalSwInit`（其失败码原样透传），成功后再跑 `smu13InternalHwInit`。
+    static CAILResult smu13SwInitBridge(void* ctx, void* input, AMDSMUSWInitOutput* output);
     static CAILResult smu13FullAsicReset(void* ctx, void* data);
 public:
     // NRed 直读 MMIO 绕过 Apple SMU ctx 的 PMFW 消息发送（Phoenix 上电序列旁路）
