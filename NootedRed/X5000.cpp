@@ -289,6 +289,47 @@ UInt64      gEngTblCalls   = 0;    // 本探针观测到的调用次数
 static constexpr UInt32 kEngTblSlots = 16;
 UInt64      gEngTblSlot[kEngTblSlots] = {0};
 UInt64      gEngTblNonNull = 0;    // 前 N 槽中非 0 的个数（0 ⇒ 全空）
+
+// ─── R1'-P3P14 只读印记探针（`-NRedP3P14Mark`，默认关）────────────────────────────
+//  目的（规格书 = `docs/子任务/乙线R1-只读印记P3P14设计.md`，S1）：
+//    为 D-1（受控写寄存器）建立**写入前基线**与**写入后复读**两个读数点，
+//    使"写入是否真的改变了 P3/P14 的状态"可归因（RM §4.7 判别性纪律）。
+//  两个印记（判定对象与判据逐字见设计稿 §2/§3）：
+//    · **P3** = `AMDHardware::init` 的 `0x72ded cmp $0xffff,%ax`：
+//      `provider->extendedConfigRead16(0x02)`（PCI 配置空间 Device ID）读回 `0xffff` ⇒ 失败。
+//      本印记读**同一个 API、同一个 offset**，另加 `configRead16(0x00)`（Vendor ID）作**阳性对照**
+//      （理由：单点判据无法排除"整条读通道都返回 0xffff"的退化情形 —— 设计稿 §2.3）。
+//    · **P14** = `AMDHardware` 自身的 `+0x30D`（P3 通过位：`0x72df7 movb $0x1` / `0x732c9 movb $0x0`）
+//      ＋ `AMDHWRegisters` 对象的 `+0x44`（P7 成功位：`0x4b8c4b8 movb $0x1,0x44(%r14)`，
+//      且 `0x4b8c400 movb $0x0,0x44(%r14)` 在入口清零 ⇒ **0 是明确初值**）。
+//      `AMDHWRegisters*` 的取值路径：`AMDHardware+0x370`（`0x72ee3 mov %rax,0x370(%r13)`，
+//      紧跟 `call *0x5e8` = `allocateAMDHWRegisters`）—— 本设计稿新解出，见设计稿 §3.2。
+//
+//  读数点（两点，验收 ④）：
+//    · **基线** = 本函数（`wrapConfigureDevice`）的捕获块：取 `this+0x1a38`（= `AMDHardware*`，
+//      第 84 轮 `-NRedEngTblProbe` 已证）读 P14 两字段；P3 另经 `NRed::singleton().getIGPU()`
+//      读配置空间（设备级，与该 this 无关）⇒ **早于 P3/P6/P7/P14 的全部写入**。
+//    · **复读** = `X6000FB.cpp` 的 `wrapPpHelperPowerUp`（全部写入已完成）⇒ 缓存进 `sP3P14Re*`，
+//      由 `wrapHandleCriticalError` 的 panic 文本带出（PP 时刻写文件全灭，第 87/88 轮实证）。
+//
+//  纪律（手册 §9.1 允许形态，逐条）：
+//    · **零写入**：不写内存/寄存器/配置空间；唯一调用是 `IOPCIDevice::extendedConfigRead16`
+//      （IOKit 公开**读取**接口，非 Apple 驱动虚方法）；**不 `call *槽`**；
+//    · 每个解引用前做 `>= 0xffffff7f80000000` 校验（手册 §1.3 铁律 6）；校验失败 ⇒ 字段置
+//      **`0xFF` 哨兵**（而非 0），使"真的是 0"与"没读到"在判读时可机械区分（设计稿 §3.3）；
+//    · 默认关 ⇒ 零副作用（唯一入口是 `checkKernelArgument` 一处门控）。
+UInt64      gP3P14Armed      = 0;      // 门控命中且已捕获（1 = 本探针启用）
+UInt64      gP3P14Base       = 0;      // 捕获时的 kext 基址（= gX5000Slide）
+UInt64      gP3P14Calls      = 0;      // 捕获次数
+UInt64      gP3P14Self       = 0;      // configureDevice 的 this
+UInt64      gP3P14Hw         = 0;      // this+0x1a38（= AMDHardware*；0 表示对象不存在）
+UInt64      gP3P14F30D       = 0;      // AMDHardware+0x30D 低字节（0xFF = 未读到）
+UInt64      gP3P14HwReg      = 0;      // AMDHardware+0x370（= AMDHWRegisters*；0 = 未建立）
+UInt64      gP3P14F44        = 0;      // AMDHWRegisters+0x44 低字节（0xFF = 未读到）
+UInt64      gP3P14Prov       = 0;      // NRed::singleton().getIGPU()（IOPCIDevice*）
+UInt64      gP3P14DevId      = 0;      // extendedConfigRead16(0x02)（Device ID）
+UInt64      gP3P14VendId     = 0;      // extendedConfigRead16(0x00)（Vendor ID；阳性对照）
+UInt64      gP3P14Called     = 0;      // 1 = 配置空间读取确实发起；0 = 未发起（读数无效）
 UInt64      gEngTblReadFail = 0;   // 1 = 因指针不合法而**拒绝**读表（如实记录）
 UInt64 gX5000Slide = 0;
 
@@ -1668,6 +1709,76 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
         } else if (hw != 0) {
             gEngTblReadFail = 1;   // 非 0 但不像内核指针 ⇒ 拒绝读表，如实记录
         }
+    }
+    // ─── R1'-P3P14 只读印记捕获（`-NRedP3P14Mark`，默认关）──────────────────────────
+    //  见文件头全局量处的说明（设计稿 = `docs/子任务/乙线R1-只读印记P3P14设计.md`）。
+    //  **纯只读**：一处 `extendedConfigRead16`（IOKit 公开读接口）+ 四处裸内存字段读；
+    //  不调 Apple 驱动虚方法、不写任何内存/寄存器/配置空间、不设 panic。
+    //  ⚠️ 本块自带的读指针 helper（与 B30/EngTbl 块同一形态；**不得**依赖其它块内的同名 lambda）。
+    //  ⚠️ 读数点：本块是**写入前基线**（早于 P3/P6/P7/P14 的全部写入）；复读点在
+    //     `X6000FB.cpp` 的 `wrapPpHelperPowerUp`（设计稿 §1.3 的时间线）。
+    if (checkKernelArgument("-NRedP3P14Mark")) {
+        gP3P14Armed = 1;
+        gP3P14Base  = gX5000Slide;
+        ++gP3P14Calls;
+        auto rd64 = [](UInt64 base, UInt64 off) -> UInt64 {
+            return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+        };
+        gP3P14Self = s;
+
+        // ① P14：`this+0x1a38` → AMDHardware*（三重校验后才逐级解引用）
+        if (s >= 0xffffff7f80000000ULL) {
+            const UInt64 hw = rd64(s, 0x1A38);
+            gP3P14Hw = hw;
+            if (hw >= 0xffffff7f80000000ULL) {
+                // `+0x30D` = P3 通过位（`movb`，取低字节）
+                gP3P14F30D = static_cast<UInt64>(
+                    *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(hw) + 0x30D));
+                // `+0x370` = AMDHWRegisters*（`0x72ee3 mov %rax,0x370(%r13)`）
+                const UInt64 wreg = rd64(hw, 0x370);
+                gP3P14HwReg = wreg;
+                if (wreg >= 0xffffff7f80000000ULL) {
+                    // `+0x44` = AMDHWRegisters 的内部成功位（入口先清零 ⇒ 0 是明确初值）
+                    gP3P14F44 = static_cast<UInt64>(
+                        *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(wreg) + 0x44));
+                }
+                else {
+                    gP3P14F44 = 0xFFULL;   // 哨兵：未读到（与"真的是 0"区分）
+                }
+            }
+            else {
+                gP3P14F30D = 0xFFULL;      // 哨兵：AMDHardware 不存在，链早退于本函数
+                gP3P14F44  = 0xFFULL;
+            }
+        }
+        else {
+            gP3P14F30D = 0xFFULL;
+            gP3P14F44  = 0xFFULL;
+        }
+
+        // ② P3：经单例持有的 iGPU 读 PCI 配置空间（设备级，与该 this 无关）。
+        //    `getIGPU()` 由 `NRed::processPatcher()` 从 `devInfo->videoBuiltin` 取得，与
+        //    `AMDHardware::init` 的 provider 同源（同一块内置 AMD 显卡的 IOPCIDevice）。
+        //    ⚠️ 指针校验通过才调用；未发起时 `gP3P14Called` 保持 0 ⇒ 判读侧不得把它当"P3 失败"。
+        auto* const igpu = NRed::singleton().getIGPU();
+        if (igpu != nullptr) {
+            const UInt64 igpuU = reinterpret_cast<UInt64>(igpu);
+            if (igpuU >= 0xffffff7f80000000ULL) {
+                gP3P14Prov   = igpuU;
+                gP3P14DevId  = static_cast<UInt64>(igpu->extendedConfigRead16(0x02));   // Device ID
+                gP3P14VendId = static_cast<UInt64>(igpu->extendedConfigRead16(0x00));   // Vendor ID（对照）
+                gP3P14Called = 1;
+            }
+        }
+
+        SYSLOG("X5000",
+               "R1P3P14 base: self=%llx hw=%llx f30d=%llx wreg=%llx f44=%llx prov=%llx devid=%llx vend=%llx "
+               "called=%llu",
+               static_cast<unsigned long long>(gP3P14Self), static_cast<unsigned long long>(gP3P14Hw),
+               static_cast<unsigned long long>(gP3P14F30D), static_cast<unsigned long long>(gP3P14HwReg),
+               static_cast<unsigned long long>(gP3P14F44), static_cast<unsigned long long>(gP3P14Prov),
+               static_cast<unsigned long long>(gP3P14DevId), static_cast<unsigned long long>(gP3P14VendId),
+               static_cast<unsigned long long>(gP3P14Called));
     }
     // ─── R1'-Diag 出口相位（`-NRedDiagProvider`，默认关）──────────────────────────
     //  x 相位 = `FunctionCast(orgConfigureDevice)` **之后**（setupCAIL 之后）：

@@ -112,6 +112,20 @@ extern UInt64      gEngTblCalls;
 extern UInt64      gEngTblNonNull;
 extern UInt64      gEngTblReadFail;
 extern UInt64      gEngTblSlot[];   // 16 槽（X5000.cpp 定义）
+// R1'-P3P14 只读印记探针（`-NRedP3P14Mark`，默认关）——由 X5000.cpp 捕获、此处复读并输出。
+//  纯只读标量：不读 GPU/SMN 寄存器、不调 Apple 虚方法、不写内存（手册 §9.1 允许形态）。
+extern UInt64 gP3P14Armed;
+extern UInt64 gP3P14Base;
+extern UInt64 gP3P14Calls;
+extern UInt64 gP3P14Self;
+extern UInt64 gP3P14Hw;
+extern UInt64 gP3P14F30D;
+extern UInt64 gP3P14HwReg;
+extern UInt64 gP3P14F44;
+extern UInt64 gP3P14Prov;
+extern UInt64 gP3P14DevId;
+extern UInt64 gP3P14VendId;
+extern UInt64 gP3P14Called;
 extern UInt64 gAccelProbeProv;
 extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），用于定位其内部符号
 
@@ -139,6 +153,21 @@ static UInt64 sP5ReadoutNode = 0;
 static UInt64 sP5ReadoutCail = 0;
 static UInt64 sP5ReadoutTtl  = 0;
 static int    sP5ReadoutValid = 0;
+// ─── P3P14 复读通道（乙线 R1，S1；与 P5 的 panic 文本通道**同形但独立**）────────────
+//  立论与 P5 相同：PP 时刻（≈45–50 s）**写文件通道历代零命中**（151 归档）；
+//  故复读值只存**文件静态量**（无落盘、无 msgbuf、无跨 TU 符号），由
+//  `wrapHandleCriticalError` 的 panic 路径拼进 panic 文本。
+//  ⛔ panic 路径**绝不写文件**（手册 §5.1）；实参一律已求值的局部标量（铁律）。
+//  与 `sP5Readout*` **刻意分开**：避免污染既有已投产的 P5 判读链。
+//  默认零开销：`sP3P14ReValid` 只在 `-NRedP3P14Mark` 命中时被置 1 ⇒ 该 `if` 恒假。
+static UInt64 sP3P14ReF30D   = 0;
+static UInt64 sP3P14ReHw     = 0;
+static UInt64 sP3P14ReHwReg  = 0;
+static UInt64 sP3P14ReF44    = 0;
+static UInt64 sP3P14ReDevId  = 0;
+static UInt64 sP3P14ReVendId = 0;
+static UInt64 sP3P14ReCalled = 0;
+static int    sP3P14ReValid  = 0;
 // PP 侧读数（2026-09-28 第 30 轮定稿）：只保留"写日志 + 立即落一拍"两条通道。
 //   为什么不缓存给别的文件捎带：PP 包装函数的实际执行时刻（~34.5 s）**晚于** IP 探针
 //   （26–27 s），捎带机制在时间上根本排不上；而周期拍（每 1 s）的下一拍落在 panic 之后。
@@ -1359,6 +1388,59 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             }
         }
     }
+    // ─── R1'-P3P14 复读点（`-NRedP3P14Mark`，默认关）───────────────────────────────
+    //  设计稿 = `docs/子任务/乙线R1-只读印记P3P14设计.md` §1.3/§2.5/§3.5。
+    //  位置理由：本点位于 `AmdPowerPlayHelper::powerUp` 的**入口**（org 调用之前），
+    //    而 P3/P6/P7/P14 的全部写入都发生在其**之前**（`configureDevice` 内）⇒ 这是**稳态复读**。
+    //  读法与基线点（X5000.cpp 捕获块）**逐字同形**：`this+0x1a38` → AMDHardware* → `+0x30D`/`+0x370` → `+0x44`。
+    //  ⚠️ 注意：本函数的 `self` 是 **PP helper**（与 P5 的 `this` 同源但**不是** AMDHardware）；
+    //     AMDHardware 要从 `this+0x1a38` 取（与既有 `-NRedEngTblProbe` 同一条路径）。
+    //  ⛔ 零写入：不写内存/寄存器/配置空间；`extendedConfigRead16` 是 IOKit 公开**读**接口；
+    //     不调 Apple 驱动虚方法；不设 panic（本块只缓存静态量）。
+    if (checkKernelArgument("-NRedP3P14Mark")) {
+        const UInt64 q = reinterpret_cast<UInt64>(self);
+        UInt64 rF30D = 0xFFULL, rHwReg = 0, rF44 = 0xFFULL, rHw = 0;
+        if (q >= 0xffffff7f80000000ULL) {
+            auto rd64 = [](UInt64 base, UInt64 off) -> UInt64 {
+                return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+            };
+            rHw = rd64(q, 0x1A38);
+            if (rHw >= 0xffffff7f80000000ULL) {
+                rF30D = static_cast<UInt64>(
+                    *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(rHw) + 0x30D));
+                rHwReg = rd64(rHw, 0x370);
+                if (rHwReg >= 0xffffff7f80000000ULL) {
+                    rF44 = static_cast<UInt64>(
+                        *reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(rHwReg) + 0x44));
+                }
+            }
+        }
+        // P3 复读：与基线点同一 API、同一 offset（阳性对照 Vendor ID 一并复读）
+        UInt64 rDevId = 0, rVendId = 0, rCalled = 0;
+        auto* const igpu = NRed::singleton().getIGPU();
+        if (igpu != nullptr) {
+            const UInt64 igpuU = reinterpret_cast<UInt64>(igpu);
+            if (igpuU >= 0xffffff7f80000000ULL) {
+                rDevId   = static_cast<UInt64>(igpu->extendedConfigRead16(0x02));
+                rVendId  = static_cast<UInt64>(igpu->extendedConfigRead16(0x00));
+                rCalled  = 1;
+            }
+        }
+        // 先写数据、**最后**置 `valid` ⇒ panic 侧绝不会读到半写状态（与 `sP5Readout*` 逐字同形；
+        //   `valid` 是 int 的普通读写，不引入任何锁——panic 路径不得加锁）。
+        sP3P14ReHw     = rHw;
+        sP3P14ReF30D   = rF30D;
+        sP3P14ReHwReg  = rHwReg;
+        sP3P14ReF44    = rF44;
+        sP3P14ReDevId  = rDevId;
+        sP3P14ReVendId = rVendId;
+        sP3P14ReCalled = rCalled;
+        sP3P14ReValid  = 1;
+        SYSLOG("X6000FB", "R1P3P14 re: f30d=%llx wreg=%llx f44=%llx devid=%llx vend=%llx called=%llu",
+               static_cast<unsigned long long>(rF30D), static_cast<unsigned long long>(rHwReg),
+               static_cast<unsigned long long>(rF44), static_cast<unsigned long long>(rDevId),
+               static_cast<unsigned long long>(rVendId), static_cast<unsigned long long>(rCalled));
+    }
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
 }
@@ -1870,6 +1952,28 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 p5Ttl  = sP5ReadoutTtl;
         panic("P5 panic readout: self=%llx node=%llx cail=%llx ttl=%llx",
               p5Self, p5Node, p5Cail, p5Ttl);
+        // panic 不返回
+    }
+    // ─── ★ P3P14 复读值的 panic 文本通道（乙线 R1，S1；`-NRedP3P14Mark`）────────────
+    //  数据来源：`wrapPpHelperPowerUp` 的复读块写入的文件静态量 `sP3P14Re*`（纯内存，无落盘）。
+    //  与 `P5 panic readout:` 同形但**独立**（新探针位、新格式串、新静态量）；
+    //  判别段 `P3P14 panic re:` 与 `P5 panic readout:` 的字符不同（`3`≠`5`）⇒ 互不误命中。
+    //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
+    //   门控判定只用文件静态量，**不调 `checkKernelArgument`**（panic 流程中调用会导致"不自动重启"）。
+    //  未启用（`sP3P14ReValid == 0`）⇒ 零输出、**不 panic**（不改变 Apple 的原失败语义）。
+    if (sP3P14ReValid) {
+        const UInt64 rHw     = sP3P14ReHw;
+        const UInt64 rF30D   = sP3P14ReF30D;
+        const UInt64 rHwReg  = sP3P14ReHwReg;
+        const UInt64 rF44    = sP3P14ReF44;
+        const UInt64 rDevId  = sP3P14ReDevId;
+        const UInt64 rVendId = sP3P14ReVendId;
+        const UInt64 rCalled = sP3P14ReCalled;
+        // P3 判据（与 `0x72ded cmp $0xffff,%ax` 同一口径）：DevId == 0xffff ⇒ 配置空间不可访问。
+        // P14 判据：`f30d == 1`（P3 曾走过）且 `f44 == 1`（P7 走通）。
+        const UInt64 p3Fail = (rCalled != 0 && rDevId == 0xFFFFULL) ? 1u : 0u;
+        panic("P3P14 panic re: hw=%llx f30d=%llx wreg=%llx f44=%llx devid=%llx vend=%llx called=%llu p3Fail=%llu",
+              rHw, rF30D, rHwReg, rF44, rDevId, rVendId, rCalled, p3Fail);
         // panic 不返回
     }
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
