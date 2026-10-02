@@ -121,7 +121,9 @@ extern UInt64 gX5000Slide;    // X5000 kext 的 slide（X5000.cpp 记录），�
 extern "C" void *rootvnode __attribute__((weak));
 
 static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（入口写、探针读）
-
+// 补救 A′：`wrapPpHelperPowerUp` 的调用序号（文件静态，不用函数内局部 `static`：
+//   本文件既有风格是文件作用域静态量，且可避免"常量初始化 + 递增"在局部 `static` 上的歧义）。
+static unsigned sPpInCallNo = 0;
 // PP 侧读数（2026-09-28 第 30 轮定稿）：只保留"写日志 + 立即落一拍"两条通道。
 //   为什么不缓存给别的文件捎带：PP 包装函数的实际执行时刻（~34.5 s）**晚于** IP 探针
 //   （26–27 s），捎带机制在时间上根本排不上；而周期拍（每 1 s）的下一拍落在 panic 之后。
@@ -1293,20 +1295,24 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             }
         }
         char ppIn[160];
+        // 调用序号：文件名后缀与自证行**同源**（同一个值、同一时刻取用），二者必然一致。
+        const unsigned ppInCallNo = sPpInCallNo++;
+        // 自证行把序号**格式进正文**（`%u`），不与文件名后缀重复取巧：
+        //   即便归档只取到正文（或文件名被改名/清理），仍能读出"这是本函数第几次调用"。
+        //   措辞刻意避开 `pp-in`/`pp-in:` 字面 —— 否则后续用 `grep pp-in` 复查时会把本文件
+        //   误计入 `pp-in:` 命中，污染「pp-in: 全库 0 命中」这条原始判据。
         // 逐字段独立 `%llx`（不用 `%016llx` 宽度填充——本文件既有落盘串一律用朴素 `%llx`）。
         const int n = snprintf(ppIn, sizeof(ppIn),
-                               "# pre-org call: line\n"
+                               "# pre-org call: %u\n"
                                "self=%llx\nnode=%llx\ncail=%llx\nttl=%llx\n",
+                               ppInCallNo,
                                static_cast<unsigned long long>(aSelf),
                                static_cast<unsigned long long>(aNode),
                                static_cast<unsigned long long>(aCail),
                                static_cast<unsigned long long>(aTtl));
-        // `# pre-org call: line` 为**自证行**：本函数被多次调用时该首行会按轮次递增，
-        //   用它可判定"文件里的读数是第几次调用写下的"（不改任何既有变量/结构）。
-        static unsigned ppInCallNo = 0;
         if (n > 0) {
             char path[64];
-            snprintf(path, sizeof(path), "/var/log/NRedPPIn-%03u.txt", ppInCallNo++);
+            snprintf(path, sizeof(path), "/var/log/NRedPPIn-%03u.txt", ppInCallNo);
             // 与 `pp-selftest` 逐字同形：根 FS 未挂载（`rootvnode` 为空）时**绝不**写文件
             //   ——`writeBufferToFile` 在根 FS 未挂载时会阻塞内核线程（真机手册 §5.1）。
             if (rootvnode != nullptr) { FileIO::writeBufferToFile(path, ppIn, static_cast<size_t>(n)); }
