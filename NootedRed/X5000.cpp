@@ -342,6 +342,8 @@ UInt64      gPluginNodePlugin  = 0;      // G3-a：*(hwsvc + 0xA8)
 UInt64      gPluginNodeTtlFld  = 0xFFULL;   // G3-b：*(plugin + 0xB8)（0xFF = 未读到）
 UInt64      gPluginNodeCailFld = 0xFFULL;   // G3-b：*(plugin + 0xC0)（0xFF = 未读到）
 UInt64      gPluginNodeHwsvcVt = 0;      // G3-c：*(hwsvc)
+UInt64      gPluginNodeTtlVt   = 0xFFULL;   // R92：*(ttlFld)（0xFF = 非法指针未解引用）
+UInt64      gPluginNodeCailVt  = 0xFFULL;   // R92：*(cailFld)（0xFF = 非法指针未解引用）
 int         gPluginNodeValid   = 0;      // 1 = 捕获侧已装填（且门控命中）
 UInt64      gEngTblReadFail = 0;   // 1 = 因指针不合法而**拒绝**读表（如实记录）
 UInt64 gX5000Slide = 0;
@@ -1827,6 +1829,25 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                     reinterpret_cast<const UInt8*>(plugin) + 0xB8);                  // G3-b TTL
                 gPluginNodeCailFld = *reinterpret_cast<const UInt64*>(
                     reinterpret_cast<const UInt8*>(plugin) + 0xC0);                  // G3-b CAIL
+                // ─── R92 增量：两接口对象的 vptr（第 91 轮判读剩余二选一的分辨题）──────
+                //  判读用途：区分 (i) `cailFld` 是合法 CAIL 对象（只是不在 zone map 内）
+                //    vs (ii) 它是**非指针值**（问题在 HWServices `+0x858` 返回路径）。
+                //  判据：`cailVt` 落在 kext/内核镜像区且可离线定名 ⇒ (i)；否则 (ii)。
+                //  ⚠️ **读前必须做指针合法性校验**（沿用铁律 6 的 `>= 0xffffff7f80000000`）：
+                //    非法则置 **0xFF 哨兵且绝不 rank 解引用** ⇒ 防止访问非法内核地址。
+                //    与上方 `plugin` 的校验同一形态、同一阈值。
+                if (gPluginNodeTtlFld >= 0xffffff7f80000000ULL) {
+                    gPluginNodeTtlVt = *reinterpret_cast<const UInt64*>(gPluginNodeTtlFld);
+                }
+                else {
+                    gPluginNodeTtlVt = 0xFFULL;   // 哨兵：非法指针，未解引用
+                }
+                if (gPluginNodeCailFld >= 0xffffff7f80000000ULL) {
+                    gPluginNodeCailVt = *reinterpret_cast<const UInt64*>(gPluginNodeCailFld);
+                }
+                else {
+                    gPluginNodeCailVt = 0xFFULL;  // 哨兵：非法指针，未解引用
+                }
             }
             else {
                 gPluginNodeTtlFld  = 0xFFULL;   // 哨兵：插件节点未找到/非法
@@ -1846,6 +1867,13 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                static_cast<unsigned long long>(gPluginNodeTtlFld),
                static_cast<unsigned long long>(gPluginNodeCailFld),
                static_cast<unsigned long long>(gPluginNodeHwsvcVt));
+        // R92 增量：两接口对象的 vptr（与 panic 串**同值同源**，此行为 PP 时刻前的 L1 交叉核对；
+        //   若 L1 在 configureDevice 窗口内仍有效则同轮可见，否则以 panic 串为准——第 87/88 轮纪律）。
+        SYSLOG("X5000", "R1PluginNode vt: ttlFld=%llx ttlVt=%llx cailFld=%llx cailVt=%llx",
+               static_cast<unsigned long long>(gPluginNodeTtlFld),
+               static_cast<unsigned long long>(gPluginNodeTtlVt),
+               static_cast<unsigned long long>(gPluginNodeCailFld),
+               static_cast<unsigned long long>(gPluginNodeCailVt));
     }
     // ─── R1'-Diag 出口相位（`-NRedDiagProvider`，默认关）──────────────────────────
     //  x 相位 = `FunctionCast(orgConfigureDevice)` **之后**（setupCAIL 之后）：

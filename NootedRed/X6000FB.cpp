@@ -209,6 +209,8 @@ extern UInt64 gPluginNodePlugin;
 extern UInt64 gPluginNodeTtlFld;
 extern UInt64 gPluginNodeCailFld;
 extern UInt64 gPluginNodeHwsvcVt;
+extern UInt64 gPluginNodeTtlVt;    // R92：*(ttlFld)
+extern UInt64 gPluginNodeCailVt;   // R92：*(cailFld)
 extern int    gPluginNodeValid;
 // PP 侧读数（2026-09-28 第 30 轮定稿）：只保留"写日志 + 立即落一拍"两条通道。
 //   为什么不缓存给别的文件捎带：PP 包装函数的实际执行时刻（~34.5 s）**晚于** IP 探针
@@ -2162,13 +2164,19 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //  ⚠️ 排在最后 ⇒ 若同轮还带了 `-NRedP5Readout`/`-NRedP3P14Mark`/`-NRedNbioFbEn`，
     //    仍会被前序块抢先（`panic()` 不返回）⇒ 规格 §4.3 要求**与 NBIO 分轮**。
     if (gPluginNodeValid != 0 && wantG3) {
-        const UInt64 gHwsvc  = gPluginNodeHwsvc;
-        const UInt64 gPlugin = gPluginNodePlugin;
-        const UInt64 gTtl    = gPluginNodeTtlFld;
-        const UInt64 gCail   = gPluginNodeCailFld;
-        const UInt64 gHwsvcVt = gPluginNodeHwsvcVt;
-        panic("NRed HwSvc node: hwsvc=%llx plugin=%llx ttlFld=%llx cailFld=%llx hwsvcVt=%llx",
-              gHwsvc, gPlugin, gTtl, gCail, gHwsvcVt);
+        const UInt64 gHwsvc    = gPluginNodeHwsvc;
+        const UInt64 gPlugin   = gPluginNodePlugin;
+        const UInt64 gTtl      = gPluginNodeTtlFld;
+        const UInt64 gCail     = gPluginNodeCailFld;
+        const UInt64 gHwsvcVt  = gPluginNodeHwsvcVt;
+        const UInt64 gTtlVt    = gPluginNodeTtlVt;     // R92 增量
+        const UInt64 gCailVt   = gPluginNodeCailVt;    // R92 增量
+        // ⚠️ **前缀 `NRed HwSvc node:` 保持不变**（第 91 轮判读方按该前缀检索）；
+        //   R92 只在**其后追加** `ttlVt` / `cailVt` 两字段 ⇒ 旧字段名与顺序逐字未动，
+        //   第 91 轮的读数行仍是本串的**前缀子集**，可逐字段对照（追加不改语义）。
+        panic("NRed HwSvc node: hwsvc=%llx plugin=%llx ttlFld=%llx cailFld=%llx hwsvcVt=%llx "
+              "ttlVt=%llx cailVt=%llx",
+              gHwsvc, gPlugin, gTtl, gCail, gHwsvcVt, gTtlVt, gCailVt);
         // panic 不返回
     }
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
