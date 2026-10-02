@@ -178,7 +178,10 @@ namespace NvMsgBuf {
 	inline int           &stTick()      { static int v = 0;     return v; }
 	inline int           &stTotal()     { static int v = 0;     return v; }   // 累计字节
 	inline int           &stFirstOkSec(){ static int v = -1;    return v; }   // 首次写成功发生在第几秒
+	inline uint64_t      &stUptimeTicks(){ static uint64_t v = 0; return v; } // 本引导 uptime 指纹（首次取到后冻结）
 	inline thread_call_t &stCall()      { static thread_call_t v = nullptr; return v; }
+	// 立即落盘与周期拍的互斥标志（见 `dumpNow`）：`FileIO::writeBufferToFile` 不是为并发设计的。
+	inline bool          &stBusy()      { static bool v = false; return v; }
 
 	// 计算"自上次成功写出之后新增的部分"，填充 gBuf；成功则把本帧终点记入 stPendingEnd。
 	// ⚠️ **不推进 stLastBufx**（推进由 commit 完成）⇒ 写失败时下拍重算同一段（自然重试）。
@@ -216,18 +219,62 @@ namespace NvMsgBuf {
 		return n;
 	}
 
-	// ★ 立即落一拍（2026-09-28 第 30 轮）：供**关键探针在 panic 之前主动调用**。
-	//   动机：PP 包装函数的读数发生在 ~34.5 s，而周期拍（每 1 s）的下一拍落在 panic 之后
-	//   ⇒ 数据进得来 msgbuf、却没有任何一拍照到它（实测 6 轮零产出）。
-	//   本函数**只做"读内存 + 写文件"**：不改状态、不 panic、不阻塞（失败静默），
-	//   与周期拍共用同一套增量指针（`stLastBufx`）。
-	//   ⚠️ 互斥：`FileIO::writeBufferToFile` 不是为并发设计的，而周期拍跑在独立的 thread_call
-	//   线程上。两条路径共用 `stBusy` 标志互斥，避免同时写同一卷（最坏只丢一拍，不影响流程）。
-	inline bool &stBusy() { static bool v = false; return v; }
-
 	// 把刚写成功的这一帧"提交"（推进读起点的指针）
 	inline void commitIncrement() {
 		stLastBufx() = stPendingEnd();
+	}
+
+	// ★★ 引导 uptime 指纹（第 87 轮判读 §4 建议 2 / §5.1，2026-10-02）──────────────
+	//  动机：L2 文件**不是每轮干净快照** —— 一是旧轮文件整份残留（本轮根本没写它），
+	//   二是**写不截断**（判读 §5.1：`NRedObserve-015-019s.txt` 本轮 = 前 9073 B 本轮内容
+	//   + 后 17146 B 与旧轮逐字节相同），二者都会让"旧轮的行"被当成"本轮的证据"。
+	//  ⇒ 每次写文件时，在**正文首行**写一行本轮 uptime 指纹；判读侧据此判属主
+	//   （`[uptime-fingerprint]` 前缀刻意唯一，不会被既有任何串命中）。
+	//  取时源：`mach_absolute_time()`（本文件已用它排下一拍，见 `scheduleNextTick`）
+	//   —— 它就是 8 字节绝对时基计数（连续、单调）；**跳过 0**，因为 XNU panic 文本里的
+	//   `System uptime in nanoseconds:` 同样不可能为 0 ⇒ `0` 可安全用作"尚未取到"哨兵。
+	inline uint64_t bootUptimeTicks() {
+		uint64_t &t = stUptimeTicks();
+		if (t == 0) t = mach_absolute_time();
+		return t;
+	}
+
+	// 指纹行长度：`[uptime-fingerprint] 0x…\n`（前缀 22 B + 16 位十六进制 + 换行 + NUL）。
+	static constexpr size_t kFingerprintMax = 48;
+
+	// 把指纹行写进 `dst`，返回**写入长度（不含 NUL）**。即便调用方传入长度为 0 的正文，
+	//  本函数仍会写满指纹行 ⇒ 0 字节的"占位"用法不成立（也不该成立：落盘即应可判属主）。
+	inline size_t formatFingerprint(char *dst, size_t cap) {
+		if (dst == nullptr || cap < 26) return 0;
+		const int n = snprintf(dst, cap, "[uptime-fingerprint] 0x%llx\n",
+		                       static_cast<unsigned long long>(bootUptimeTicks()));
+		return (n > 0 && static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : 0;
+	}
+
+	// 把"指纹行 + 正文"写进文件（正文前**不再**另起分隔——首行恒为指纹，判读侧只认首行）。
+	//  返回 0 表示成功（与 `FileIO::writeBufferToFile` 同语义）。
+	//  只有 `hn + len >= sizeof(gBuf)` 时才用第二 buffer 拼接，绝不截断正文。
+	inline int writeWithFingerprint(const char *name, const char *body, size_t len) {
+		char head[kFingerprintMax];
+		const size_t hn = formatFingerprint(head, sizeof(head));
+		if (hn == 0) return -1;
+		if (hn + len < sizeof(gBuf)) {
+			__builtin_memcpy(gBuf, head, hn);
+			if (len > 0) __builtin_memcpy(gBuf + hn, body, len);
+			return FileIO::writeBufferToFile(name, gBuf, hn + len);
+		}
+		char merged[2 * kFingerprintMax * 16];   // 1536 B，足够覆盖单帧上限 + 指纹
+		if (hn + len > sizeof(merged)) return -1;
+		__builtin_memcpy(merged, head, hn);
+		if (len > 0) __builtin_memcpy(merged + hn, body, len);
+		return FileIO::writeBufferToFile(name, merged, hn + len);
+	}
+
+	// 排下一拍（提取成小函数，多处复用）
+	inline void scheduleNextTick(int secs) {
+		uint64_t abs = 0;
+		nanoseconds_to_absolutetime(static_cast<uint64_t>(secs) * 1000000000ULL, &abs);
+		thread_call_enter_delayed(stCall(), mach_absolute_time() + abs);
 	}
 
 	// ★ 立即落一拍（2026-09-28 第 30 轮）：供**关键探针在 panic 之前主动调用**。
@@ -246,19 +293,13 @@ namespace NvMsgBuf {
 		if (n > 0) {
 			char name[80];
 			snprintf(name, sizeof(name), "/var/log/NRedNow-%03d.txt", stSeq());
-			if (FileIO::writeBufferToFile(name, gBuf, static_cast<size_t>(n)) == 0) {
+			// 首行写本轮 uptime 指纹（第 87 轮判读 §4 建议 2）：判读侧据此判 L2 文件属主。
+			if (writeWithFingerprint(name, gBuf, static_cast<size_t>(n)) == 0) {
 				commitIncrement();
 				stSeq()++;
 			}
 		}
 		stBusy() = false;
-	}
-
-	// 排下一拍（提取成小函数，多处复用）
-	inline void scheduleNextTick(int secs) {
-		uint64_t abs = 0;
-		nanoseconds_to_absolutetime(static_cast<uint64_t>(secs) * 1000000000ULL, &abs);
-		thread_call_enter_delayed(stCall(), mach_absolute_time() + abs);
 	}
 
 	// 一拍：有增量就写一个文件；无论成败都排下一拍，直到用完 kMaxTicks 或写满 kMaxTotal。
@@ -288,7 +329,8 @@ namespace NvMsgBuf {
 			if (n > 0) {
 				char name[80];
 				snprintf(name, sizeof(name), "/var/log/NRedObserve-%03d-%03ds.txt", stSeq(), sec);
-				const int err = FileIO::writeBufferToFile(name, gBuf, static_cast<size_t>(n));
+				// 首行写本轮 uptime 指纹（第 87 轮判读 §4 建议 2）：判读侧据此判 L2 文件属主。
+				const int err = writeWithFingerprint(name, gBuf, static_cast<size_t>(n));
 				if (err == 0) {
 					commitIncrement();
 					stSeq()++;

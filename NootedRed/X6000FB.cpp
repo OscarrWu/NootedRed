@@ -124,6 +124,21 @@ static UInt64 gPpHelperSelf = 0;   // `AmdPowerPlayHelper::powerUp` 的 this（�
 // 补救 A′：`wrapPpHelperPowerUp` 的调用序号（文件静态，不用函数内局部 `static`：
 //   本文件既有风格是文件作用域静态量，且可避免"常量初始化 + 递增"在局部 `static` 上的歧义）。
 static unsigned sPpInCallNo = 0;
+// ─── P5 panic 文本通道（乙线 R1，2026-10-02，第 87 轮判读 §4 建议 1）──────────────
+//  立论：第 87 轮证明"PP 时刻写文件"通道**历代零命中**（151 个归档、三代实现全灭），
+//   而 panic 文本通道同轮 8/8 分片在场、TTL 错误串完整带出 ⇒ 读数应改走 panic 文本。
+//  路径：`wrapPpHelperPowerUp` 入口读三因子（纯内存读 + 三重内核地址校验）**存文件静态量**
+//   （无落盘、无 msgbuf、无跨 TU 符号）；`wrapHandleCriticalError` 的 panic 路径把它们
+//   **拼进 panic 文本**。⛔ panic 路径**绝不写文件**（手册 §5.1）。
+//  自证前缀 `P5 panic readout:` 刻意与既有 `pp-in`/`R1PDiag`/`R1 probe` 串**互不为子串**
+//   ⇒ 判据检索（`grep -a 'P5 panic readout:' decoded.txt`）不会与任何既有串互相误命中。
+//  默认零开销：`sP5ReadoutValid` 只在 `wrapPpHelperPowerUp` 门控为真时被置 1
+//   ⇒ 不带 boot-arg 时 `wrapHandleCriticalError` 的那个 `if` 恒假，**不产生任何输出**。
+static UInt64 sP5ReadoutSelf = 0;
+static UInt64 sP5ReadoutNode = 0;
+static UInt64 sP5ReadoutCail = 0;
+static UInt64 sP5ReadoutTtl  = 0;
+static int    sP5ReadoutValid = 0;
 // PP 侧读数（2026-09-28 第 30 轮定稿）：只保留"写日志 + 立即落一拍"两条通道。
 //   为什么不缓存给别的文件捎带：PP 包装函数的实际执行时刻（~34.5 s）**晚于** IP 探针
 //   （26–27 s），捎带机制在时间上根本排不上；而周期拍（每 1 s）的下一拍落在 panic 之后。
@@ -1271,18 +1286,19 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                static_cast<unsigned long long>(bDecl), static_cast<unsigned long long>(bIsData),
                static_cast<unsigned long long>(bLen), static_cast<unsigned long long>(bInRange));
     }
-    // ─── 补救 A′（乙线 R1，2026-10-02）：P5 三因子**文件直写**（门控同 `pp-selftest`）──────
-    //  立论：`docs/子任务/乙线R1-wrapPpHelperPowerUp未执行调查.md` §4.3「补救 A′」。
-    //  事实依据（同报告 §1.5/§2.1）：本月 85 轮 panic 栈有 `wrapPpHelperPowerUp+0x1316` 帧
-    //  ⇒ 本函数**确实执行**；而同 `if` 块的 `pp-selftest`（写文件）169 处归档命中、`pp-in:`
-    //  （SYSLOG/IOLog）全库 0 命中 ⇒ 断裂的是 msgbuf 输出通道，**不是**本函数未执行。
-    //  ⇒ 取 P5 读数必须绕开 IOLog/msgbuf，走**函数的原生文件写**（与 `pp-selftest` 同一形态）。
-    //  位置：入口、**org 调用（下方 `return`）之前** ⇒ 写完才可能 panic，读数必已落盘。
-    //  三因子读法与既有 `-NRedDiagProvider` 块（`:1234-1246`）**逐字同形**：
+    // ─── 补救 A′（乙线 R1，2026-10-02）：P5 三因子取数（**panic 文本通道** + 文件写对照）──────
+    //  立论（第 87 轮判读 §4 建议 1）：`docs/子任务/乙线R1-第87轮ppin-a2判读.md` 证明本块
+    //  **确实执行到了写调用**（run232 反汇编 + `+0x14d5` 帧 + 门控运行期证明），但"PP 时刻
+    //  写文件"这条通道**历代零命中**（151 个归档、三代实现全灭）⇒ **载体问题，不是挂点问题**。
+    //  本轮改走**已被证明可靠**的 panic 文本通道：本块只把三因子存进文件静态量
+    //  （`sP5Readout*`），由 `wrapHandleCriticalError` 的 panic 路径拼进 panic 文本。
+    //  三因子读法与既有 `-NRedDiagProvider` 块（`:1251-1261`）**逐字同形**：
     //  `self+0x50` → node；`node+0xd0` → cail；`node+0xd8` → ttl（纯内存读 + 三重内核地址校验）。
     //  ⛔ 不读/写任何 GPU/SMN 寄存器，不调 Apple 虚方法，不设探针 panic，不碰 msgbuf。
+    //  ⛔ panic 路径**绝不写文件**（手册 §5.1）；本块的文件写只在**正常上下文**（org 调用之前）。
     //  门控与 `pp-in:`/`pp-selftest`/本 route **同一块**（`-NRedStagePanic6`/`-NRedRegisterHwSvc`/
-    //  `-NRedAccelProbe`/`-NRedAccelLog`）⇒ 不带这些 boot-arg 时本段一次都不执行。
+    //  `-NRedAccelProbe`/`-NRedAccelLog`）⇒ 不带这些 boot-arg 时本段一次都不执行
+    //  （`sP5ReadoutValid` 恒 0 ⇒ panic 侧那个 `if` 恒假，零输出、零开销）。
     if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")
         || checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")) {
         const UInt64 aSelf = reinterpret_cast<UInt64>(self);
@@ -1294,6 +1310,14 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                 aTtl  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(aNode) + 0xD8);
             }
         }
+        // ★ 载体 1（本轮主通道）：缓存给 `wrapHandleCriticalError` 的 panic 文本用。
+        //   先写数据、**最后**置 `valid` ⇒ panic 侧绝不会读到半写状态
+        //   （即便真出现并发，`valid` 是 int 的普通读写，不引入任何锁；panic 路径不得加锁）。
+        sP5ReadoutSelf  = aSelf;
+        sP5ReadoutNode  = aNode;
+        sP5ReadoutCail  = aCail;
+        sP5ReadoutTtl   = aTtl;
+        sP5ReadoutValid = 1;
         char ppIn[160];
         // 调用序号：文件名后缀与自证行**同源**（同一个值、同一时刻取用），二者必然一致。
         const unsigned ppInCallNo = sPpInCallNo++;
@@ -1311,11 +1335,28 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                                static_cast<unsigned long long>(aCail),
                                static_cast<unsigned long long>(aTtl));
         if (n > 0) {
-            char path[64];
-            snprintf(path, sizeof(path), "/var/log/NRedPPIn-%03u.txt", ppInCallNo);
             // 与 `pp-selftest` 逐字同形：根 FS 未挂载（`rootvnode` 为空）时**绝不**写文件
             //   ——`writeBufferToFile` 在根 FS 未挂载时会阻塞内核线程（真机手册 §5.1）。
-            if (rootvnode != nullptr) { FileIO::writeBufferToFile(path, ppIn, static_cast<size_t>(n)); }
+            if (rootvnode != nullptr) {
+                // ── 0 字节占位（第 87 轮判读 §2.4 (d1)/(d2) 二分）────────────────────
+                //  (d1) `FileIO` 返回错误（create 阶段就失败）；(d2) 写成功但 panic 前未提交。
+                //  判据：占位在/正式不在 ⇒ (d1)；两者都在 ⇒ (d2)；都无 ⇒ 本块未执行
+                //  （第 87 轮已排除"未执行"，故"都无"若再现即为载体外的新因素）。
+                //  ⚠️ 取舍（第 87 轮复审时我曾反对 0 字节占位，本轮按判读新证据**改判为采纳**）：
+                //   反对理由是"多一次 `vnode_open` 可能与正写竞争"，但 **Lilu** 的 `FileIO::writeBufferToFile`
+                //   每次调用都做**完整** `vfs_context_create`/`vnode_open`/`vnode_close`（见
+                //   `Lilu/Sources/kern_file.cpp`），`vnode_open(path, O_CREAT, …)` 对**不存在**的路径
+                //   返回前必已在 namelen 缓存里挂上目标 vnode ⇒ 紧随其后的正式写不可能命中
+                //   "未缓存负项"。剩余风险仅为"多一次短写"，代价远低于让 (d1)/(d2) 继续不可分。
+                //  另：0 字节 + O_TRUNC ⇒ **无旧尾残留**，不受第 87 轮 §5.1 暴露的
+                //   "O_TRUNC 后旧尾部仍在"（判读报告 §7.2 未解出）影响 ⇒ 判据本身干净。
+                char stampPath[64];
+                snprintf(stampPath, sizeof(stampPath), "/var/log/NRedPPInStamp-%03u.txt", ppInCallNo);
+                FileIO::writeBufferToFile(stampPath, ppIn, static_cast<size_t>(0));
+                char path[64];
+                snprintf(path, sizeof(path), "/var/log/NRedPPIn-%03u.txt", ppInCallNo);
+                FileIO::writeBufferToFile(path, ppIn, static_cast<size_t>(n));
+            }
         }
     }
 
@@ -1810,6 +1851,26 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
                                static_cast<unsigned long long>(gMaCalls), static_cast<unsigned long long>(gMaIri),
                                static_cast<unsigned long long>(gMaDummy));
         nredPPTrace(b, n);
+    }
+    // ─── ★ P5 三因子 panic 文本通道（乙线 R1，2026-10-02，第 87 轮判读 §4 建议 1）──────
+    //  动机：第 87 轮证明"PP 时刻写文件"这条取数通道**历代零命中**（151 个归档、三代实现），
+    //   而同轮 panic 文本通道 8/8 分片在场、TTL 错误串完整带出 ⇒ P5 读数改走 panic 文本。
+    //  数据来源：`wrapPpHelperPowerUp` 门控块里存的文件静态量 `sP5Readout*`（纯内存，无落盘）。
+    //  开新探针位：新格式串 + 唯一前缀 `P5 panic readout:`（与 `pp-in`/`R1PDiag`/`R1 probe`/
+    //   `R1B30`/`R1Cwi`/`EngTbl`/`SmnRead1` 等既有串**互不为子串**）⇒ 检索判定不会互相误命中。
+    //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**
+    //   （铁律：禁止在 `panic()` 实参里调 `singleton()` 等可能加锁者 —— 崩溃上下文不得取锁）；
+    //   门控判定只用文件静态量，**不调 `checkKernelArgument`**（它内部是 Apple `PE_parse_boot_argn`，
+    //   在 panic 流程里调用会导致"不自动重启"）。
+    //  未启用（`sP5ReadoutValid == 0`）⇒ 本块零输出、**不 panic**（不改变 Apple 的原失败语义）。
+    if (sP5ReadoutValid) {
+        const UInt64 p5Self = sP5ReadoutSelf;
+        const UInt64 p5Node = sP5ReadoutNode;
+        const UInt64 p5Cail = sP5ReadoutCail;
+        const UInt64 p5Ttl  = sP5ReadoutTtl;
+        panic("P5 panic readout: self=%llx node=%llx cail=%llx ttl=%llx",
+              p5Self, p5Node, p5Cail, p5Ttl);
+        // panic 不返回
     }
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
     //  判据见 X5000.cpp 全局量处的说明（失败出口 ↔ 特征字段的对应表）。
