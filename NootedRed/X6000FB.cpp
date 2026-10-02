@@ -147,7 +147,8 @@ static unsigned sPpInCallNo = 0;
 //   **拼进 panic 文本**。⛔ panic 路径**绝不写文件**（手册 §5.1）。
 //  自证前缀 `P5 panic readout:` 刻意与既有 `pp-in`/`R1PDiag`/`R1 probe` 串**互不为子串**
 //   ⇒ 判据检索（`grep -a 'P5 panic readout:' decoded.txt`）不会与任何既有串互相误命中。
-//  默认零开销：`sP5ReadoutValid` 只在 `wrapPpHelperPowerUp` 门控为真时被置 1
+//  默认零开销（2026-10-02 更新）：`sP5ReadoutValid` 只在**显式带 `-NRedP5Readout`** 时被置 1
+//   （采集侧 `wrapPpHelperPowerUp` 与 panic 侧 `wrapHandleCriticalError` 用**同一门控**）
 //   ⇒ 不带 boot-arg 时 `wrapHandleCriticalError` 的那个 `if` 恒假，**不产生任何输出**。
 static UInt64 sP5ReadoutSelf = 0;
 static UInt64 sP5ReadoutNode = 0;
@@ -1368,7 +1369,8 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     //  ⛔ panic 路径**绝不写文件**（手册 §5.1）；本块的文件写只在**正常上下文**（org 调用之前）。
     //  门控与 `pp-in:`/`pp-selftest`/本 route **同一块**（`-NRedStagePanic6`/`-NRedRegisterHwSvc`/
     //  `-NRedAccelProbe`/`-NRedAccelLog`）⇒ 不带这些 boot-arg 时本段一次都不执行
-    //  （`sP5ReadoutValid` 恒 0 ⇒ panic 侧那个 `if` 恒假，零输出、零开销）。
+    //  （`sP5ReadoutValid` 恒 0 ⇒ panic 侧那个 `if` 恒假，零输出、零开销；
+    //    2026-10-02 起 `sP5ReadoutValid` 另需 `-NRedP5Readout` 门控，见置位处注释）。
     if (checkKernelArgument("-NRedStagePanic6") || checkKernelArgument("-NRedRegisterHwSvc")
         || checkKernelArgument("-NRedAccelProbe") || checkKernelArgument("-NRedAccelLog")) {
         const UInt64 aSelf = reinterpret_cast<UInt64>(self);
@@ -1387,7 +1389,11 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         sP5ReadoutNode  = aNode;
         sP5ReadoutCail  = aCail;
         sP5ReadoutTtl   = aTtl;
-        sP5ReadoutValid = 1;
+        // ★ 采集侧同样加门控（2026-10-02，第 89 轮判读修复）：只在显式带 `-NRedP5Readout` 时置位。
+        //   与 panic 侧 `wantP5` **同源同义**；两处都用 `checkKernelArgument`（此处是**正常上下文**，
+        //   可安全调用；panic 路径绝不调用）。⇒ 不带本门控时 `sP5ReadoutValid` 恒 0，
+        //   panic 侧那个 `if` 恒假 ⇒ P3P14 / NBIO 两块不再被 P5 抢先挡住。
+        if (checkKernelArgument("-NRedP5Readout")) { sP5ReadoutValid = 1; }
         char ppIn[160];
         // 调用序号：文件名后缀与自证行**同源**（同一个值、同一时刻取用），二者必然一致。
         const unsigned ppInCallNo = sPpInCallNo++;
@@ -1987,6 +1993,16 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //   在此时写文件可能阻塞内核线程（手册 §5.1），那正是"机器不自动重启、需现场强关"的
     //   成因之一。读数由 `wrapPpHelperPowerUp` 侧的 `nvMsgBuf` 即时落盘承担（正常上下文）。
     //   ⛔ 更不可在此抢 `panic()`：会绕开 Apple 写重启位的步骤（手册 §7.3 教训 14）。
+    // ★ P5 读数门控（2026-10-02，第 89 轮判读修复）：`-NRedP5Readout`（默认关）。
+    //  为什么需要它：本函数内三个 panic 块依次为 `P5(:2031) → P3P14(:2047) → NBIO(:2071)`，
+    //    而 `panic()` **不返回** ⇒ **先触发者永久挡住后两者**。P5 块原先只看
+    //    `sP5ReadoutValid`，而该标志由 `-NRedAccelLog` 等**固定集常带**的门控间接置位
+    //    ⇒ 第 89 轮真机上 P5 块抢先 panic ⇒ 新增的两条探针**零产出**。
+    //  ⇒ 现在三个块各自有独立门控，可单独启用（P3P14 / NBIO 已有自己的块内门控形态）。
+    //  ⚠️ **必须在本函数入口的正常上下文**调用（与 `:1105-1108` 的 `wantProbe` 同形）：
+    //    `checkKernelArgument` 内部是 Apple `PE_parse_boot_argn`，**panic 路径禁调**
+    //    （见 `:2030` 与 iron rule：在崩溃流程中调用会导致"不自动重启"）。
+    const bool wantP5 = checkKernelArgument("-NRedP5Readout");
 
     // ★ PP 后端对象落盘（2026-09-28）：`powerUp` 自身在返回前就 panic，其"调用后读字段"的探针块
     //  永不执行 ⇒ 把读取搬到这里（panic 前的最后出口）。只读内存，不调用任何 Apple 方法。
@@ -2027,8 +2043,15 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //   （铁律：禁止在 `panic()` 实参里调 `singleton()` 等可能加锁者 —— 崩溃上下文不得取锁）；
     //   门控判定只用文件静态量，**不调 `checkKernelArgument`**（它内部是 Apple `PE_parse_boot_argn`，
     //   在 panic 流程里调用会导致"不自动重启"）。
-    //  未启用（`sP5ReadoutValid == 0`）⇒ 本块零输出、**不 panic**（不改变 Apple 的原失败语义）。
-    if (sP5ReadoutValid) {
+    //  门控（2026-10-02，第 89 轮判读修复）：`sP5ReadoutValid && wantP5` —— **两个条件都要**
+    //    `sP5ReadoutValid` = 采集侧确实装填过；`wantP5` = 本轮显式带了 `-NRedP5Readout`
+    //    （`wantP5` 在本函数入口求值，见上方；**不在此处**调 `checkKernelArgument`）。
+    //    为什么必须加 `wantP5`：本函数三个 panic 块 `P5 → P3P14 → NBIO` 中 `panic()` 不返回
+    //    ⇒ 若 P5 仅凭 `sP5ReadoutValid` 触发（它可由 `-NRedAccelLog` 等**固定集常带**门控间接置位），
+    //    就会**永久挡住**后两块 ⇒ 第 89 轮 P3P14/NBIO 零产出。加门控后三者可独立启用。
+    //  未启用（`sP5ReadoutValid == 0` 或 `wantP5 == false`）⇒ 本块零输出、**不 panic**
+    //    （不改变 Apple 的原失败语义）。
+    if (sP5ReadoutValid && wantP5) {
         const UInt64 p5Self = sP5ReadoutSelf;
         const UInt64 p5Node = sP5ReadoutNode;
         const UInt64 p5Cail = sP5ReadoutCail;
