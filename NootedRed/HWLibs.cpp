@@ -1834,22 +1834,11 @@ CAILResult X5000HWLibs::smu13InternalHwInit(void* const ctx)
     NRED_TRACE("smu13: internal HW init done, ret=0x%X", ret);
     return ret;
 }
-
-// 靶点 A（技术决策 agent 逐字规格，2026-10-03）：SWInit 桥接本体。
-//  作用：Apple 的 SMU 框架只回调 `smuInternalSWInitField`；本函数先跑既有 `smuInternalSwInit`
-//  （**其失败码原样透传**，不掩盖、不改语义），成功后再调用 `smu13InternalHwInit(ctx)`
-//  ⇒ 使 `smu13InternalHwInit` 经 **Apple 框架回调**被真正执行（此前它只在 `smuInternalHWInitField` 里、从不被 SWInit 触发）。
-//  ⛔ 不改 `smuInternalSwInit` 本体、不改任何既有返回值/控制流。
-CAILResult X5000HWLibs::smu13SwInitBridge(void* const ctx, void* const input, AMDSMUSWInitOutput* const output)
-{
-    NRED_TRACE("smu13: SWInit bridge entered");
-    const auto sw = smuInternalSwInit(ctx, input, output);
-    if (sw != kCAILResultOK) { return sw; }
-    return smu13InternalHwInit(ctx);
-}
-
 CAILResult X5000HWLibs::smu13NotifyEvent(void* const ctx, TTLEventInput* const input)
 {
+    // ★ A″-(7)（U-e 判别器）：notify event 入口自证 —— 钉死 `arg` 的来源/取值。
+    //  ⚠️ 现有代码紧接其后即解引用 `input->arg`（下两行）⇒ 本行**不新增**任何空指针风险。
+    NRED_TRACE("smu13: notify event entered, arg=%d", input->arg);
     if (input->arg >= SMU_EVENT_COUNT) {
         NRED_TRACE("Invalid input event to SMU notify event: %d", input->arg);
         return kCAILResultInvalidParameters;
@@ -1874,6 +1863,25 @@ static inline UInt32 khzToMhzCeil(UInt32 khz) { return (khz + 999U) / 1000U; }
 // 消费方靠"轮询超时或读值不匹配"识别失败；此为**静默退化**，调用方须在
 // 调用前检查 smuContext()[见 AMDGFX9DCN314Display 的 applyDisplayClocks]。
 void* X5000HWLibs::smuContext() { return singleton().smuCtxCache; }
+
+// ★ A″（观测专用，技术决策 agent 逐字规格，2026-10-03）：早期 FW-loaded 探测。
+//  ⚠️ **风险如实声明（2026-10-03 合议更正）**：本函数**首次在真机执行**该路径；其内部经
+//   `smu13WaitForFwLoaded` **读 SMN `0x3010028`**（`MP1_Public | smuMP1_FIRMWARE_FLAGS`）
+//   ⇒ 属**红线①（以探针方式读 GPU/SMN 寄存器）**，**须所有者逐次批准**。
+//   ⇒ **不得声称"零挂死风险"**。可陈述的只是：轮询**有界**（2000 ms 上限）、
+//      **不发送任何 PMFW 消息**（只读标志位）、ctx 为空时**直接返回**（不触碰硬件）。
+//      该路径**从未在真机执行过** ⇒ 实际行为**未验证**。
+//  为什么需要：判"PMFW 是否已加载"——`res == 0` ⇒ 已加载；`res != 0` ⇒ **未加载**
+//   （即真正的"外部条件"被证实），这是 H5 归因的关键判别器。
+//  ⛔ 不改控制流、失败不阻断（调用方用 `(void)` 丢弃返回值）。
+CAILResult X5000HWLibs::smu13FwProbeOnly()
+{
+    void* const ctx = singleton().smuCtxCache;
+    if (ctx == nullptr) { return kCAILResultInvalidParameters; }
+    const auto res = smu13WaitForFwLoaded(ctx);
+    NRED_TRACE("smu13: early FW-loaded probe -> 0x%X", res);
+    return res;
+}
 
 UInt32 X5000HWLibs::cgsReadReg(void* const ctx, const UInt32 off, const UInt32 blockInstance, const CAILHWBlock block,
                                const UInt32 regOffBase)
@@ -2365,15 +2373,6 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     else {
         singleton().smuInternalSWInitField(ctx) = reinterpret_cast<void*>(smuInternalSwInit);
         singleton().smuGetUCodeConstsField(ctx) = reinterpret_cast<void*>(smuGetUCodeConsts);
-    }
-
-    // 靶点 A（技术决策 agent 逐字规格，2026-10-03）：把 SWInit 字段改指桥接。
-    //  ⚠️ **落点关键**：必须写在**版本块之后**——上面的版本块（`else` 分支）会**无条件**把
-    //   `smuInternalSWInitField` 重写为 `smuInternalSwInit`；写进 `case 13` 内会被它覆盖 ⇒ 静默失效。
-    //  本行在其**后**执行 ⇒ 最终生效的是桥接（使 `smu13InternalHwInit` 被 SWInit 回调真正执行）。
-    //  ⛔ 不改返回值/控制流；仅多一次字段赋值（且仅 `effectiveMajor == 13` 时）。
-    if (effectiveMajor == 13) {
-        singleton().smuInternalSWInitField(ctx) = reinterpret_cast<void*>(smu13SwInitBridge);
     }
     singleton().smuFullscreenEventField(ctx) = reinterpret_cast<void*>(smuFullScreenEvent);
     singleton().smuInternalSWExitField(ctx)  = reinterpret_cast<void*>(retOK);
