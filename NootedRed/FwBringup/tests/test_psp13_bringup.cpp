@@ -708,6 +708,43 @@ static void testRlcAutoload() {
     printf("PASS (cmd_id=0x21, payload all-zero, wait ok, timeout -1)\n");
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 测试 12：D3 时序回归 —— fence 等待必须是"轮数×80µs"而非忙等
+//   背景（T6 D3）：Linux psp_cmd_submit_buf 每轮 usleep_range(60,100)
+//   （amdgpu_psp.c:756），轮数上限 psp_timeout=20000（:292/:746）⇒ 预算 1.2-2.0s。
+//   本次修复把 kFencePollUs=80µs 的真实睡眠经 RegSink::delayMicroseconds 转发；
+//   真机侧 RegSinkKernel 必须把该回调接到 IODelay/udelay，否则退回忙等 ⇒ 复位。
+// ════════════════════════════════════════════════════════════════════
+struct SleepAccountingSink final : public display::RegSink {
+    uint64_t slept_us = 0;
+    display::RegValue read(display::RegAddr) override { return 0; }
+    void write(display::RegAddr, display::RegValue) override {}
+    void delayMicroseconds(uint32_t us) override { slept_us += us; }
+};
+
+static void testFenceWaitD3Timing() {
+    printf("[test 12] D3 fence-wait timing (rounds x 80us, not busy-wait)... ");
+    SleepAccountingSink sink;
+    uint32_t fence = 0;  // 永不等于 index=7 ⇒ 走满预算
+    RingState rs;
+    uint8_t ring[kRingSizeBytes] = {0};
+    uint8_t cmd[kCmdBufSize]     = {0};
+    fw::ringInit(&rs, ring, cmd, &fence);
+
+    const int ret = fw::ringWaitForFence(&rs, sink, 7);
+    assert(ret == -1);
+
+    // 轮数 × 每轮 80µs，总预算必须落在 Linux 的 1.2-2.0s 窗口内
+    assert(sink.slept_us == static_cast<uint64_t>(kFenceTimeout) * kFencePollUs);
+    assert(sink.slept_us >= 20000ull * 60ull);
+    assert(sink.slept_us <= 20000ull * 100ull);
+    // 不允许忙等：若每轮延时被压成 0，slept_us 会为 0（正是 D3 的原缺陷）
+    assert(sink.slept_us > 0);
+
+    printf("PASS (20k x 80us = %lluus)\n",
+           static_cast<unsigned long long>(sink.slept_us));
+}
+
 int main() {
     testNormalPath();
     testBlTimeout();
@@ -720,6 +757,7 @@ int main() {
     testTaAsdParse();
     testLoadAsdFrame();
     testRlcAutoload();
+    testFenceWaitD3Timing();
     printf("\n所有 PSP13 Bringup 测试通过。\n");
     return 0;
 }

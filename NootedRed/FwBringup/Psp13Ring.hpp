@@ -75,9 +75,25 @@ constexpr uint32_t kRegPollUs     = 1000000;
 // Bootloader 等待重试次数（psp_v13_0_4.c:78-87，10 次）
 constexpr uint32_t kBlRetryMax    = 10;
 
-// 环命令响应 fence 轮询超时：次数对齐 Linux psp_timeout = 20000（amdgpu_psp.c:292/726-758）；
-// 每轮延时 80µs（Linux usleep_range(60,100) 中值，见 ringWaitForFence；T6 D3 修正）
-constexpr uint32_t kFenceTimeout  = 20000;
+// ── fence 等待时序（T6 D3）─────────────────────────────────────────────
+// Linux `psp_cmd_submit_buf`（amdgpu_psp.c:726-758）：
+//     timeout = psp->adev->psp_timeout;              // 20000（amdgpu_psp.c:292）
+//     while (*fence_buf != index) {
+//         if (--timeout == 0) break;                 // ← 每轮**减 1**，即轮数上限 20000
+//         usleep_range(60, 100);                     // ← 每轮睡 60-100µs（取中值 80µs）
+//     }
+// 故 Linux 的真实时间预算 = 20000 × [60,100]µs = [1.2s, 2.0s]。
+// ⚠️ D3：若把 kFenceTimeout 轮写成 **忙等**（或让 sink 的延时落空），20000 轮会在
+//    微秒级耗尽 ⇒ PSP 尚未写回 fence 就假超时。下面两条 static_assert 把"每轮必须
+//    真睡 60-100µs、且总预算落在 Linux 窗口内"钉在编译期。
+constexpr uint32_t kFenceTimeout  = 20000;  // 轮数（= Linux psp_timeout）
+constexpr uint32_t kFencePollUs   = 80;     // 每轮延时（usleep_range(60,100) 中值）
+
+static_assert(kFencePollUs >= 60 && kFencePollUs <= 100,
+              "D3：fence 每轮延时必须落在 Linux usleep_range(60,100) 区间内");
+static_assert(kFenceTimeout * kFencePollUs >= 20000u * 60u &&
+              kFenceTimeout * kFencePollUs <= 20000u * 100u,
+              "D3：fence 等待总预算必须落在 Linux 的 1.2s-2.0s 实时窗口内");
 
 /// 固件拷贝最大大小（PSP_1_MEG = 0x100000, amdgpu_psp.h:39）
 constexpr uint32_t kFwCopyMax     = 0x100000;
@@ -243,19 +259,25 @@ inline int ringSubmitFrame(RingState* rs,
     return 0;
 }
 
-/// 等待 fence 完成（轮询 fence 缓冲，等 Linux psp_cmd_submit_buf L745-758）
-/// ⚠️ D3（T6 修正）：Linux 每轮 `usleep_range(60, 100)`（amdgpu_psp.c:756），
-///    预算 20000×~80µs ≈ 1.2-2s 实时；原实现 20000 次忙等会在真机上微秒级耗尽 ⇒ 必然假超时。
-///    现取中值 delayMicroseconds(80)/轮，次数保持 20000。
-///    HDP invalidate 由调用方负责（Linux 每轮 invalidate_hdp，amdgpu_psp.c:755；
-///    RegSink 无对应原语，见 T5 报告 §3.5）。
+/// 等待 fence 完成（轮询 fence 缓冲，等 Linux psp_cmd_submit_buf amdgpu_psp.c:744-758）
+///
+/// ⚠️ D3（T6）：Linux 轮数上限 `psp_timeout = 20000`（amdgpu_psp.c:292/746-747），
+///    每轮 `usleep_range(60, 100)`（amdgpu_psp.c:756）⇒ 真实预算 1.2-2.0s；
+///    原实现 20000 次**忙等**在真机上微秒级耗尽 ⇒ fence 尚未写回就假超时。
+///    本实现每轮经 sink 睡 kFencePollUs（80µs，区间中值），轮数保持 kFenceTimeout；
+///    **延时必须真落**（真机由 RegSinkKernel 转发 IODelay/udelay），
+///    该语义已由上方两条 static_assert 在编译期锁死。
+///    轮次序同 Linux：**先查 fence、再睡眠**（fence 已满足时零延时）。
+///    HDP invalidate（Linux amdgpu_psp.c:744/755）不在本函数内做：轮询对象是普通
+///    内存（fence 缓冲），本项目无 RegSink 级 HDP 原语（T5 报告 §3.5），
+///    读侧一致性由调用方保证。
 /// @return 0 成功，-1 超时
 inline int ringWaitForFence(const RingState* rs,
                             display::RegSink& sink,
                             uint32_t index) {
     for (uint32_t t = kFenceTimeout; t > 0; --t) {
         if (*rs->fence_buf == index) return 0;
-        sink.delayMicroseconds(80);
+        sink.delayMicroseconds(kFencePollUs);
     }
     return -1;
 }

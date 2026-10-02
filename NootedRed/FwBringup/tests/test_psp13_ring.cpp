@@ -35,7 +35,10 @@ struct MockSink final : public RegSink {
     struct ReadStub { RegAddr addr; RegValue value; };
     std::vector<ReadStub> stubs;
 
-    void reset() { ops.clear(); stubs.clear(); }
+    // 累计"真实睡眠"的微秒数（T6 D3 判据：每轮必须真睡，不得忙等）
+    uint64_t slept_us  = 0;
+
+    void reset() { ops.clear(); stubs.clear(); slept_us = 0; }
 
     void addStub(RegAddr a, RegValue v) { stubs.push_back({a, v}); }
 
@@ -53,9 +56,11 @@ struct MockSink final : public RegSink {
         ops.push_back({Write, addr, val});
     }
 
-    void delayMicroseconds(uint32_t) override {
-        ops.push_back({Delay, 0, 0});
+    void delayMicroseconds(uint32_t us) override {
+        ops.push_back({Delay, 0, us});
+        slept_us += us;
     }
+
 };
 
 // ── 静态环缓冲（固定大小，无动态分配） ──
@@ -120,11 +125,16 @@ static void testNormalSubmit() {
     ret = ringWaitForFence(&s_rs, sink, 1);
     assert(ret == 0);
 
+    // ★ D3 断言：fence 已满足 ⇒ 先查后睡，零延时（等 Linux while 结构，不先睡）
+    assert(sink.slept_us == 0);
+
     printf("PASS\n");
 }
 
 // ════════════════════════════════════════════════════════════════════
-// 测试 2：超时路径 —— fence 永不满足 ⇒ 必须返回失败且不死循环
+// 测试 2：超时路径 + D3 延时步进
+//   fence 永不满足 ⇒ 必须返回失败且不死循环；同时每轮必须**真睡** kFencePollUs，
+//   总睡眠落在 Linux `20000 × [60,100]µs` 的实时窗口内（否则真机假超时，D3）。
 // ════════════════════════════════════════════════════════════════════
 static void testFenceTimeout() {
     printf("[test 2] Fence timeout... ");
@@ -132,12 +142,29 @@ static void testFenceTimeout() {
     resetStaticBufs();
 
     // fence 永不置为 42
-    // ringWaitForFence 有 kFenceTimeout 上限，不会死循环
+    // ringWaitForFence 有 kFenceTimeout 轮上限，不会死循环
     int ret = ringWaitForFence(&s_rs, sink, 42);
     assert(ret == -1); // 必须返回超时
 
-    printf("PASS (timeout=%d iterations)\n", kFenceTimeout);
+    // ★ D3 断言①：轮数 = kFenceTimeout，每轮恰好一次延时
+    uint32_t delays = 0;
+    for (auto& op : sink.ops) {
+        if (op.kind == MockSink::Delay) {
+            ++delays;
+            assert(op.value == kFencePollUs);  // 每轮 80µs，不得为 0（忙等）
+        }
+    }
+    assert(delays == kFenceTimeout);
+
+    // ★ D3 断言②：总睡眠 = 20000 × 80µs = 1.6s，落在 Linux 的 1.2-2.0s 窗口内
+    assert(sink.slept_us == static_cast<uint64_t>(kFenceTimeout) * kFencePollUs);
+    assert(sink.slept_us >= 20000ull * 60ull);
+    assert(sink.slept_us <= 20000ull * 100ull);
+
+    printf("PASS (rounds=%u, slept=%lluus)\n",
+           delays, static_cast<unsigned long long>(sink.slept_us));
 }
+
 
 // ════════════════════════════════════════════════════════════════════
 // 测试 3：帧构造 —— cmdBufCopy + cmdBufGet 验证
