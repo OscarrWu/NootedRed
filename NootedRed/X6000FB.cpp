@@ -186,6 +186,30 @@ static int    sP3P14ReValid  = 0;
 //  默认零开销：`sNbioWrValid` 只在门控命中时被置 1 ⇒ `wrapHandleCriticalError` 那个 `if` 恒假。
 static fw::NbioFbEnReadings sNbioWrReadings{};
 static UInt64 sNbioWrValid = 0;
+// ─── G3 探针：HWServices 插件节点就绪度（`-NRedPluginNode`，默认关）────────────────────
+//  目的（规格 = `tmp/R91规格-G3探针.md`）：分离 G2‴ §3.3 的两种**同形**情形——
+//   (A) HWLibs 插件**未就绪**（`start` 失败） vs (B) 插件**已就绪**但别处失败。
+//  三项**纯内存读**（⛔ 零 MMIO、不调 Apple 虚方法、不碰寄存器、无越窗读）：
+//   · G3-a 插件节点   = `*(hwsvc + 0xA8)`（`X5000HWServices` `createTtlInterface 0x1b9c`
+//                        `movq 168(%rax),%rax`；168 = 0xA8）——非 0 ⇒ 插件节点已被找到。
+//   · G3-b 插件接口字段 = `*(plugin + 0xB8)`（TTL）/ `*(plugin + 0xC0)`（CAIL）
+//                        （`HWLibs::start` 内 `movq %rcx,184(%rax)` / `movq %rcx,192(%rax)`）。
+//     ★ **本探针的关键判据**：`(plugin+0xB8)≠0 ∧ (plugin+0xC0)≠0` ⇔ `start` **未走失败分支**
+//       ⇒ **直接代理"start 是否成功"，无需 hook `start`**（⇒ 绕开规格 DU-1 的路由风险）。
+//   · G3-c 实例指纹   = `*(hwsvc)`（HWServices 实例的 vptr；仅作"确为同一实例"的比对锚点）。
+//  ⚠️ 门控 `-NRedPluginNode`：**全库唯一**（已查重）；刻意**不**用 `-NRedHwSvcNode`
+//    —— 它与既有的 `-NRedRegisterHwSvc`（含义完全不同：补注册 HWServices）仅差中段，极易混用。
+//  ⚠️ 落地位置：捕获在 `X5000.cpp` 的 `wrapConfigureDevice`（与 `-NRedP3P14Mark` 的 base 块同处）；
+//    **panic 出口在下方、排在 P5/P3P14/NBIO 三块之后**（`panic()` 不返回 ⇒ 否则被抢先，第 89 轮教训）。
+//  ⚠️ 门控值在 `wrapHandleCriticalError` **入口**取（`wantG3`），**不在 panic 路径调** `checkKernelArgument`。
+//  变量定义在 `X5000.cpp`（与 `gP3P14*` 同处）⇒ 此处用 extern 引用。
+extern UInt64 gPluginNodeSelf;
+extern UInt64 gPluginNodeHwsvc;
+extern UInt64 gPluginNodePlugin;
+extern UInt64 gPluginNodeTtlFld;
+extern UInt64 gPluginNodeCailFld;
+extern UInt64 gPluginNodeHwsvcVt;
+extern int    gPluginNodeValid;
 // PP 侧读数（2026-09-28 第 30 轮定稿）：只保留"写日志 + 立即落一拍"两条通道。
 //   为什么不缓存给别的文件捎带：PP 包装函数的实际执行时刻（~34.5 s）**晚于** IP 探针
 //   （26–27 s），捎带机制在时间上根本排不上；而周期拍（每 1 s）的下一拍落在 panic 之后。
@@ -2003,6 +2027,11 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //    `checkKernelArgument` 内部是 Apple `PE_parse_boot_argn`，**panic 路径禁调**
     //    （见 `:2030` 与 iron rule：在崩溃流程中调用会导致"不自动重启"）。
     const bool wantP5 = checkKernelArgument("-NRedP5Readout");
+    // ★ G3 探针门控（新，`-NRedPluginNode`，默认关）：HWServices 插件节点就绪度。
+    //  与 `wantP5` **同法**在本函数**入口的正常上下文**取值——panic 路径禁调
+    //  `checkKernelArgument`（其内部是 Apple `PE_parse_boot_argn`，在崩溃流程中调用
+    //  会导致"不自动重启"）。捕获侧（`X5000.cpp` 的 `wrapConfigureDevice`）自行判同一门控。
+    const bool wantG3 = checkKernelArgument("-NRedPluginNode");
 
     // ★ PP 后端对象落盘（2026-09-28）：`powerUp` 自身在返回前就 panic，其"调用后读字段"的探针块
     //  永不执行 ⇒ 把读取搬到这里（panic 前的最后出口）。只读内存，不调用任何 Apple 方法。
@@ -2120,6 +2149,26 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
               wPosIdx, wPosWr, wPosRb, wPosData,
               wCount, wRetries,
               wP3Fail);
+        // panic 不返回
+    }
+    // ─── ★ G3 探针的输出（`-NRedPluginNode`，默认关；排在 P5/P3P14/NBIO 三块**之后**）────
+    //  规格 = `tmp/R91规格-G3探针.md`；判据与偏移见上方 extern 处的说明。
+    //  数据来源：`X5000.cpp` 的 `wrapConfigureDevice` 捕获块写入的 `gPluginNode*`（纯内存）。
+    //  判别段 `NRed HwSvc node:` 与既有全部已投产串**互不为子串**（已全库 grep 复核：
+    //   `NRed HwSvc`/`HwSvc node` 零命中；与 `P5 panic readout:`/`P3P14 panic re:`/
+    //   `NBIO write re:`/`R1PDiag`/`R1 probe`/`R1P3P14`/`pp-in`/`pp-ttl`/`SmnRead1`/`EngTbl` 均不互相包含）。
+    //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
+    //   门控用入口取好的 `wantG3`（**不在此处**调 `checkKernelArgument`）。
+    //  ⚠️ 排在最后 ⇒ 若同轮还带了 `-NRedP5Readout`/`-NRedP3P14Mark`/`-NRedNbioFbEn`，
+    //    仍会被前序块抢先（`panic()` 不返回）⇒ 规格 §4.3 要求**与 NBIO 分轮**。
+    if (gPluginNodeValid != 0 && wantG3) {
+        const UInt64 gHwsvc  = gPluginNodeHwsvc;
+        const UInt64 gPlugin = gPluginNodePlugin;
+        const UInt64 gTtl    = gPluginNodeTtlFld;
+        const UInt64 gCail   = gPluginNodeCailFld;
+        const UInt64 gHwsvcVt = gPluginNodeHwsvcVt;
+        panic("NRed HwSvc node: hwsvc=%llx plugin=%llx ttlFld=%llx cailFld=%llx hwsvcVt=%llx",
+              gHwsvc, gPlugin, gTtl, gCail, gHwsvcVt);
         // panic 不返回
     }
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────

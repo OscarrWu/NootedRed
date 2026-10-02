@@ -330,6 +330,19 @@ UInt64      gP3P14Prov       = 0;      // NRed::singleton().getIGPU()（IOPCIDev
 UInt64      gP3P14DevId      = 0;      // extendedConfigRead16(0x02)（Device ID）
 UInt64      gP3P14VendId     = 0;      // extendedConfigRead16(0x00)（Vendor ID；阳性对照）
 UInt64      gP3P14Called     = 0;      // 1 = 配置空间读取确实发起；0 = 未发起（读数无效）
+
+// ─── G3 探针（`-NRedPluginNode`，默认关）：HWServices 插件节点就绪度 ────────────────
+//  规格 = `tmp/R91规格-G3探针.md`。捕获点在 `wrapConfigureDevice`（本文件），
+//  panic 输出点在 `X6000FB.cpp` 的 `wrapHandleCriticalError`（**排在三块 panic 之后**）。
+//  全部为纯内存标量（+ 一次 IOKit 只读匹配）：不读 GPU/SMN 寄存器、不调 Apple 虚方法、不写内存。
+//  判据与偏移来源见 `X6000FB.cpp` 侧同名静态量处的逐条说明。
+UInt64      gPluginNodeSelf    = 0;      // 捕获时用的 X5000 侧 this（仅自证）
+UInt64      gPluginNodeHwsvc   = 0;      // G3-a 输入：HWServices 实例
+UInt64      gPluginNodePlugin  = 0;      // G3-a：*(hwsvc + 0xA8)
+UInt64      gPluginNodeTtlFld  = 0xFFULL;   // G3-b：*(plugin + 0xB8)（0xFF = 未读到）
+UInt64      gPluginNodeCailFld = 0xFFULL;   // G3-b：*(plugin + 0xC0)（0xFF = 未读到）
+UInt64      gPluginNodeHwsvcVt = 0;      // G3-c：*(hwsvc)
+int         gPluginNodeValid   = 0;      // 1 = 捕获侧已装填（且门控命中）
 UInt64      gEngTblReadFail = 0;   // 1 = 因指针不合法而**拒绝**读表（如实记录）
 UInt64 gX5000Slide = 0;
 
@@ -1779,6 +1792,60 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
                static_cast<unsigned long long>(gP3P14F44), static_cast<unsigned long long>(gP3P14Prov),
                static_cast<unsigned long long>(gP3P14DevId), static_cast<unsigned long long>(gP3P14VendId),
                static_cast<unsigned long long>(gP3P14Called));
+    }
+    // ─── G3 捕获：HWServices 插件节点就绪度（`-NRedPluginNode`，默认关）────────────────
+    //  规格 = `tmp/R91规格-G3探针.md`；判据与偏移来源见 `X6000FB.cpp` 静态量处的说明。
+    //  **纯内存读**（+ 一次 IOKit 只读匹配）：零 MMIO、不调 Apple 虚方法、不写任何内存。
+    //  每级解引用前做 `>= 0xffffff7f80000000` 校验；校验不过 ⇒ 字段置 **0xFF 哨兵**
+    //   （使"真的是 0"与"没读到"在判读时可机械区分，沿用 S1/P14 的同类纪律）。
+    //  ⚠️ 门控值在此（**正常上下文**）取；`wrapHandleCriticalError` 侧**不再**调
+    //   `checkKernelArgument`（panic 路径禁调，既有铁律）。
+    if (checkKernelArgument("-NRedPluginNode")) {
+        auto probeSvc = [](const char* const cls) -> UInt64 {
+            auto*  m = IOService::serviceMatching(cls);
+            UInt64 r = 0;
+            if (m != nullptr) {
+                auto* svc = IOService::copyMatchingService(m);
+                m->release();
+                if (svc != nullptr) {
+                    r = reinterpret_cast<UInt64>(svc);
+                    svc->release();
+                }
+            }
+            return r;
+        };
+        gPluginNodeSelf = s;
+        const UInt64 hwsvc = probeSvc("AMDRadeonX5000_AMDRadeonHWServicesVega");
+        gPluginNodeHwsvc = hwsvc;
+        if (hwsvc >= 0xffffff7f80000000ULL) {
+            gPluginNodeHwsvcVt = *reinterpret_cast<const UInt64*>(hwsvc);            // G3-c
+            const UInt64 plugin = *reinterpret_cast<const UInt64*>(
+                reinterpret_cast<const UInt8*>(hwsvc) + 0xA8);                       // G3-a
+            gPluginNodePlugin = plugin;
+            if (plugin >= 0xffffff7f80000000ULL) {
+                gPluginNodeTtlFld  = *reinterpret_cast<const UInt64*>(
+                    reinterpret_cast<const UInt8*>(plugin) + 0xB8);                  // G3-b TTL
+                gPluginNodeCailFld = *reinterpret_cast<const UInt64*>(
+                    reinterpret_cast<const UInt8*>(plugin) + 0xC0);                  // G3-b CAIL
+            }
+            else {
+                gPluginNodeTtlFld  = 0xFFULL;   // 哨兵：插件节点未找到/非法
+                gPluginNodeCailFld = 0xFFULL;
+            }
+        }
+        else {
+            gPluginNodePlugin  = 0;
+            gPluginNodeTtlFld  = 0xFFULL;
+            gPluginNodeCailFld = 0xFFULL;
+        }
+        gPluginNodeValid = 1;
+        SYSLOG("X5000", "R1PluginNode cap: self=%llx hwsvc=%llx plugin=%llx ttlFld=%llx cailFld=%llx hwsvcVt=%llx",
+               static_cast<unsigned long long>(gPluginNodeSelf),
+               static_cast<unsigned long long>(gPluginNodeHwsvc),
+               static_cast<unsigned long long>(gPluginNodePlugin),
+               static_cast<unsigned long long>(gPluginNodeTtlFld),
+               static_cast<unsigned long long>(gPluginNodeCailFld),
+               static_cast<unsigned long long>(gPluginNodeHwsvcVt));
     }
     // ─── R1'-Diag 出口相位（`-NRedDiagProvider`，默认关）──────────────────────────
     //  x 相位 = `FunctionCast(orgConfigureDevice)` **之后**（setupCAIL 之后）：
