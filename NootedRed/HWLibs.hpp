@@ -148,10 +148,6 @@ public:
     // 分配物理连续 256B 缓冲，通知 SMU 驱动表真实 DRAM 地址（0x0D/0x0E）并 Transfer（0x10, TABLE_SMU_METRICS=7）。
     // 缓冲存入 smu13MetricsBuffer 持有，不释放。public：供 X6000FB::wrapControllerPowerUp 调用。
     static CAILResult smu13SetupDriverTableAndTransfer();
-
-    // ★ A″（观测专用）：早期 FW-loaded 探测——有界(2000ms)、不发任何 PMFW 消息。
-    //  public：供 `X6000FB::wrapControllerPowerUp` 在**主序列之前**调用（该函数 100% 被调用）。
-    static CAILResult smu13FwProbeOnly();
 private:
     static CAILResult wrapSmu90SendMessageWithParameter(void* ctx, UInt32 message, UInt32 param);
     static CAILResult smuInternalHwExit(void* ctx);

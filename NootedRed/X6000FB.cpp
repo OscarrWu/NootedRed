@@ -1907,12 +1907,6 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
     auto  send     = (m_flags & 2) == 0;
     m_flags       |= 4;    // All framebuffers enabled
 
-    // ★ A″（观测专用，技术决策 agent 逐字规格，2026-10-03）：主序列**之前**的早期 FW-loaded 探测。
-    //  为什么放在这里：本函数 100% 被调用（panic 栈铁证）；探测本体在 `HWLibs.cpp` 内
-    //   （trace 也落在那里 ⇒ 本文件不依赖 `NRED_TRACE`）。
-    //  ⛔ 返回值**丢弃**、**失败不阻断**、不改控制流（下一行的 `m_flags |= 4` 起为原序列）。
-    (void)X5000HWLibs::smu13FwProbeOnly();
-
     // C1.6: NRed 直读 MMIO 旁路 —— 在 powerUp 之前跑驱动表分配+Transfer 序列，唤醒 BGM/IMU。
     // 挂载点选择依据：本函数 100% 被调用（panic 栈铁证）；而 smu13PowerUpConfig 因 wrapper 休眠是死点。
     // 失败仅记录探针位，不改变原有行为（安全旁路）。

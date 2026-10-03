@@ -1864,24 +1864,14 @@ static inline UInt32 khzToMhzCeil(UInt32 khz) { return (khz + 999U) / 1000U; }
 // 调用前检查 smuContext()[见 AMDGFX9DCN314Display 的 applyDisplayClocks]。
 void* X5000HWLibs::smuContext() { return singleton().smuCtxCache; }
 
-// ★ A″（观测专用，技术决策 agent 逐字规格，2026-10-03）：早期 FW-loaded 探测。
-//  ⚠️ **风险如实声明（2026-10-03 合议更正）**：本函数**首次在真机执行**该路径；其内部经
-//   `smu13WaitForFwLoaded` **读 SMN `0x3010028`**（`MP1_Public | smuMP1_FIRMWARE_FLAGS`）
-//   ⇒ 属**红线①（以探针方式读 GPU/SMN 寄存器）**，**须所有者逐次批准**。
-//   ⇒ **不得声称"零挂死风险"**。可陈述的只是：轮询**有界**（2000 ms 上限）、
-//      **不发送任何 PMFW 消息**（只读标志位）、ctx 为空时**直接返回**（不触碰硬件）。
-//      该路径**从未在真机执行过** ⇒ 实际行为**未验证**。
-//  为什么需要：判"PMFW 是否已加载"——`res == 0` ⇒ 已加载；`res != 0` ⇒ **未加载**
-//   （即真正的"外部条件"被证实），这是 H5 归因的关键判别器。
-//  ⛔ 不改控制流、失败不阻断（调用方用 `(void)` 丢弃返回值）。
-CAILResult X5000HWLibs::smu13FwProbeOnly()
-{
-    void* const ctx = singleton().smuCtxCache;
-    if (ctx == nullptr) { return kCAILResultInvalidParameters; }
-    const auto res = smu13WaitForFwLoaded(ctx);
-    NRED_TRACE("smu13: early FW-loaded probe -> 0x%X", res);
-    return res;
-}
+// ⛔ r96：原 A″「早期 FW-loaded 探测」（smu13FwProbeOnly）**已整体删除，勿重建**。
+//   删除理由：① 它经 smu13WaitForFwLoaded → smu13IsFwLoaded 读 SMN `0x3010028`，属
+//   2026-09-29 所有者明令禁止的"探针式读 AMD 寄存器"类（见本文件 T7 探针族墓碑）；
+//   ② 第 95 轮（r95awpb）实测：**真机首次执行即 page fault**（trap @ uptime 46.37 s，
+//   与第 76/77 轮"~45 s 卡死"同一时间窗，属【推断·中】的共享根因）；
+//   ③ 该路径"从未验证、首次执行即故障"。
+//   ⇒ 如需"PMFW 是否加载"的读数：**先与所有者确认寄存器通道的安全性与必要性**；
+//   不得复用 `-NRedProbePanic`（同为 PCIE 间接路径寄存器读）。
 
 UInt32 X5000HWLibs::cgsReadReg(void* const ctx, const UInt32 off, const UInt32 blockInstance, const CAILHWBlock block,
                                const UInt32 regOffBase)
