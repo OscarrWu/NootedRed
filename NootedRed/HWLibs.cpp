@@ -1647,7 +1647,8 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
 
     if (const auto res = this->smu90SendMessageWithParameter(ctx, message, param); res != kCAILResultOK) {
         // T11 第一层：观测式 trace，记录 Apple 客户端路径的真实结果（零新增发送、零 ctx 风险、零寄存器访问）。
-        NRED_TRACE("T11: smuSendMessage id=0x%X rc=%u arg=0x%X", message, res, 0);
+        // 格式对齐 T4 规格 §2.3：`T4: smuSendMessage id=0x%X rc=%u arg=0x%X`
+        NRED_TRACE("T4: smuSendMessage id=0x%X rc=%u arg=0x%X", message, res, 0);
         return res;
     }
 
@@ -1658,7 +1659,8 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
     }
 
     // T11 第一层：观测式 trace，记录白名单消息的成功结果与 outParam。
-    NRED_TRACE("T11: smuSendMessage id=0x%X rc=%u arg=0x%X", message, kCAILResultOK, outVal);
+    // 格式对齐 T4 规格 §2.3：`T4: smuSendMessage id=0x%X rc=%u arg=0x%X`
+    NRED_TRACE("T4: smuSendMessage id=0x%X rc=%u arg=0x%X", message, kCAILResultOK, outVal);
 
     return kCAILResultOK;
 }
