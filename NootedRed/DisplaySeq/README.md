@@ -63,7 +63,7 @@
 | 层 | 是否可含 IOKit / 内核头 | 归属环节 | 落盘位置 |
 |---|---|---|---|
 | **序列生成器** | **禁止** | 前置准备 ✅ | 本目录 |
-| **用户态消费者**（影子/测试） | 禁止 | 第三步 | 本目录 + `kb/tools/` |
+| **用户态消费者**（影子/测试） | 禁止 | 第三步 | 本目录 + `kb/工具与脚本/` |
 | **内核态消费者**（真机写寄存器） | 允许（需要 `AmdRegisterAccess`） | 第五步 | 本目录（待落地） |
 
 > ⛔ **生成器绝不可 include 任何内核头文件**。这是它能在分析机用户态编译的唯一前提，也是"三消费者共用一份代码"能成立的基础。
@@ -110,9 +110,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 \
 ### 5.1 影子运行（把"真机会写什么"落盘，与 Linux 真值比对）
 
 ```bash
-g++ -std=c++17 -O2 -Isrc/NootedRed/DisplaySeq kb/tools/shadow_clkmgr.cpp -o /tmp/shadow_clkmgr
+g++ -std=c++17 -O2 -Isrc/NootedRed/DisplaySeq kb/工具与脚本/shadow_clkmgr.cpp -o /tmp/shadow_clkmgr
 /tmp/shadow_clkmgr /tmp/ours-clocks.json         # 落盘为统一格式序列（JSONL）
-python3 kb/tools/smctrans_diff.py /tmp/ours-clocks.json kb/sequences/linux-dcn314-init.json
+python3 kb/工具与脚本/smctrans_diff.py /tmp/ours-clocks.json kb/序列数据/linux-dcn314-init.json
 ```
 
 比对器只做**事务级**判定（详见 `docs/子任务/第五步执行记录（时钟主流程）.md` §五）。

@@ -394,7 +394,7 @@ static void testErrorCodeDecode() {
 // ════════════════════════════════════════════════════════════════════
 // 测试 7：寄存器序列导出（影子产物）
 // ════════════════════════════════════════════════════════════════════
-static const char* kTracePath = "kb/sequences/psp13_bringup_trace.txt";
+static const char* kTracePath = "kb/序列数据/psp13_bringup_trace.txt";
 
 static void testSequenceExport() {
     printf("[test 7] Register sequence export to %s... ", kTracePath);
@@ -422,7 +422,7 @@ static void testSequenceExport() {
     fprintf(f, "# Format: op addr value  seq=N\n");
     fprintf(f, "#   op: read|write; addr: SMN byte address = smnAddr(off) = (SEG1+off)*4\n");
     fprintf(f, "#          (SEG1=0x0243FC00, dcn314_smu.c:38-43; smn_base64=0; 详见 RegAddr.hpp)\n");
-    fprintf(f, "# Compat: 与 kb/sequences/linux-dcn314-init.json 的 sequence 条目\n");
+    fprintf(f, "# Compat: 与 kb/序列数据/linux-dcn314-init.json 的 sequence 条目\n");
     fprintf(f, "#          {op, addr(dword), value, seq} 风格可对照（A3: dword 索引）\n");
     fprintf(f, "---\n");
 
