@@ -30,6 +30,7 @@
 #include <libkern/c++/OSMetaClass.h>  // 加速器类注册状态探针：getMetaClassWithName
 #include <IOKit/IOTypes.h>
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
+#include <IOKit/IOPlatformExpert.h>   // T17：PEHaltRestart/kPERestartCPU（早期读数后请求重启）
 #include <Kexts.hpp>
 #include <NRed.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
@@ -521,6 +522,7 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     //   门控真 ⇒ 依序 0x01/0x02/0x03 + blank + 0xFF；**不含 rw**（smu13ProbeRegRW＝寄存器写，默认不执行）。
     //   串与 `bypass-probe:` 同形同序（test/pmfw/dif/blank/inv），判读可一一对应；通道 NRedTrace、无 panic 门控。
     const bool earlyDirect = checkKernelArgument("-NRedEarlyDirect");
+    const bool earlyDirectReboot = checkKernelArgument("-NRedEarlyDirectReboot");
     if (earlyDirect && NRed::singleton().getAttributes().isPhoenix()) {
         UInt32 t = 0, p = 0, d = 0;
         X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &t);
@@ -530,6 +532,17 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
         const CAILResult rInv = X5000HWLibs::smu13SendMsgDirect(0xFF, 0, nullptr);
         NRED_TRACE("early-direct: test=0x%X pmfw=0x%X dif=0x%X blank=0x%X inv=0x%X",
                    t, p, d, b, rInv == kCAILResultOK ? 1U : 0U);
+        // T17（2026-10-10）：早期读数后请求重启 `-NRedEarlyDirectReboot`（默认关；**危险操作**——
+        //   开启即主动重启内核）。条件＝与 `-NRedEarlyDirect` 同开才重启（本块在 earlyDirect 内；
+        //   只开本门控不带 early ⇒ 本块整体不执行 ⇒ 不重启）。
+        //   时序＝重启请求严格位于 NRED_TRACE（early-direct 落盘）**之后**（先落盘后重启）。
+        //   实现＝PEHaltRestart(kPERestartCPU)（IOKit/IOPlatformExpert.h；正常不返回）。
+        //   错误处理＝若 PEHaltRestart 返回（异常）则记日志后继续（boot 流程继续推进，与分支②同等待现场处置）。
+        if (earlyDirectReboot) {
+            NRED_TRACE("early-direct: reboot requested (PEHaltRestart)");
+            PEHaltRestart(kPERestartCPU);
+            SYSLOG("X6000FB", "T17: PEHaltRestart returned (unexpected); continuing");
+        }
     }
 
     CAILAsicCapsEntry*                   orgAsicCapsTable       = nullptr;
