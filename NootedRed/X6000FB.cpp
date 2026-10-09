@@ -514,6 +514,24 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
 
     NRed::singleton().hwLateInit();
 
+    // T16（2026-10-10）：早期直通探针 `-NRedEarlyDirect`（默认关）。
+    //   挂点＝ `hwLateInit()` 之后：BAR5 已映射（NRed.cpp:95-105），kext 加载回调期、早于任何
+    //   start/configureDevice/powerUp ⇒ `-s` 引导形态下亦可读数（无 WindowServer ⇒ 不进 panic 路径）。
+    //   门控假 ⇒ 零 MMIO（本块不执行，块内 4 次 smu13SendMsgDirect + 1 次 smu13ProbeBlank 均不发生）。
+    //   门控真 ⇒ 依序 0x01/0x02/0x03 + blank + 0xFF；**不含 rw**（smu13ProbeRegRW＝寄存器写，默认不执行）。
+    //   串与 `bypass-probe:` 同形同序（test/pmfw/dif/blank/inv），判读可一一对应；通道 NRedTrace、无 panic 门控。
+    const bool earlyDirect = checkKernelArgument("-NRedEarlyDirect");
+    if (earlyDirect && NRed::singleton().getAttributes().isPhoenix()) {
+        UInt32 t = 0, p = 0, d = 0;
+        X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &t);
+        X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion, 0, &p);
+        X5000HWLibs::smu13SendMsgDirect(PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion, 0, &d);
+        const UInt32 b = X5000HWLibs::smu13ProbeBlank();
+        const CAILResult rInv = X5000HWLibs::smu13SendMsgDirect(0xFF, 0, nullptr);
+        NRED_TRACE("early-direct: test=0x%X pmfw=0x%X dif=0x%X blank=0x%X inv=0x%X",
+                   t, p, d, b, rInv == kCAILResultOK ? 1U : 0U);
+    }
+
     CAILAsicCapsEntry*                   orgAsicCapsTable       = nullptr;
     void*                                orgAmdAsicInfoNavi10VT = nullptr;
     PenguinWizardry::PatternSolveRequest solveRequests[]        = {
