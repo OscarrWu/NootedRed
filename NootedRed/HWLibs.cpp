@@ -1047,6 +1047,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // T11 第二层注入门控：默认关（仅在第一层零命中时由所有者显式开启）。
     // 解析一次存标量，避免探针路径频繁调用 checkKernelArgument。
     singleton().smu13ProbeInjectDisabled = !checkKernelArgument("-NRedSmuProbeInject");
+    // T15 方案II 门控（默认关）：开启后白名单消息改走自有有界直通（D1/D2，案A+案B）。
+    // 解析一次存标量，避免 smuSendMessage/注入路径频繁调用 checkKernelArgument。
+    singleton().smu13DirectEnabled = checkKernelArgument("-NRedSmuBypassDirect");
 
     NRed::singleton().hwLateInit();
 
@@ -1663,6 +1666,20 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
         NRED_TRACE("smu-ctx-check: msg=0x%X v310=0x%X v10_98=0x%X vPP10_128=0x%X v428=0x%X v6b8=0x%X",
                    message, v310, v10_98, vPP10_128, v428, v6b8);
     }
+    // T15（方案II，门控 `-NRedSmuBypassDirect`，默认关）：白名单消息改走自有有界直通（D1）。
+    // 闸仍在前方守门（此处仅白名单可达；gate-off 下的非白名单仍走下方 Apple 委托，对照轮语义守恒）。
+    // 门控关闭时本块不执行 ⇒ 默认运行时路径与基线构建等价（仅新增 trace 行输出差异）。
+    if (singleton().smu13DirectEnabled && NRedSmuGate::smuMsgAllowedByTimeoutL1(message)) {
+        UInt32 rawResp = 0;
+        const CAILResult rcDirect = X5000HWLibs::smu13SendMsgDirect(message, param, &rawResp);
+        UInt32 outVal = 0;
+        if (rcDirect == kCAILResultOK) {
+            outVal = NRed::singleton().readReg32(MP0_BASE_0 + MP1_SMN_C2PMSG_82);
+        }
+        if (outParam != nullptr) { *outParam = outVal; }
+        NRED_TRACE("T15-direct: msg=0x%X rc=%u arg=0x%X", message, rcDirect, outVal);
+        return rcDirect;
+    }
 
     if (const auto res = this->smu90SendMessageWithParameter(ctx, message, param); res != kCAILResultOK) {
         // T14/U-97-1（2026-10-10）：读响应参数寄存器 C2PMSG_82 分辨 rc=2 的
@@ -1702,22 +1719,37 @@ CAILResult X5000HWLibs::wrapSmu90SendMessageWithParameter(void* const ctx, const
     }
 
     // T11 第二层：注入式探针（仅当 -NRedSmuProbeInject 显式开启）。
-    // 在 Apple 传入活 ctx 的回调点首次进入时，直接调用 org 指针发送白名单三条消息。
-    // 约束：不使用 smuCtxCache、不经成员指针调用（避免递归）、零新增寄存器访问、禁 panic 门控。
+    // 在 Apple 传入活 ctx 的回调点首次进入时，发送白名单三条消息。
+    // 约束：不使用 smuCtxCache、不经成员指针调用（避免递归）、禁 panic 门控。
     static bool probeInjected = false;
     if (!probeInjected && !singleton().smu13ProbeInjectDisabled) {
         probeInjected = true;
-        // 直接调用 org 指针（绕过成员指针，防递归），使用 Apple 传入的 ctx。
-        auto orgSend = reinterpret_cast<CAILResult (*)(void*, UInt32, UInt32)>(singleton().orgSmu90SendMessageWithParameter);
-        if (orgSend != nullptr) {
-            constexpr UInt32 kWhitelist[] = {
-                PhoenixPPSMC::PPSMC_MSG_TestMessage,        // 0x01
-                PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion,     // 0x02
-                PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion  // 0x03
-            };
+        constexpr UInt32 kWhitelist[] = {
+            PhoenixPPSMC::PPSMC_MSG_TestMessage,        // 0x01
+            PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion,     // 0x02
+            PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion  // 0x03
+        };
+        // T15（方案II，门控 `-NRedSmuBypassDirect`，默认关）：第二层注入改走自有有界直通（D2，2 s 上界）。
+        // 门控关闭时维持经 Apple org 指针（与基线构建运行时等价；间接层上界未解出，仅探针轮使用）。
+        if (singleton().smu13DirectEnabled) {
             for (UInt32 msg : kWhitelist) {
-                CAILResult rc = orgSend(ctx, msg, 0);
-                NRED_TRACE("T11-inject: id=0x%X rc=%u", msg, rc);
+                UInt32 rawResp = 0;
+                const CAILResult rc = X5000HWLibs::smu13SendMsgDirect(msg, 0, &rawResp);
+                UInt32 argVal = 0;
+                if (rc == kCAILResultOK) {
+                    argVal = NRed::singleton().readReg32(MP0_BASE_0 + MP1_SMN_C2PMSG_82);
+                }
+                NRED_TRACE("T11-inject: id=0x%X rc=%u arg=0x%X", msg, rc, argVal);
+            }
+        }
+        else {
+            // 默认分支（门控关）：直接调用 org 指针（绕过成员指针，防递归），使用 Apple 传入的 ctx。
+            auto orgSend = reinterpret_cast<CAILResult (*)(void*, UInt32, UInt32)>(singleton().orgSmu90SendMessageWithParameter);
+            if (orgSend != nullptr) {
+                for (UInt32 msg : kWhitelist) {
+                    CAILResult rc = orgSend(ctx, msg, 0);
+                    NRED_TRACE("T11-inject: id=0x%X rc=%u", msg, rc);
+                }
             }
         }
     }
