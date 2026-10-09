@@ -1957,8 +1957,8 @@ UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
 
 /*!
  * NRed 直读 MMIO 自实现 PMFW 消息发送 —— 绕开 Apple SMU ctx（smu90SendMessageWithParameter / smuCgsReadWriteRegister）。
- * 完整复刻 vbiossmcSendMsg 的 C2PMSG 时序：等 91 不忙 → 清 91 响应 → 写 83 参数 → 写 67 消息(触发) → 轮询 91 直到响应 → 判结果。
- * 基址采用 SMUIO_BASE_0 + MP1_SMN_C2PMSG_xx（32-bit dword 索引，对齐 NRed::readReg32 约定：L930-942 用 MP0_BASE_0 + MP0_SMN_C2PMSG_*）。
+ * C2PMSG 时序（Linux __smu_msg_v1_send）：清 90 响应 → 写 82 参数 → 写 66 消息(触发) → 轮询 90 直到响应 → 判结果。
+ * 基址采用 MP0_BASE_0 + MP0_SMN_C2PMSG_xx（32-bit dword 索引，对应 C2PMSG_90/82/66 偏移 0x29A/0x292/0x282）。
  */
 CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 param, UInt32 *rawResp)
 {
