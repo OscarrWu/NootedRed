@@ -21,6 +21,7 @@
 #include <GPUDriversAMD/TTL/SWIP/IPVersion.hpp>
 #include <GPUDriversAMD/TTL/SWIP/SDMA.hpp>
 #include <GPUDriversAMD/TTL/SWIP/SMU.hpp>
+#include <HWLibs.hpp>
 #include <HWLibsSmuGate.hpp>
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
