@@ -1703,7 +1703,9 @@ CAILResult X5000HWLibs::wrapSmu90SendMessageWithParameter(void* const ctx, const
 
 CAILResult X5000HWLibs::smuPowerUpConfigCommon(void* const ctx)
 {
+    // ⚠️ Renoir msg：Phoenix 上 0x0E = SetDriverDramAddrLow（同值不同义），T1 闸拦截。
     if (const auto res = singleton().smuSendMessage(ctx, PPSMC_MSG_PowerUpSdma); res != kCAILResultOK) { return res; }
+    // ⚠️ Renoir msg：Phoenix 上 0x06 = PowerDownVcn（反向语义，最高危），T1 闸拦截。
     if (const auto res = singleton().smuSendMessage(ctx, PPSMC_MSG_PowerUpGfx); res != kCAILResultOK) { return res; }
 
     return kCAILResultOK;
@@ -1717,22 +1719,27 @@ CAILResult X5000HWLibs::smuInternalSwInit(void* const ctx, void*, AMDSMUSWInitOu
 }
 
 CAILResult X5000HWLibs::smuInternalSwInitOld(void* const ctx, void*, AMDSMUSWInitOutput* const output)
-{ return singleton().smuSendMessage(ctx, PPSMC_MSG_GetSmuVersion, 0, &output->fwConstants.version); }
-
+{
+    // ✅ 同值同义例外：Phoenix 上 0x02 = GetPmfwVersion（同值同义），T1 白名单放行。
+    return singleton().smuSendMessage(ctx, PPSMC_MSG_GetSmuVersion, 0, &output->fwConstants.version);
+}
 CAILResult X5000HWLibs::smuGetUCodeConsts(void* const ctx, AMDSMUUCodeConstants* consts)
 {
     if (consts == nullptr) { return kCAILResultInvalidParameters; }
+    // ✅ 同值同义例外：Phoenix 上 0x02 = GetPmfwVersion（同值同义），T1 白名单放行。
     return singleton().smuSendMessage(ctx, PPSMC_MSG_GetSmuVersion, 0, &consts->version);
 }
 
 CAILResult X5000HWLibs::smu10PowerUpConfig(void* const ctx)
 {
+    // ⚠️ Renoir msg：0x39 越出 Phoenix 表（ID 不存在），T1 闸拦截。
     if (const auto res = singleton().smuSendMessage(ctx, PPSMC_MSG_ForceGfxContentSave);
         res != kCAILResultOK && res != kCAILResultUnsupported)
     {
         return res;
     }
     if (const auto res = smuPowerUpConfigCommon(ctx); res != kCAILResultOK) { return res; }
+    // ⚠️ Renoir msg：0x35 越出 Phoenix 表（ID 不存在），T1 闸拦截。
     if (const auto res = singleton().smuSendMessage(ctx, PPSMC_MSG_PowerGateMmHub);
         res != kCAILResultOK && res != kCAILResultUnsupported)
     {
@@ -1759,12 +1766,12 @@ CAILResult X5000HWLibs::smu12WaitForFwLoaded(void* const ctx)
 CAILResult X5000HWLibs::smu12PowerUpConfig(void* const ctx)
 {
     if (const auto res = smuPowerUpConfigCommon(ctx); res != kCAILResultOK) { return res; }
+    // ⚠️ Renoir msg：0x3D 越出 Phoenix 表（ID 不存在），T1 闸拦截。
     if (const auto res = singleton().smuSendMessage(ctx, PPSMC_MSG_PowerGateAtHub);
         res != kCAILResultOK && res != kCAILResultUnsupported)
     {
         return res;
     }
-
     return kCAILResultOK;
 }
 
@@ -1778,7 +1785,7 @@ CAILResult X5000HWLibs::smu12InternalHwInit(void* const ctx)
 
 bool X5000HWLibs::smu13IsFwLoaded(void* const ctx)
 {
-    // SMU13 专用 flags 地址（Linux smnMP1_V13_0_4_FIRMWARE_FLAGS = 0x3010028）
+    // MP1 固件就绪判据的寄存器地址为 0x3010028（另一候选 0x3010024 已由既有离线判定排除——Apple 自身即用 0x3010028）。遗留未核：Apple 谓词取 bit0，而 smu13IsFwLoaded 用 INTERRUPTS_ENABLED，位语义是否一致待核。
     return (singleton().smuCgsReadRegister(ctx, 0x3010028, 0, kCAILHWBlockMP1, MP1_PUBLIC)
             & MP1_FIRMWARE_FLAGS_INTERRUPTS_ENABLED)
            != 0;
@@ -1960,7 +1967,7 @@ UInt32 X5000HWLibs::vbiossmcSendMsg(void* ctx, UInt32 msgId, UInt32 paramMHz)
         return VBIOSSMC_Result_Failed;
     }
 
-    // 2) Clear response register
+    // 2) Clear response register (write VBIOSSMC_Status_BUSY = 0x0)
     hw.smuCgsWriteRegister(ctx, MP1_SMN_C2PMSG_91, 0, VBIOSSMC_Status_BUSY, kCAILHWBlockMP1, 0);
 
     // 3) Write parameter (MHz)
@@ -2001,29 +2008,8 @@ CAILResult X5000HWLibs::smu13SendMsgDirect(const UInt32 msgId, const UInt32 para
 {
     auto& nred = NRed::singleton();
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // ⭐⭐⭐ §16.78 真根因修正（2026-09-11）：SMU 邮箱必须用 MP1 BASE_IDX **1**！
-    //   证据（三源）：
-    //   ① `mp_13_0_4_offset.h:300/332/348`：regMP1_SMN_C2PMSG_66/82/90 的 **BASE_IDX = 1**
-    //      （不是 0！Renoir 的 mp_10_0_offset.h 才是 0——沿用它导致 Phoenix 上全错）
-    //   ② `yellow_carp_offset.h:875-876`：MP1_BASE__INST0_SEG0=0x16000，**SEG1=0x0243FC00**
-    //      → SOC15_REG_OFFSET(MP1,0,reg)=reg_offset[MP1][0][1]+reg = SEG1+reg
-    //   ③ `mac-amdgpu/dext/amdgpu/smu_v14_0.cpp:68-76` 原文注释：
-    //      "declare BASE_IDX 1 … NOT BASE_IDX 0. Using base[0] routes the writes to a
-    //       completely different physical register and **SMU never responds**"
-    //   ④ `research/mac-amdgpu-bringup.md:132` 项目研究文档早已记载此坑（我没读到！）
-    //
-    //   地址（dword 索引，BASE_IDX 1）：
-    //     C2PMSG_66 = 0x0243FC00 + 0x282 = 0x243FE82
-    //     C2PMSG_82 = 0x0243FC00 + 0x292 = 0x243FE92
-    //     C2PMSG_90 = 0x0243FC00 + 0x29A = 0x243FE9A
-    //   ⚠️ 这些值 ×4 远超 BAR5 窗口 → readReg32/writeReg32 走 PCIE_INDEX2/DATA2 间接路径。
-    //      间接路径传【字节地址】（dword×4），见 NRed.cpp:240 与 §16.34。
-    // ═══ §16.89 回滚（2026-09-11 22:30）：SEG1 修正错误，改回 SEG0 ═══
-    //   本机实测（Manjaro root mmap BAR5 直接读）：
-    //     dword 0x16282 = 0x19, 0x1629A = 0x1, 0x16292 = 0x0   ← SEG0 真实有效
-    //     新地址（SEG1 字节 0x90FFAxx）经间接路径全 FFFFFFFF，不可达
-    //   → 实测 > 文档：mp_13_0_4_offset.h 的 BASE_IDX=1 不适用于本机路径
+    // 段口径按实现描述：现役路径走 SEG0 直接窗口（MP0_BASE_0；字节地址与 Linux SEG0 口径逐字节相等）。
+    // "SEG1 才是正确段"作为真机子命题 B-4 另行登记（依据 T7 定论；见 kb/逆向事实与结论/乙线R1-SEG0-SEG1歧义定论.md）。
     const UInt32 regResp = MP0_BASE_0 + 0x29A;  // C2PMSG_90：响应（0=NoResponse，写 0 清）
     const UInt32 regArg  = MP0_BASE_0 + 0x292;  // C2PMSG_82：参数
     const UInt32 regMsg  = MP0_BASE_0 + 0x282;  // C2PMSG_66：命令（写即触发）
@@ -2090,7 +2076,7 @@ UInt32 X5000HWLibs::smu13ProbeRegRW()
 
 CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
 {
-    // 分配物理连续 256B（SmuMetrics_t 168B + 对齐余量），供 SMU TransferTableDram2Smu DMA 写入。
+    // 分配物理连续 256B（SmuMetrics_t 160B + 对齐余量），供 SMU TransferTableDram2Smu DMA 写入。
     // 缓冲由本类持有（smu13MetricsBuffer），kext 生命周期内不释放：SMU 通过 Transfer 后仍指向该 DRAM 地址。
     // PAGE_SIZE 用常量（macOS 页 = 4096）保证物理对齐。
     auto& hw = singleton();
@@ -2100,7 +2086,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     }
 
     // 【§16.61 纠正】Phoenix = SMU v13_0_4（非 v13_0_7）。
-    //   v13_0_4 的 SmuMetrics_t = 244 字节（Linux: sizeof(SmuMetrics_t)），对齐 256。
+    //   v13_0_4 的 SmuMetrics_t = 160 字节（§16.83 编译器实测；244 是 v13_0_7 残留），对齐 256。
     //   原 256B 分配本来就是对的；§16.56 的"2268B"基于错误版本，已作废。
     constexpr UInt32 kMetricsSize = 160U;                 // SmuMetrics_t v13_0_4: sizeof=160 align=4（§16.83 编译器实测；244 是 v13_0_7 残留）
     constexpr UInt32 kBufferSize  = 256U;                 // 244 向上对齐
@@ -2141,7 +2127,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     // §16.52 第 3 项：把驱动表内容真正写到 BAR0 aperture 内（而非只给个地址）
     //   理由：PMFW DMA 域只覆盖 FB carve-out 窗口（§16.19/16.32-7）；
     //   系统 RAM buffer 的物理地址不被接受。必须让"地址处真的有内存"。
-    //   做法：映射 BAR0，在 bar0Virt+0x1000 处清零 2304B（SMU 只做 DMA 拷贝，内容全 0 即可）。
+    //   做法：映射 BAR0，在 bar0Virt+0x1000 处清零 256B（= kBufferSize；SMU 只做 DMA 拷贝，内容全 0 即可）。
     //   失败则回退（地址仍给 carveout+0x1000，但内容无保障）。
     const addr64_t carveout = fbOff;
     const addr64_t addr     = carveout + 0x1000;
@@ -2235,7 +2221,7 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     }
     const auto rLow = X5000HWLibs::smu13SendMsgDirect(
         PhoenixPPSMC::PPSMC_MSG_SetDriverDramAddrLow, static_cast<UInt32>(addr & 0xFFFFFFFFU), &respLow);
-    // §16.67：Low 的 resp 记到诊断（panic 输出用；不复用 bit20-23——那是四步成功位）
+    // §16.67：Low 的 resp 记到诊断（panic 输出用；不复用 bit20-21——那是成功位，bit22-23 已空闲，见 2213）
     NRed::singleton().smu13Resp[1] = respLow;
     DBGLOG("HWLibs", "smu13: SetDriverDramAddrLow resp=0x%X", respLow);
     if (rLow != kCAILResultOK) {
@@ -2250,8 +2236,8 @@ CAILResult X5000HWLibs::smu13SetupDriverTableAndTransfer()
     //    【§16.83】Phoenix = SMU v13_0_4：driver_if_v13_0_4.h:277 TABLE_SMU_METRICS=7。
     //    （旧值 5 出自 v13_0_7 —— §16.61 版本错误的残留，2026-09-11 沉淀审查发现）
     //    之前 §16.55/16.59 误读了 v13_0_7 的表，结论作废，已回滚。
-    //    【§16.19】Phoenix (MP1 13.0.7) 的表号：drvif7.h:1601 TABLE_SMU_METRICS=5
-    //    （此前传 7 = TABLE_ACTIVITY_MONITOR_COEFF，来自错误版本的表定义——已修正）
+    //    【§16.19·已作废】Phoenix 表号曾误记为 5（drvif7.h:1601，属 v13_0_7 口径），已作废。
+    //    （"此前传 7 已修正为 5"系旧稿误述；当前实现传 TABLE_SMU_METRICS=7，以 §16.83 为准。）
     const CAILResult r = X5000HWLibs::smu13SendMsgDirect(
         PhoenixPPSMC::PPSMC_MSG_TransferTableDram2Smu, static_cast<UInt32>((0U << 16) | 7U), &respXfer);
     NRed::singleton().smu13Resp[2] = respXfer;
@@ -2334,8 +2320,10 @@ SInt32 X5000HWLibs::vbiossmcSetDppclkCached(UInt32 requestedKhz)
 CAILResult X5000HWLibs::smuInternalHwExit(void*) { return kCAILResultOK; }
 
 CAILResult X5000HWLibs::smuFullAsicReset(void* const ctx, void* data)
-{ return singleton().smuSendMessage(ctx, PPSMC_MSG_DeviceDriverReset, getMember<UInt32>(data, 4)); }
-
+{
+    // ⚠️ Renoir msg：Phoenix 上 0x1E = SetSoftMaxFclkByFreq（同值不同义），T1 闸拦截。
+    return singleton().smuSendMessage(ctx, PPSMC_MSG_DeviceDriverReset, getMember<UInt32>(data, 4));
+}
 CAILResult X5000HWLibs::smu10NotifyEvent(void* const ctx, TTLEventInput* const input)
 {
     if (input->arg >= SMU_EVENT_COUNT) {

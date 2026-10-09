@@ -979,7 +979,7 @@ IOReturn X6000FB::getTriageHardwareDataRV(void*, const UInt32 fbIndex, void* con
     //   OTG0_OTG_MASTER_EN             0x1B5C，步进 0x80（:7904-7905，OTG1=0x1BDC :8116；旧值 0x1B5F 在 3_1_4 未定义）；
     //   HUBP0_HUBP_CLK_CNTL            0x05F4，步进 0xDC（:3434-3435，HUBP1=0x06D0 :3728；旧值 0x567 实为 DCN_VM_CONTEXT2_CNTL、步进 0xC4 错）；
     //   DIG0_DIG_BE_EN_CNTL            0x20B2，步进 0x100（:9264-9265，DIG1=0x21B2 :9618；旧值 0x20B0 实为 DIG0_AFMT_CNTL）。
-    // 注：该路径仅 <=MACOS_12_X 安装（:309 门限），13.6 上不生效——属离线正确性修复（防未来启用）。
+    // 注：该路径仅 <=MACOS_12_X 安装（:704 门限），13.6 上不生效——属离线正确性修复（防未来启用）。
     const auto odmOptcInputGlobalControl = NRed::singleton().readReg32(DCN_BASE_2 + 0x1ACA + (0x10 * fbIndex));
     const auto otgMasterEn               = NRed::singleton().readReg32(DCN_BASE_2 + 0x1B5C + (0x80 * fbIndex));
     const auto hubpClkControl            = NRed::singleton().readReg32(DCN_BASE_2 + 0x05F4 + (0xDC * fbIndex));
@@ -1367,9 +1367,9 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     //  本点位于 PP powerUp —— **远晚于** `AMDHardware::init`/`setupCAIL` ⇒ 此处对
     //  `ATY,bin_image` 的复读是"最终稳态"：若点 A 的 e 相位没有、x 相位有（窗口内写入），
     //  本点给出"最终是否还在"的第三时点判据（写后是否又被抹除）。provider 取法与既有
-    //  `-NRedAccelProbe` 块（:1129 `o20->getProvider()`）**逐字同形**（已在真机多轮跑过）。
+    //  `-NRedAccelProbe` 块（:1269 `o20->getProvider()`）**逐字同形**（已在真机多轮跑过）。
     //  安全：`self+0x50`/`self+0x20` 均为纯内存读；`getProvider()`/`getProperty()` 为 IOKit
-    //  只读访问器（与 :1129-1139 既有代码同一形态）；不调 Apple 驱动虚方法、不写内存、
+    //  只读访问器（与 :1269-1270 既有代码同一形态）；不调 Apple 驱动虚方法、不写内存、
     //  不碰寄存器；三重内核地址校验后才解引用。落盘复用 L1（SYSLOG）/L2。
     if (checkKernelArgument("-NRedDiagProvider")) {
         const UInt64 dSelf = reinterpret_cast<UInt64>(self);
@@ -1415,7 +1415,7 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
     //  写文件"这条通道**历代零命中**（151 个归档、三代实现全灭）⇒ **载体问题，不是挂点问题**。
     //  本轮改走**已被证明可靠**的 panic 文本通道：本块只把三因子存进文件静态量
     //  （`sP5Readout*`），由 `wrapHandleCriticalError` 的 panic 路径拼进 panic 文本。
-    //  三因子读法与既有 `-NRedDiagProvider` 块（`:1251-1261`）**逐字同形**：
+    //  三因子读法与既有 `-NRedDiagProvider` 块（`:1374-1411`）**逐字同形**：
     //  `self+0x50` → node；`node+0xd0` → cail；`node+0xd8` → ttl（纯内存读 + 三重内核地址校验）。
     //  ⛔ 不读/写任何 GPU/SMN 寄存器，不调 Apple 虚方法，不设探针 panic，不碰 msgbuf。
     //  ⛔ panic 路径**绝不写文件**（手册 §5.1）；本块的文件写只在**正常上下文**（org 调用之前）。
@@ -2083,14 +2083,14 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //   成因之一。读数由 `wrapPpHelperPowerUp` 侧的 `nvMsgBuf` 即时落盘承担（正常上下文）。
     //   ⛔ 更不可在此抢 `panic()`：会绕开 Apple 写重启位的步骤（手册 §7.3 教训 14）。
     // ★ P5 读数门控（2026-10-02，第 89 轮判读修复）：`-NRedP5Readout`（默认关）。
-    //  为什么需要它：本函数内三个 panic 块依次为 `P5(:2031) → P3P14(:2047) → NBIO(:2071)`，
+    //  为什么需要它：本函数内三个 panic 块依次为 `P5(:2158) → P3P14(:2180) → NBIO(:2193)`，
     //    而 `panic()` **不返回** ⇒ **先触发者永久挡住后两者**。P5 块原先只看
     //    `sP5ReadoutValid`，而该标志由 `-NRedAccelLog` 等**固定集常带**的门控间接置位
     //    ⇒ 第 89 轮真机上 P5 块抢先 panic ⇒ 新增的两条探针**零产出**。
     //  ⇒ 现在三个块各自有独立门控，可单独启用（P3P14 / NBIO 已有自己的块内门控形态）。
-    //  ⚠️ **必须在本函数入口的正常上下文**调用（与 `:1105-1108` 的 `wantProbe` 同形）：
+    //  ⚠️ **必须在本函数入口的正常上下文**调用（与 `:1158` 的 `wantProbe` 同形）：
     //    `checkKernelArgument` 内部是 Apple `PE_parse_boot_argn`，**panic 路径禁调**
-    //    （见 `:2030` 与 iron rule：在崩溃流程中调用会导致"不自动重启"）。
+    //    （见 `:2094` 与 iron rule：在崩溃流程中调用会导致"不自动重启"）。
     const bool wantP5 = checkKernelArgument("-NRedP5Readout");
     // ★ G3 探针门控（新，`-NRedPluginNode`，默认关）：HWServices 插件节点就绪度。
     //  与 `wantP5` **同法**在本函数**入口的正常上下文**取值——panic 路径禁调
