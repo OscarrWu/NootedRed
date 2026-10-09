@@ -1970,6 +1970,14 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             gProbeResp[3] = X5000HWLibs::smu13ProbeBlank();       // C1
             gProbeResp[4] = X5000HWLibs::smu13SendMsgDirect(0xFF, 0, nullptr) == kCAILResultOK ? 1 : 0;  // C2
             gProbeResp[5] = X5000HWLibs::smu13ProbeRegRW();       // C3
+            // ⭐ T14（2026-10-10）：直通探针七元组改走 NRedTrace 常规通道。
+            //   背景：该七元组原唯一输出通道是 `-NRedProbePanic` 门控 panic（wrapHandleCriticalError:2469→2515），
+            //   对照轮禁止 panic 门控后判据空转（判读 §8.4 缺陷登记）⇒ 本行把各行读数经 NRED_TRACE
+            //   双通道落盘（SYSLOG L1 + /var/log/NRedTrace-NNN.log），**不依赖** gProbeResp/panic；
+            //   与 panic 的 `PB tm=%x pmfw=%x dif=%x blank=%x inv=%x rw=%x arg=%x` 段同序同义。
+            NRED_TRACE("bypass-probe: test=0x%X pmfw=0x%X dif=0x%X blank=0x%X inv=0x%X rw=0x%X arg=0x%X",
+                       gProbeResp[0], gProbeResp[1], gProbeResp[2],
+                       gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6]);
         }
         if (bypImu) {
         // ⚠️ 顺序对齐 Linux（amdgpu_smu.c）：EnableGfxImu 在 smu_start_smc_engine 之后、

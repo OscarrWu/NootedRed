@@ -47,7 +47,7 @@ extern "C" void *rootvnode __attribute__((weak));
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
 //  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
 //  文件名带 **kext slide** ⇒ 每次启动天然不同，归档后不会混轮次。⚠️ 必须先判 `rootvnode`（手册 §5.1）。
-static void nredTraceLine(char* const buf, const int n)
+void nredTraceLine(char* const buf, const int n)
 {
     if (n <= 0 || rootvnode == nullptr) { return; }
     // ⚠️ 每次调用写**独立文件**（2026-09-28 第 19 轮实测：`O_APPEND` 组合未生效，追加写退化成覆盖，
@@ -58,15 +58,6 @@ static void nredTraceLine(char* const buf, const int n)
     FileIO::writeBufferToFile(name, buf, static_cast<size_t>(n), O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW);
 }
 
-// 统一诊断宏：**同时**写内核日志（SYSLOG）与自有落盘文件（`/var/log/NRedTrace.log`）。
-// 落盘是主通道（L2 覆盖窗口只有 26–35 s，关键读数在 34–39 s，见手册 §5.7）。
-#define NRED_TRACE(fmt, ...)                                                                        \
-    do {                                                                                            \
-        SYSLOG("HWLibs", fmt, ##__VA_ARGS__);                                                       \
-        char _tb[256];                                                                              \
-        const int _tn = snprintf(_tb, sizeof(_tb), fmt "\n", ##__VA_ARGS__);                        \
-        nredTraceLine(_tb, _tn);                                                                    \
-    } while (0)
 #include <kern/assert.h>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSBoolean.h>

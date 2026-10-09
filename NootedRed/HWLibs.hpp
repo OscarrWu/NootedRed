@@ -16,6 +16,19 @@
 #include <GPUDriversAMD/TTL/SWIP/SMU.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
+
+// ── NRedTrace 落盘通道（共享；2026-10-10 T14 从 HWLibs.cpp 提出，供 X6000FB 探针复用）──
+//   nredTraceLine（定义于 HWLibs.cpp）：每次调用写**独立文件** `/var/log/NRedTrace-<seq>.log`
+//   （不经 msgbuf；seq 无上限、无轮转，文件序==调用序；⚠️ rootvnode 未挂载时只 SYSLOG、不写文件）。
+//   NRED_TRACE：同时写内核日志（SYSLOG→L1/L2）与上述落盘（第三通道 `NRedTrace-NNN.log`，手册 §5.7）。
+void nredTraceLine(char* const buf, const int n);
+#define NRED_TRACE(fmt, ...)                                                                        \
+    do {                                                                                            \
+        SYSLOG("HWLibs", fmt, ##__VA_ARGS__);                                                       \
+        char _tb[256];                                                                              \
+        const int _tn = snprintf(_tb, sizeof(_tb), fmt "\n", ##__VA_ARGS__);                        \
+        nredTraceLine(_tb, _tn);                                                                    \
+    } while (0)
 #include <PenguinWizardry/ObjectField.hpp>
 
 class IOBufferMemoryDescriptor;  // 仅作指针成员前向声明；定义见 <IOKit/IOMemoryDescriptor.h>
