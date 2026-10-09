@@ -1049,7 +1049,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     singleton().smu13ProbeInjectDisabled = !checkKernelArgument("-NRedSmuProbeInject");
     // T15 方案II 门控（默认关）：开启后白名单消息改走自有有界直通（D1/D2，案A+案B）。
     // 解析一次存标量，避免 smuSendMessage/注入路径频繁调用 checkKernelArgument。
-    singleton().smu13DirectEnabled = checkKernelArgument("-NRedSmuBypassDirect");
+    singleton().smu13DirectEnabled = checkKernelArgument("-NRedSmuDirectPath");
 
     NRed::singleton().hwLateInit();
 
@@ -1666,7 +1666,7 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
         NRED_TRACE("smu-ctx-check: msg=0x%X v310=0x%X v10_98=0x%X vPP10_128=0x%X v428=0x%X v6b8=0x%X",
                    message, v310, v10_98, vPP10_128, v428, v6b8);
     }
-    // T15（方案II，门控 `-NRedSmuBypassDirect`，默认关）：白名单消息改走自有有界直通（D1）。
+    // T15（方案II，门控 `-NRedSmuDirectPath`，默认关）：白名单消息改走自有有界直通（D1）。
     // 闸仍在前方守门（此处仅白名单可达；gate-off 下的非白名单仍走下方 Apple 委托，对照轮语义守恒）。
     // 门控关闭时本块不执行 ⇒ 默认运行时路径与基线构建等价（仅新增 trace 行输出差异）。
     if (singleton().smu13DirectEnabled && NRedSmuGate::smuMsgAllowedByTimeoutL1(message)) {
@@ -1729,7 +1729,7 @@ CAILResult X5000HWLibs::wrapSmu90SendMessageWithParameter(void* const ctx, const
             PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion,     // 0x02
             PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion  // 0x03
         };
-        // T15（方案II，门控 `-NRedSmuBypassDirect`，默认关）：第二层注入改走自有有界直通（D2，2 s 上界）。
+        // T15（方案II，门控 `-NRedSmuDirectPath`，默认关）：第二层注入改走自有有界直通（D2，2 s 上界）。
         // 门控关闭时维持经 Apple org 指针（与基线构建运行时等价；间接层上界未解出，仅探针轮使用）。
         if (singleton().smu13DirectEnabled) {
             for (UInt32 msg : kWhitelist) {
