@@ -1052,7 +1052,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
 
     // 超时-L1（有界准入）门控：默认闸启用；-NRedSmuGateOff 存在则关闭闸（对照轮用）。
     // 在 kext 早期正常上下文解析一次，存入标量；后续 smuSendMessage 只读标量（避免频繁调用 checkKernelArgument）。
-
+    singleton().smu13SendGateDisabled = checkKernelArgument("-NRedSmuGateOff");
     // T11 第二层注入门控：默认关（仅在第一层零命中时由所有者显式开启）。
     // 解析一次存标量，避免探针路径频繁调用 checkKernelArgument。
     singleton().smu13ProbeInjectDisabled = !checkKernelArgument("-NRedSmuProbeInject");
