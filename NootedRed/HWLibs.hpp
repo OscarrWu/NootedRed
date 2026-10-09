@@ -34,7 +34,7 @@ class X5000HWLibs
     ObjectField<void*>                                           smuInternalSWInitField;
     ObjectField<void*>                                           smuFullscreenEventField;
     void*                                                        smuCtxCache{nullptr};
-    bool                                                         smu13InitAttempted{false};
+    bool                                                         smu13SendGateDisabled{false};
     // 驱动表（SmuMetrics_t 168B）物理连续缓冲，由 smu13SetupDriverTableAndTransfer 持有，生命周期与 kext 一致，
     // 不释放（SMU 通过 Transfer 后仍指向该 DRAM 地址）。
     IOBufferMemoryDescriptor*                                    smu13MetricsBuffer{nullptr};

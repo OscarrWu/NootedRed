@@ -21,7 +21,7 @@
 #include <GPUDriversAMD/TTL/SWIP/IPVersion.hpp>
 #include <GPUDriversAMD/TTL/SWIP/SDMA.hpp>
 #include <GPUDriversAMD/TTL/SWIP/SMU.hpp>
-#include <HWLibs.hpp>
+#include <HWLibsSmuGate.hpp>
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
@@ -1048,7 +1048,10 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
-    singleton().kcSlide = slide;   // 第八步观测：供探针换算 HWLibs 内部全局的运行时地址
+
+    // 超时-L1（有界准入）门控：默认闸启用；-NRedSmuGateOff 存在则关闭闸（对照轮用）。
+    // 在 kext 早期正常上下文解析一次，存入标量；后续 smuSendMessage 只读标量（避免频繁调用 checkKernelArgument）。
+    singleton().smu13SendGateDisabled = checkKernelArgument("-NRedSmuGateOff");
 
     NRed::singleton().hwLateInit();
 
@@ -1631,6 +1634,13 @@ CAILResult X5000HWLibs::wrapPspCmdKmSubmit(void* const ctx, void* const cmd, voi
 CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, const UInt32 param,
                                        UInt32* const outParam) const
 {
+    // 超时-L1（有界准入）闸：白名单外的消息直接拒绝，不进入 Apple 侧无界等待。
+    // 默认闸启用；-NRedSmuGateOff 存在时关闭闸（对照轮）。
+    if (!singleton().smu13SendGateDisabled && !NRedSmuGate::smuMsgAllowedByTimeoutL1(message)) {
+        NRED_TRACE("smu13: timeout-L1 gate refused msg 0x%X -> NoResponse", message);
+        return kCAILResultNoResponse;
+    }
+
     if (const auto res = this->smu90SendMessageWithParameter(ctx, message, param); res != kCAILResultOK) { return res; }
 
     if (outParam != nullptr) { *outParam = this->smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_82, 0, kCAILHWBlockMP1, 0); }
@@ -1846,6 +1856,8 @@ CAILResult X5000HWLibs::smu13NotifyEvent(void* const ctx, TTLEventInput* const i
 
     if (input->arg == SMU_EVENT_POWER_UP || input->arg == 4 || input->arg == 8 || input->arg == SMU_EVENT_REINITIALISE)
     {
+        // 超时-L1：power-up 分支进入 smu13PowerUpConfig，其内部消息将受闸过滤（非白名单即拒绝）。
+        NRED_TRACE("smu13: notify power-up -> smu13PowerUpConfig (gate active)");
         return smu13PowerUpConfig(ctx);
     }
 

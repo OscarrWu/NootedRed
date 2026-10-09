@@ -21,7 +21,7 @@ STUBDIR   = $(NRDIR)/tests/stub
 INCLUDES  = -I$(STUBDIR) -I$(NRDIR)
 BUILDDIR  = build/nred-tests
 
-TESTS = $(BUILDDIR)/test_nbio_strap
+TESTS = $(BUILDDIR)/test_nbio_strap $(BUILDDIR)/test_smu_gate
 
 .PHONY: test clean
 
@@ -30,7 +30,7 @@ test: $(TESTS)
 	@set -e; for t in $(TESTS); do echo "▶ $$t"; $$t; done
 	@echo "全部测试通过。"
 
-$(BUILDDIR)/%: $(NRDIR)/tests/%.cpp $(NRDIR)/Regs/NBIO.hpp $(NRDIR)/GPUDriversAMD/RavenIPOffset.hpp $(wildcard $(STUBDIR)/IOKit/*.h)
+$(BUILDDIR)/%: $(NRDIR)/tests/%.cpp $(NRDIR)/Regs/NBIO.hpp $(NRDIR)/GPUDriversAMD/RavenIPOffset.hpp $(NRDIR)/HWLibsSmuGate.hpp $(NRDIR)/GPUDriversAMD/PhoenixPPSMC.hpp $(NRDIR)/GPUDriversAMD/RenoirPPSMC.hpp $(wildcard $(STUBDIR)/IOKit/*.h)
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@
 
