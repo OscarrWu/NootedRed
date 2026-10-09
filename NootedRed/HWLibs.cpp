@@ -1637,9 +1637,12 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
     }
 
     if (const auto res = this->smu90SendMessageWithParameter(ctx, message, param); res != kCAILResultOK) {
-        // T11 第一层：观测式 trace，记录 Apple 客户端路径的真实结果（零新增发送、零 ctx 风险、零寄存器访问）。
-        // 格式对齐 T4 规格 §2.3：`T4: smuSendMessage id=0x%X rc=%u arg=0x%X`
-        NRED_TRACE("T4: smuSendMessage id=0x%X rc=%u arg=0x%X", message, res, 0);
+        // T14/U-97-1（2026-10-10）：读响应参数寄存器 C2PMSG_82 分辨 rc=2 的
+        // "入口早退"（ctx->0x310 校验失败 → 寄存器未被 Apple 写入）与"分发器兜底"
+        // （Apple 已执行发送/等待、有寄存器写入值）；同时输出 regrd=1 标志确认已读。
+        const UInt32 uRespArg = this->smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_82, 0, kCAILHWBlockMP1, 0);
+        NRED_TRACE("T4: smuSendMessage id=0x%X rc=%u arg=0x%X regrd=1",
+                   message, res, uRespArg);
         return res;
     }
 
@@ -1649,9 +1652,12 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
         *outParam = outVal;
     }
 
-    // T11 第一层：观测式 trace，记录白名单消息的成功结果与 outParam。
-    // 格式对齐 T4 规格 §2.3：`T4: smuSendMessage id=0x%X rc=%u arg=0x%X`
-    NRED_TRACE("T4: smuSendMessage id=0x%X rc=%u arg=0x%X", message, kCAILResultOK, outVal);
+    // T14（2026-10-10）：T4 增强——追加 regrd 标志（regrd=1 已读响应寄存器；0 未读）。
+    //    rc=0 时 regrd=0 若 outParam=nullptr（未请求读取），regrd=1 若 outParam≠nullptr（成功读出）；
+    //    rc≠0 时 regrd=1（本行之前已读，见上）—— 与格式前缀 `T4: smuSendMessage …` 保持后向兼容
+    //    判读时正则 `T4: smuSendMessage id=0x[0-9A-Fa-f]+ rc=[0-9]+ arg=0x[0-9A-Fa-f]+` 仍应匹配。
+    NRED_TRACE("T4: smuSendMessage id=0x%X rc=%u arg=0x%X regrd=%u",
+               message, kCAILResultOK, outVal, outParam != nullptr ? 1U : 0U);
 
     return kCAILResultOK;
 }
