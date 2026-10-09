@@ -1052,7 +1052,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
 
     // 超时-L1（有界准入）门控：默认闸启用；-NRedSmuGateOff 存在则关闭闸（对照轮用）。
     // 在 kext 早期正常上下文解析一次，存入标量；后续 smuSendMessage 只读标量（避免频繁调用 checkKernelArgument）。
-    singleton().smu13SendGateDisabled = checkKernelArgument("-NRedSmuGateOff");
+
+    // T11 第二层注入门控：默认关（仅在第一层零命中时由所有者显式开启）。
+    // 解析一次存标量，避免探针路径频繁调用 checkKernelArgument。
+    singleton().smu13ProbeInjectDisabled = !checkKernelArgument("-NRedSmuProbeInject");
 
     NRed::singleton().hwLateInit();
 
@@ -1642,9 +1645,20 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
         return kCAILResultNoResponse;
     }
 
-    if (const auto res = this->smu90SendMessageWithParameter(ctx, message, param); res != kCAILResultOK) { return res; }
+    if (const auto res = this->smu90SendMessageWithParameter(ctx, message, param); res != kCAILResultOK) {
+        // T11 第一层：观测式 trace，记录 Apple 客户端路径的真实结果（零新增发送、零 ctx 风险、零寄存器访问）。
+        NRED_TRACE("T11: smuSendMessage id=0x%X rc=%u arg=0x%X", message, res, 0);
+        return res;
+    }
 
-    if (outParam != nullptr) { *outParam = this->smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_82, 0, kCAILHWBlockMP1, 0); }
+    UInt32 outVal = 0;
+    if (outParam != nullptr) {
+        outVal = this->smuCgsReadRegister(ctx, MP1_SMN_C2PMSG_82, 0, kCAILHWBlockMP1, 0);
+        *outParam = outVal;
+    }
+
+    // T11 第一层：观测式 trace，记录白名单消息的成功结果与 outParam。
+    NRED_TRACE("T11: smuSendMessage id=0x%X rc=%u arg=0x%X", message, kCAILResultOK, outVal);
 
     return kCAILResultOK;
 }
@@ -1658,6 +1672,27 @@ CAILResult X5000HWLibs::wrapSmu90SendMessageWithParameter(void* const ctx, const
         singleton().smu13InitAttempted = true;
         singleton().smuCtxCache         = ctx;
         smu13InternalHwInit(ctx);
+    }
+
+    // T11 第二层：注入式探针（仅当 -NRedSmuProbeInject 显式开启）。
+    // 在 Apple 传入活 ctx 的回调点首次进入时，直接调用 org 指针发送白名单三条消息。
+    // 约束：不使用 smuCtxCache、不经成员指针调用（避免递归）、零新增寄存器访问、禁 panic 门控。
+    static bool probeInjected = false;
+    if (!probeInjected && !singleton().smu13ProbeInjectDisabled) {
+        probeInjected = true;
+        // 直接调用 org 指针（绕过成员指针，防递归），使用 Apple 传入的 ctx。
+        auto orgSend = reinterpret_cast<CAILResult (*)(void*, UInt32, UInt32)>(singleton().orgSmu90SendMessageWithParameter);
+        if (orgSend != nullptr) {
+            constexpr UInt32 kWhitelist[] = {
+                PhoenixPPSMC::PPSMC_MSG_TestMessage,        // 0x01
+                PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion,     // 0x02
+                PhoenixPPSMC::PPSMC_MSG_GetDriverIfVersion  // 0x03
+            };
+            for (UInt32 msg : kWhitelist) {
+                CAILResult rc = orgSend(ctx, msg, 0);
+                NRED_TRACE("T11-inject: id=0x%X rc=%u", msg, rc);
+            }
+        }
     }
 
     return FunctionCast(wrapSmu90SendMessageWithParameter, singleton().orgSmu90SendMessageWithParameter)(ctx, message,
