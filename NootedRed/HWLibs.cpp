@@ -1636,6 +1636,34 @@ CAILResult X5000HWLibs::smuSendMessage(void* const ctx, const UInt32 message, co
         return kCAILResultNoResponse;
     }
 
+    // T14/U-97-2（2026-10-10）：委托前以纯内存读（零 MMIO）落盘 Apple 入口 `0x683ea` 的
+    // ctx 前置就绪检查三项候选值，定位 `rc=2` 的根因（零寄存器访问；指针均作内核地址校验）。
+    {
+        const auto isValidKernelPtr = [](const UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
+        const UInt64 vCtx = reinterpret_cast<UInt64>(ctx);
+        // ① ctx+0x310：就绪/绑定标志（Apple 入口 0x683d1 读 `mov 0x310(%rdi),%ecx`）
+        const UInt32 v310 = isValidKernelPtr(vCtx)
+            ? *reinterpret_cast<volatile const UInt32*>(static_cast<const UInt8*>(ctx) + 0x310) : 0xFFFFFFFF;
+        // ② *(ctx+0x10)+0x98：子对象内偏移（Apple 入口 0x683b7→0x64f60 读链）
+        const UInt64 p10 = isValidKernelPtr(vCtx)
+            ? *reinterpret_cast<volatile const UInt64*>(static_cast<const UInt8*>(ctx) + 0x10) : 0;
+        const UInt32 v10_98 = isValidKernelPtr(p10)
+            ? *reinterpret_cast<volatile const UInt32*>(reinterpret_cast<const UInt8*>(p10) + 0x98) : 0xFFFFFFFF;
+        // ③ *(*(ctx+0x10))+0x128：间接槽位校验（§12 候选；双间接需两次指针校验）
+        const UInt64 pp10 = isValidKernelPtr(p10)
+            ? *reinterpret_cast<volatile const UInt64*>(reinterpret_cast<const UInt8*>(p10)) : 0;
+        const UInt32 vPP10_128 = isValidKernelPtr(pp10)
+            ? *reinterpret_cast<volatile const UInt32*>(reinterpret_cast<const UInt8*>(pp10) + 0x128) : 0xFFFFFFFF;
+        // ④ ctx+0x428（Apple 入口候选字段）
+        const UInt32 v428 = isValidKernelPtr(vCtx)
+            ? *reinterpret_cast<volatile const UInt32*>(static_cast<const UInt8*>(ctx) + 0x428) : 0xFFFFFFFF;
+        // ⑤ ctx+0x6b8（Apple 入口候选字段）
+        const UInt32 v6b8 = isValidKernelPtr(vCtx)
+            ? *reinterpret_cast<volatile const UInt32*>(static_cast<const UInt8*>(ctx) + 0x6b8) : 0xFFFFFFFF;
+        NRED_TRACE("smu-ctx-check: msg=0x%X v310=0x%X v10_98=0x%X vPP10_128=0x%X v428=0x%X v6b8=0x%X",
+                   message, v310, v10_98, vPP10_128, v428, v6b8);
+    }
+
     if (const auto res = this->smu90SendMessageWithParameter(ctx, message, param); res != kCAILResultOK) {
         // T14/U-97-1（2026-10-10）：读响应参数寄存器 C2PMSG_82 分辨 rc=2 的
         // "入口早退"（ctx->0x310 校验失败 → 寄存器未被 Apple 写入）与"分发器兜底"
