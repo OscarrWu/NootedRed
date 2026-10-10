@@ -747,93 +747,68 @@ inline int waitRlcAutoloadComplete(display::RegSink& sink,
 /// @param cmd_buf_mc_addr   cmd_buf 的模拟 MC 地址
 /// @param ring_mc_addr      ring_buf 的模拟 MC 地址
 /// @return 0 成功，否则失败（ctx->last_step 指示中断位置）
-inline int bringupRun(BringupCtx* ctx,
-                      bool boot_time_tmr,
-                      bool autoload_supported,
-                      uint64_t fw_pri_mc_addr,
-                      uint64_t fence_mc_addr,
-                      uint64_t cmd_buf_mc_addr,
-                      uint64_t ring_mc_addr) {
+
+/// Phase 1: 运行到 TmrInit 完成（含），计算 tmr_size
+/// @return 0 成功，ctx->tmr_size 已填充；否则失败
+inline int bringupRunToTmrInit(BringupCtx* ctx,
+                               bool boot_time_tmr,
+                               bool autoload_supported,
+                               uint64_t fw_pri_mc_addr,
+                               uint64_t fence_mc_addr,
+                               uint64_t cmd_buf_mc_addr,
+                               uint64_t ring_mc_addr) {
     display::RegSink& sink = *ctx->sink;
     ctx->last_step = BringupStep::None;
     ctx->last_error = 0;
 
     // ========== Step 1: Bootloader chain ==========
-    // (amdgpu_psp.c:2954-3044, only for !amdgpu_sriov_vf)
-    // 7 条命令，各带 is_psp_fw_valid 守卫和 is_sos_alive 短路
-
-    // 1a: kdb (L2955-2962)
     if (isFwValid(ctx->bl_comps[0])) {
         ctx->last_step = BringupStep::BlLoadKdb;
-        ctx->last_error = bootloaderLoadComponent(
-            sink, ctx->fw_pri_buf, ctx->bl_comps[0], fw_pri_mc_addr);
+        ctx->last_error = bootloaderLoadComponent(sink, ctx->fw_pri_buf, ctx->bl_comps[0], fw_pri_mc_addr);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-
-    // 1b: spl (L2964-2971)
     if (isFwValid(ctx->bl_comps[1])) {
         ctx->last_step = BringupStep::BlLoadSpl;
-        ctx->last_error = bootloaderLoadComponent(
-            sink, ctx->fw_pri_buf, ctx->bl_comps[1], fw_pri_mc_addr);
+        ctx->last_error = bootloaderLoadComponent(sink, ctx->fw_pri_buf, ctx->bl_comps[1], fw_pri_mc_addr);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-
-    // 1c: sysdrv (L2973-2980)
     if (isFwValid(ctx->bl_comps[2])) {
         ctx->last_step = BringupStep::BlLoadSysdrv;
-        ctx->last_error = bootloaderLoadComponent(
-            sink, ctx->fw_pri_buf, ctx->bl_comps[2], fw_pri_mc_addr);
+        ctx->last_error = bootloaderLoadComponent(sink, ctx->fw_pri_buf, ctx->bl_comps[2], fw_pri_mc_addr);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-
-    // 1d: soc_drv (L2982-2989)
     if (isFwValid(ctx->bl_comps[3])) {
         ctx->last_step = BringupStep::BlLoadSocDrv;
-        ctx->last_error = bootloaderLoadComponent(
-            sink, ctx->fw_pri_buf, ctx->bl_comps[3], fw_pri_mc_addr);
+        ctx->last_error = bootloaderLoadComponent(sink, ctx->fw_pri_buf, ctx->bl_comps[3], fw_pri_mc_addr);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-
-    // 1e: intf_drv (L2991-2998)
     if (isFwValid(ctx->bl_comps[4])) {
         ctx->last_step = BringupStep::BlLoadIntfDrv;
-        ctx->last_error = bootloaderLoadComponent(
-            sink, ctx->fw_pri_buf, ctx->bl_comps[4], fw_pri_mc_addr);
+        ctx->last_error = bootloaderLoadComponent(sink, ctx->fw_pri_buf, ctx->bl_comps[4], fw_pri_mc_addr);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-
-    // 1f: dbg_drv (L3000-3007)
     if (isFwValid(ctx->bl_comps[5])) {
         ctx->last_step = BringupStep::BlLoadDgbDrv;
-        ctx->last_error = bootloaderLoadComponent(
-            sink, ctx->fw_pri_buf, ctx->bl_comps[5], fw_pri_mc_addr);
+        ctx->last_error = bootloaderLoadComponent(sink, ctx->fw_pri_buf, ctx->bl_comps[5], fw_pri_mc_addr);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-
-    // 1g: sos (L3036-3043) — 特殊处理
     if (isFwValid(ctx->bl_comps[6])) {
         ctx->last_step = BringupStep::BlLoadSos;
-        ctx->last_error = bootloaderLoadSos(
-            sink, ctx->fw_pri_buf, ctx->bl_comps[6], fw_pri_mc_addr);
+        ctx->last_error = bootloaderLoadSos(sink, ctx->fw_pri_buf, ctx->bl_comps[6], fw_pri_mc_addr);
         if (ctx->last_error != 0) return ctx->last_error;
     }
 
-    // ========== Step 2: Ring create (L3046-3050) ==========
+    // ========== Step 2: Ring create ==========
     ctx->last_step = BringupStep::RingCreate;
-    ctx->last_error = ringCreate(sink, ring_mc_addr, kRingSizeBytes,
-                                 PSP_RING_TYPE__KM);
+    ctx->last_error = ringCreate(sink, ring_mc_addr, kRingSizeBytes, PSP_RING_TYPE__KM);
     if (ctx->last_error != 0) return ctx->last_error;
 
-    // ========== Step 3: Update fw reservation (L3052-3058) ==========
-    // 只在 !in_reset && !in_suspend 时调用
-    // 13.0.4 不执行（版本不在白名单内）
+    // ========== Step 3: Update fw reservation ==========
     ctx->last_step = BringupStep::UpdateFwReserve;
-    ctx->last_error = updateFwReservation(0); // MP0 IP version 13.0.4
+    ctx->last_error = updateFwReservation(0);
     if (ctx->last_error != 0) return ctx->last_error;
 
-    // ========== Step 4: TMR init (L3063-3069) ==========
-    // amdgpu_psp.c:3063: if (!psp->boot_time_tmr || psp->autoload_supported)
-    // 13.0.4: boot_time_tmr = false → 条件为真 → 执行 tmr_init
+    // ========== Step 4: TMR init ==========
     if (!boot_time_tmr || autoload_supported) {
         ctx->last_step = BringupStep::TmrInit;
         ctx->last_error = tmrInit(sink, ctx->ring,
@@ -847,22 +822,30 @@ inline int bringupRun(BringupCtx* ctx,
         if (ctx->last_error != 0) return ctx->last_error;
     }
 
-    // ========== Step 5: TMR load (L3083-3087) ==========
-    // amdgpu_psp.c:3083: psp_tmr_load(psp) — 无条件（内部 skip_tmr 判断）
+    ctx->last_step = BringupStep::TmrInit;
+    return 0;
+}
+
+/// Phase 2: 运行 TmrLoad (SETUP_TMR)，需 ctx->tmr_buf 已分配
+/// @param tmr_mc_addr TMR 物理地址（由调用方分配后填入）
+/// @return 0 成功，否则失败
+inline int bringupRunTmrLoad(BringupCtx* ctx,
+                             bool boot_time_tmr,
+                             bool autoload_supported,
+                             uint64_t tmr_mc_addr,
+                             uint64_t cmd_buf_mc_addr,
+                             uint64_t fence_mc_addr) {
+    display::RegSink& sink = *ctx->sink;
+    ctx->last_error = 0;
+
+    // ========== Step 5: TMR load (SETUP_TMR) ==========
     ctx->last_step = BringupStep::TmrLoad;
     if (!skipTmr(boot_time_tmr, autoload_supported)) {
-        // D-3 追加：tmrLoad 子步 trace
         NRED_TRACE("tmrLoad: start tmr_size=0x%X", ctx->tmr_size);
-        // 等 Linux psp_tmr_load L940: if (psp_skip_tmr(psp)) return 0;
-        // 若 tmr_buf 由调用方分配，这里使用其地址
-        // 若 tmr_buf 为空，模拟地址 0 但提交操作仍执行
-        const uint64_t tmr_mc = (ctx->tmr_buf)
-            ? reinterpret_cast<uint64_t>(ctx->tmr_buf)
-            : 0xDEAD0000ULL; // 虚拟地址，离线测试中可接受
         NRED_TRACE("tmrLoad: submit tmr_mc=0x%llX tmr_size=0x%X",
-                   (unsigned long long)tmr_mc, ctx->tmr_size);
+                   (unsigned long long)tmr_mc_addr, ctx->tmr_size);
         ctx->last_error = tmrLoad(sink, ctx->ring,
-                                  tmr_mc, ctx->tmr_size,
+                                  tmr_mc_addr, ctx->tmr_size,
                                   cmd_buf_mc_addr,
                                   fence_mc_addr,
                                   &ctx->last_resp_status);
@@ -875,6 +858,28 @@ inline int bringupRun(BringupCtx* ctx,
 
     ctx->last_step = BringupStep::Done;
     return 0;
+}
+
+/// 完整流程（Phase 1 + TMR 分配 + Phase 2）——供测试/兼容使用
+/// 注：实际 kext 接线应分两阶段调用，以便在 Phase 1/2 间分配 TMR
+inline int bringupRun(BringupCtx* ctx,
+                      bool boot_time_tmr,
+                      bool autoload_supported,
+                      uint64_t fw_pri_mc_addr,
+                      uint64_t fence_mc_addr,
+                      uint64_t cmd_buf_mc_addr,
+                      uint64_t ring_mc_addr) {
+    int ret = bringupRunToTmrInit(ctx, boot_time_tmr, autoload_supported,
+                                  fw_pri_mc_addr, fence_mc_addr,
+                                  cmd_buf_mc_addr, ring_mc_addr);
+    if (ret != 0) return ret;
+    // 注：完整流程中 TMR 分配由调用方在两阶段间完成
+    // 此处仅为测试兼容，直接用 ctx->tmr_buf（若为空则用模拟地址）
+    uint64_t tmr_mc = (ctx->tmr_buf)
+        ? reinterpret_cast<uint64_t>(ctx->tmr_buf)
+        : 0xDEAD0000ULL;
+    return bringupRunTmrLoad(ctx, boot_time_tmr, autoload_supported,
+                             tmr_mc, cmd_buf_mc_addr, fence_mc_addr);
 }
 
 } // namespace fw

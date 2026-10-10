@@ -188,15 +188,67 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     const uint64_t cmdBufMc = cmdPhys;
     const uint64_t ringMc   = ringPhys;
 
-    // ⑤ bringupRun（各步有界轮询：kFenceTimeout×80µs、kRespTimeout≈2s —— I7；
-    //    no response 视为超时返回错误码、不 panic —— I8；失败不改变 Apple 行为 —— I5）。
-    const int rc = fw::bringupRun(&ctx,
-                                  false,      // boot_time_tmr（13.0.4 不预分配 TMR）
-                                  false,      // autoload_supported
-                                  fwPriMc,
-                                  fenceMc,
-                                  cmdBufMc,
-                                  ringMc);
+    // ⑤ Phase 1: 运行到 TmrInit（含 loadToc），得到 tmr_size
+    int rc = fw::bringupRunToTmrInit(&ctx,
+                                     false,      // boot_time_tmr
+                                     false,      // autoload_supported
+                                     fwPriMc,
+                                     fenceMc,
+                                     cmdBufMc,
+                                     ringMc);
+    if (rc != 0) {
+        NRED_TRACE("bringup: phase1 failed step=%u error=%d",
+                   static_cast<unsigned>(ctx.last_step), rc);
+        ringDesc->complete(); ringDesc->release();
+        cmdDesc->complete(); cmdDesc->release();
+        fenceDesc->complete(); fenceDesc->release();
+        fwPriDesc->complete(); fwPriDesc->release();
+        return;
+    }
+
+    // ⑥ A-11：TMR 物理连续缓冲分配（PSP 可 DMA）。tmrInit 计算 tmr_size 后，在此分配。
+    // 依据：Linux psp_tmr_init (amdgpu_psp.c:881-923) 先 loadToc 取 tmr_size，再分配 TMR。
+    // 分配失败 ⇒ trace 并跳过（可判、不静默）。
+    constexpr UInt32 kTmrAlign = 4096;
+    IOBufferMemoryDescriptor* tmrDesc = nullptr;
+    addr64_t tmrPhys = 0;
+    uint8_t* tmrVa = nullptr;
+    bool tmrOk = false;
+    if (ctx.tmr_size > 0) {
+        tmrDesc = IOBufferMemoryDescriptor::withOptions(
+            kIOMemoryPhysicallyContiguous | kIODirectionInOut, ctx.tmr_size, kTmrAlign);
+        if (tmrDesc != nullptr && tmrDesc->prepare() == kIOReturnSuccess) {
+            IOByteCount segLen = 0;
+            tmrPhys = tmrDesc->getPhysicalSegment(0, &segLen, 0);
+            tmrOk = (tmrPhys != 0 && segLen >= ctx.tmr_size);
+            if (tmrOk) {
+                tmrVa = static_cast<uint8_t*>(tmrDesc->getBytesNoCopy());
+                bzero(tmrVa, ctx.tmr_size);
+            }
+        }
+    }
+    if (!tmrOk) {
+        NRED_TRACE("bringup: tmr alloc failed size=0x%X", ctx.tmr_size);
+        if (tmrDesc) { tmrDesc->complete(); tmrDesc->release(); }
+        ringDesc->complete(); ringDesc->release();
+        cmdDesc->complete(); cmdDesc->release();
+        fenceDesc->complete(); fenceDesc->release();
+        fwPriDesc->complete(); fwPriDesc->release();
+        return;
+    }
+    ctx.tmr_buf = tmrVa;
+
+    // ⑦ Phase 2: TmrLoad (SETUP_TMR)，使用真实 tmr_mc_addr
+    rc = fw::bringupRunTmrLoad(&ctx,
+                               false,      // boot_time_tmr
+                               false,      // autoload_supported
+                               tmrPhys,
+                               cmdBufMc,
+                               fenceMc);
+    if (rc != 0) {
+        NRED_TRACE("bringup: phase2 failed step=%u error=%d resp_status=0x%X",
+                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status);
+    }
 
     // I10：结构化逐步 trace（含 resp_status——A-10 ③，区分超时与固件应答）。
     NRED_TRACE("bringup: step=%u last_error=%d resp_status=0x%X",
@@ -208,6 +260,7 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     cmdDesc->complete(); cmdDesc->release();
     fenceDesc->complete(); fenceDesc->release();
     fwPriDesc->complete(); fwPriDesc->release();
+    tmrDesc->complete(); tmrDesc->release();
 }
 
 }  // namespace fw
