@@ -63,19 +63,123 @@ inline const char* wmName(const uint32_t id)
     }
 }
 
+// ── A-30：扩展口径 · 写侧指针哨兵（A-26 §4/§10，判据"字段==0 ⇒ 该条失败"）──
+//  程序序（A-26 §2）：P4<P6<P7<P8<P10<P11<P12<P13<P14<P15<P16<P17<P18<P19<P21<…<P31
+enum SentryId : uint32_t {
+    P4_20630 = 0, P6_370, P7_bit14, P8_bit15,
+    P10_3B0,                         // P11 恒真，无哨兵
+    P12_530,
+    P13_Unreliable, P14_2F8,         // {P13,P14} 二元窗口
+    P16_378, P17_bit19, P18_380, P19_bit20,
+    P21_388, P22_bit21, P23_518, P24_205F8,
+    P25_bit22, P26_bit23, P27_3A0, P28_bit24,
+    P29_368, P30_205C8, P31_205D0,
+    SentryCount
+};
+
+// A-30：位掩码位分配（accel+0x1e88，A-26 §5.2）
+//  位 N ⇔ byte 0x1e88+(N>>3) 的第 N&7 位。
+inline uint32_t maskBit(const uint32_t n) { return 1u << (n & 7u); }
+inline uint32_t maskByteOff(const uint32_t n) { return 0x1E88 + (n >> 3); }
+
+// 哨兵名（判读输出用；与 SentryId 同序）
+inline const char* sentryName(const uint32_t id)
+{
+    switch (id) {
+        case SentryId::P4_20630:   return "P4+0x20630";
+        case SentryId::P6_370:     return "P6+0x370";
+        case SentryId::P7_bit14:   return "P7 bit14";
+        case SentryId::P8_bit15:   return "P8 bit15";
+        case SentryId::P10_3B0:    return "P10+0x3B0";
+        case SentryId::P12_530:    return "P12+0x530";
+        case SentryId::P13_Unreliable: return "P13 unreliable";
+        case SentryId::P14_2F8:    return "P14+0x2F8";
+        case SentryId::P16_378:    return "P16+0x378";
+        case SentryId::P17_bit19:  return "P17 bit19";
+        case SentryId::P18_380:    return "P18+0x380";
+        case SentryId::P19_bit20:  return "P19 bit20";
+        case SentryId::P21_388:    return "P21+0x388";
+        case SentryId::P22_bit21:  return "P22 bit21(部分)";
+        case SentryId::P23_518:    return "P23+0x518";
+        case SentryId::P24_205F8:  return "P24+0x205F8";
+        case SentryId::P25_bit22:  return "P25 bit22";
+        case SentryId::P26_bit23:  return "P26 bit23";
+        case SentryId::P27_3A0:    return "P27+0x3A0";
+        case SentryId::P28_bit24:  return "P28 bit24";
+        case SentryId::P29_368:    return "P29+0x368";
+        case SentryId::P30_205C8:  return "P30+0x205C8";
+        case SentryId::P31_205D0:  return "P31+0x205D0";
+        default:                   return "?";
+    }
+}
+
+// ── A-30：P25 引擎表 11 槽读法（A-26 §11，this+0x3B8..0x408）──
+//  Vega10 只填 5 个引擎（i=0,1,2,5,7）；其余槽应恒 0（跳过，非失败）。
+struct P25Slots {
+    uint64_t slots[11];     // this+0x3B8 + i*8, i=0..10
+    uint32_t valid;         // 1 = this 合法且已读
+};
+
+// P25 槽位判定（A-26 §11.3）：返回 first-false 归属
+//   0 = P25 通过（bit22 已证，或 5 槽全非 0 且 bit22==1）
+//   1 = 第 1 次分配失败（slots[0]==0）
+//   2..5 = 第 k 次分配失败（k = 第一个为 0 的预期槽：i=1→2, i=2→3, i=5→4, i=7→5）
+//   6 = 整表异常（11 槽全非 0，违反 Vega10 只填 5 槽 —— 与位掩码单调位联合判）
+inline uint32_t evalP25Slots(const P25Slots& s, const uint32_t bit22)
+{
+    if (!s.valid) { return 0; }   // 不可判，视作通过（避免误报）——真实判定以 bit22 为准
+    const uint32_t expect[5] = {0, 1, 2, 5, 7};
+    for (uint32_t k = 0; k < 5; ++k) {
+        if (s.slots[expect[k]] == 0) { return k + 1; }  // 1..5 = 第 k+1 次失败
+    }
+    // 5 槽填满，其余为 0：以 bit22 为准
+    return bit22 ? 0 : 6;
+}
+
+struct SentryVal {
+    uint32_t id;       // SentryId
+    uint64_t value;    // 读到的值（指针字段或位值）
+    uint32_t valid;    // 1 = 已读到；0 = 未读到（指针非法）
+};
+
+// ── first-false 判定结果（A-25 与 A-30 共用）──
+struct WindowResult {
+    uint32_t firstFalseId;    // 第一个"空"的水印（WmCount/SentryCount = 无空，全部非空）
+    uint32_t firstFalseValid; // 1 = 判定有效（该水印确实读到了且值为 0）
+    uint32_t readCount;       // 成功读到的水印数
+    uint32_t unknownCount;    // 未能读到的水印数（valid==0）
+};
+
+// ── A-30：按程序序找"第一个为假的水印"（扩展口径；哨兵/位掩码混合）──
+//  "为假" 定义：valid==1 且（指针字段 value==0 || 位掩码比特==0）。
+//  valid==0（未读到）不计为假（不可判，与 P3P14 的 0xFF 哨兵纪律一致）。
+//  @param vals 已按程序序排列的哨兵读数（SentryId 序 = 程序序）
+inline WindowResult findFirstFalseSentry(const SentryVal* const vals, const uint32_t n)
+{
+    WindowResult out{};
+    out.firstFalseId    = SentryId::SentryCount;   // 默认：无假
+    out.firstFalseValid = 0;
+    out.readCount       = 0;
+    out.unknownCount    = 0;
+    if (vals == nullptr) { return out; }
+    for (uint32_t i = 0; i < n; ++i) {
+        if (vals[i].valid) {
+            ++out.readCount;
+            if (vals[i].value == 0 && out.firstFalseId == SentryId::SentryCount) {
+                out.firstFalseId    = vals[i].id;
+                out.firstFalseValid = 1;
+            }
+        } else {
+            ++out.unknownCount;
+        }
+    }
+    return out;
+}
 // ── 单个水印读数 ──
 struct WmVal {
     uint32_t id;      // WmId
     uint64_t value;   // 读到的值
     uint32_t valid;   // 1 = 已读到；0 = 未读到（指针非法，值无意义）
-};
-
-// ── first-false 判定结果 ──
-struct WindowResult {
-    uint32_t firstFalseId;    // 第一个"空"的水印（WmCount = 无空，全部非空）
-    uint32_t firstFalseValid; // 1 = 判定有效（该水印确实读到了且值为 0）
-    uint32_t readCount;       // 成功读到的水印数
-    uint32_t unknownCount;    // 未能读到的水印数（valid==0）
 };
 
 // ── P5 时序二值判结果 ──
@@ -85,6 +189,8 @@ struct P5Binary {
     uint32_t valid;     // 1 = self/node 指针均合法且已读；0 = 未读到（值无意义）
     uint32_t bothZero;  // 1 = nodeD8==0 && nodeD0==0（P5 后半在 S1 时刻为空）
 };
+
+// ── first-false 判定结果（A-25 与 A-30 共用）──
 
 // ── 纯逻辑：按程序序找"第一个为空的水印" ──
 //  "空" 定义：valid==1 且 value==0。

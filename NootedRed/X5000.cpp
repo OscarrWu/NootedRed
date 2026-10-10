@@ -1948,8 +1948,15 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
     };
 
     const UInt64 s = reinterpret_cast<UInt64>(self);
-    nred::WmVal wms[nred::WmCount];
     const bool sValid = isKernelPtr(s);
+    nred::WmVal wms[nred::WmCount];
+    nred::SentryVal sent[nred::SentryId::SentryCount];
+    nred::P25Slots p25{};
+    for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) {
+        sent[i].id    = i;
+        sent[i].value = 0;
+        sent[i].valid = 0;
+    }
     for (uint32_t i = 0; i < nred::WmCount; ++i) {
         wms[i].id    = i;
         wms[i].value = 0;
@@ -1968,35 +1975,70 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         wms[nred::WmP15_20810].value = rd64(s, 0x20810);
         wms[nred::WmP25_3B8].value = rd64(s, 0x3B8);
         wms[nred::WmAccel_1A38].value = rd64(s, 0x1A38);
-        wms[nred::WmAccel_1E89B0].value = rd8(s, 0x1E89) & 0x1ULL;
         for (uint32_t i = 0; i < nred::WmCount; ++i) { wms[i].valid = 1; }
-    }
 
-    // P5 时序二值判：self+0x50 → node；node+0xD8 / node+0xD0
-    uint64_t nodeD8 = 0, nodeD0 = 0;
-    uint32_t nodeValid = 0;
-    if (sValid) {
-        const UInt64 node = rd64(s, 0x50);
-        if (isKernelPtr(node)) {
-            nodeD8 = rd64(node, 0xD8);
-            nodeD0 = rd64(node, 0xD0);
-            nodeValid = 1;
+        // ── A-30：扩展口径 · 写侧哨兵（13 指针字段 + 位掩码统一解包）──
+        //  读法：指针字段 rd64；位掩码读 accel+0x1e88 的 4 字节后按 A-26 §5.2 解位。
+        const uint64_t maskWord = *reinterpret_cast<const volatile uint32_t*>(s + 0x1E88);
+        auto bit = [&](const uint32_t n) -> uint64_t {
+            return (maskWord & nred::maskBit(n)) ? 1ULL : 0ULL;
+        };
+        // 哨兵值（指针字段直接读数；位掩码解 bit）
+        sent[nred::SentryId::P4_20630].value   = rd64(s, 0x20630);
+        sent[nred::SentryId::P6_370].value     = rd64(s, 0x370);
+        sent[nred::SentryId::P7_bit14].value   = bit(14);
+        sent[nred::SentryId::P8_bit15].value   = bit(15);
+        sent[nred::SentryId::P10_3B0].value    = rd64(s, 0x3B0);
+        sent[nred::SentryId::P12_530].value    = rd64(s, 0x530);
+        sent[nred::SentryId::P13_Unreliable].value = bit(18);   // 不可靠（§8.7）
+        sent[nred::SentryId::P14_2F8].value    = rd64(s, 0x2F8);
+        sent[nred::SentryId::P16_378].value    = rd64(s, 0x378);
+        sent[nred::SentryId::P17_bit19].value  = bit(19);
+        sent[nred::SentryId::P18_380].value    = rd64(s, 0x380);
+        sent[nred::SentryId::P19_bit20].value  = bit(20);
+        sent[nred::SentryId::P21_388].value    = rd64(s, 0x388);
+        sent[nred::SentryId::P22_bit21].value  = bit(21);
+        sent[nred::SentryId::P23_518].value    = rd64(s, 0x518);
+        sent[nred::SentryId::P24_205F8].value  = rd64(s, 0x205F8);
+        sent[nred::SentryId::P25_bit22].value  = bit(22);
+        sent[nred::SentryId::P26_bit23].value  = bit(23);
+        sent[nred::SentryId::P27_3A0].value    = rd64(s, 0x3A0);
+        sent[nred::SentryId::P28_bit24].value  = bit(24);
+        sent[nred::SentryId::P29_368].value    = rd64(s, 0x368);
+        sent[nred::SentryId::P30_205C8].value  = rd64(s, 0x205C8);
+        sent[nred::SentryId::P31_205D0].value  = rd64(s, 0x205D0);
+        for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) { sent[i].valid = 1; }
+
+        // ── A-30：P25 引擎表 11 槽（this+0x3B8..0x408）──
+        p25.valid = 1;
+        for (uint32_t i = 0; i < 11; ++i) {
+            p25.slots[i] = rd64(s, 0x3B8 + i * 8);
         }
     }
-    const nred::P5Binary p5 = nred::evalP5Binary(nodeD8, nodeD0, sValid ? 1u : 0u, nodeValid);
-    const nred::WindowResult w = nred::findFirstFalse(wms, nred::WmCount);
 
-    // 输出（NRED_TRACE → A-22 内存环 → 安全时点刷盘；零文件系统写）。
-    NRED_TRACE("win-probe: self=0x%llX ret=%u read=%u unknown=%u firstEmpty=%u(%s)",
-               (unsigned long long)s, ret ? 1u : 0u, w.readCount, w.unknownCount,
-               w.firstFalseId, nred::wmName(w.firstFalseId));
+    const nred::WindowResult ws = nred::findFirstFalseSentry(sent, nred::SentryId::SentryCount);
+    const uint32_t p25verdict = nred::evalP25Slots(p25, static_cast<uint32_t>(sent[nred::SentryId::P25_bit22].value));
+
+    // ── A-30 输出（条级判据）──
+    NRED_TRACE("win-probe-E: mask32=0x%08X", (unsigned)0);   // 占位（掩码在逐行输出）
+    NRED_TRACE("win-probe-S: firstFalse=%u(%s) read=%u unknown=%u",
+               ws.firstFalseId, nred::sentryName(ws.firstFalseId), ws.readCount, ws.unknownCount);
+    for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) {
+        NRED_TRACE("win-probe-S: %s=0x%llX valid=%u",
+                   nred::sentryName(sent[i].id), (unsigned long long)sent[i].value, sent[i].valid);
+    }
+    NRED_TRACE("win-probe-P25: verdict=%u slots=[%llX %llX %llX %llX %llX %llX %llX %llX %llX %llX %llX]",
+               p25verdict,
+               (unsigned long long)p25.slots[0], (unsigned long long)p25.slots[1],
+               (unsigned long long)p25.slots[2], (unsigned long long)p25.slots[3],
+               (unsigned long long)p25.slots[4], (unsigned long long)p25.slots[5],
+               (unsigned long long)p25.slots[6], (unsigned long long)p25.slots[7],
+               (unsigned long long)p25.slots[8], (unsigned long long)p25.slots[9],
+               (unsigned long long)p25.slots[10]);
     for (uint32_t i = 0; i < nred::WmCount; ++i) {
         NRED_TRACE("win-probe: %s=0x%llX valid=%u",
                    nred::wmName(wms[i].id), (unsigned long long)wms[i].value, wms[i].valid);
     }
-    NRED_TRACE("win-probe: P5 nodeD8=0x%llX nodeD0=0x%llX valid=%u bothZero=%u",
-               (unsigned long long)p5.nodeD8, (unsigned long long)p5.nodeD0, p5.valid, p5.bothZero);
-    return ret;
 }
 // 第八步观测（第 14 轮）：`probe` 的结果**不在原地 panic**（第 13 轮实测：匹配阶段 panic 太早，
 // panic 通道未就绪 ⇒ 零分片、不自动重启），改为写入全局静态标量，由**安全位置**
