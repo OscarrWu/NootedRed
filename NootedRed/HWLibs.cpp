@@ -27,7 +27,7 @@
 #include <HWLibsSmuGate.hpp>
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
-#include <Headers/kern_util.hpp>
+#include <libkern/OSAtomic.h>   // A-28：OSCompareAndSwap 原子互斥（flush 重入保护）
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <Kexts.hpp>
@@ -101,8 +101,8 @@ int nredTraceFlush(int secTag)
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
     // A-28 风险①处理：flush 用**独立** `stFlushBusy` 互斥（与 L2 的 `stBusy` 分开）⇒
     //  万一 FS 阻塞，只影响本 flush，不会让 L2 周期拍后续全部跳过（唯一存活计时器保住）。
-    if (NvMsgBuf::stFlushBusy()) { return 0; }
-    NvMsgBuf::stFlushBusy() = true;
+    //  使用 OSCompareAndSwap 原子 test-and-set 防止 flush 重入写坏缓冲。
+    if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusy())) { return 0; }
     static unsigned fseq = 0;
     char name[96];
     // A-28 风险②处理：文件名带 **slide**（认属主）+ 首行带 **uptime 指纹 + sec**（认本轮/秒级）。

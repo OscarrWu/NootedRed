@@ -190,7 +190,8 @@ namespace NvMsgBuf {
 	inline bool          &stBusy()      { static bool v = false; return v; }
 	// A-28：`nredTraceFlush` 的独立互斥标志（与 stBusy **分开**——flush 写可能变长阻塞，
 	//  若与 stBusy 共用则一次 FS 阻塞会让 L2 周期拍全部跳过、唯一存活计时器失效）。
-	inline bool          &stFlushBusy() { static bool v = false; return v; }
+	//  使用 UInt32 + OSCompareAndSwap 实现原子 test-and-set（防止 flush 重入写坏缓冲）。
+	inline UInt32          &stFlushBusy() { static UInt32 v = 0; return v; }
 
 	// 计算"自上次成功写出之后新增的部分"，填充 gBuf；成功则把本帧终点记入 stPendingEnd。
 	// ⚠️ **不推进 stLastBufx**（推进由 commit 完成）⇒ 写失败时下拍重算同一段（自然重试）。

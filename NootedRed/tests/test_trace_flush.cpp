@@ -22,13 +22,14 @@
 //     stFlushBusy()  = A-28 新增：flush 的**独立**互斥标志
 
 #include <NRedTraceRing.hpp>
+#include <IOKit/IOTypes.h>   // UInt32（用户态最小替身，见 tests/stub）
 
 #include <cassert>
 #include <cstdio>
 
 namespace NvMsgBuf {
     inline bool& stBusy()       { static bool v = false; return v; }   // 与 NvMsgBuf.hpp:190 同构
-    inline bool& stFlushBusy()  { static bool v = false; return v; }   // 与 NvMsgBuf.hpp:193 同构
+    inline UInt32& stFlushBusy() { static UInt32 v = 0; return v; }   // 与 NvMsgBuf.hpp:193 同构（UInt32 原子）
     static constexpr int kTickSecs = 1;                                // 与 NvMsgBuf.hpp:172 同构
 }
 // ── 秒级标签计算：`tick * kTickSecs`（与 dumpTick 内 `sec` 同式）──
@@ -72,12 +73,12 @@ static void test_reset_after_flush() {
 static void test_flush_busy_guard() {
     printf("▶ test_flush_busy_guard\n");
     // 模拟：flush 已在临界区（stFlushBusy==true）⇒ 后续调用直接返回（不并发写）
-    NvMsgBuf::stFlushBusy() = true;
+    NvMsgBuf::stFlushBusy() = 1;
     // 断言标志语义：置位 ⇒ 表示"正在写"，调用方应跳过
-    assert(NvMsgBuf::stFlushBusy() == true && "flush busy flag set");
+    assert(NvMsgBuf::stFlushBusy() == 1 && "flush busy flag set");
     // 复位（模拟写完成）
-    NvMsgBuf::stFlushBusy() = false;
-    assert(NvMsgBuf::stFlushBusy() == false && "flag cleared after write");
+    NvMsgBuf::stFlushBusy() = 0;
+    assert(NvMsgBuf::stFlushBusy() == 0 && "flag cleared after write");
     printf("  PASS: stFlushBusy guards concurrent file write\n");
 }
 
@@ -85,10 +86,10 @@ static void test_flush_busy_guard() {
 static void test_flags_are_independent() {
     printf("▶ test_flags_are_independent\n");
     NvMsgBuf::stBusy()      = true;
-    NvMsgBuf::stFlushBusy() = false;
+    NvMsgBuf::stFlushBusy() = 0;
     // flush 阻塞（FS 慢）时 L2 的 stBusy 可已被释放 ⇒ 周期拍仍能排下一拍，不会全跳过
     assert(NvMsgBuf::stBusy() == true && "L2 busy independent");
-    assert(NvMsgBuf::stFlushBusy() == false && "flush not busy");
+    assert(NvMsgBuf::stFlushBusy() == 0 && "flush not busy");
     NvMsgBuf::stBusy() = false;
     printf("  PASS: stBusy and stFlushBusy are independent flags\n");
 }
