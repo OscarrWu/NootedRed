@@ -48,6 +48,16 @@
 #include <FwBringup/NRedClkLayoutReadout.hpp>   // A-12 读数仪表扩展（门控 -NRedClkLayoutReadout，默认关）
 #include <NRedTraceSafe.hpp>   // A-20：早期落盘安全前置检查（纯逻辑）
 
+// A-27（甲）线读数：由 `wrapDcClkMgrCreate` 存入、由 C2 出口（HWLibs.cpp）延迟读。
+//  双向自证：`gClkMgrCreateCalls` 区分"dc_clk_mgr_create 未被调用"与"调用了但 clk_mgr 为空"。
+UInt64 gClkMgrPtr             = 0;   // dc_clk_mgr_create 的返回值（clk_mgr 对象）
+UInt64 gClkMgrCreateCalls     = 0;   // wrapDcClkMgrCreate 被调用次数（哨兵）
+UInt64 gPpSmuPtr              = 0;   // dc_clk_mgr_create 第 2 参（pp_smu_funcs）
+UInt64 gDcCtxPtr              = 0;   // dc_clk_mgr_create 第 1 参（dc_context）
+
+// A-27：A-6 回调地址（HWLibs.cpp C2 出口判 f38 是否为我方指针用；`NRedPpSmuOverlayGetDpmClockTable` 是 static，
+//  故在入口处把地址存入全局供跨 TU 使用）。
+UInt64 gNRedPpSmuOverlayCbAddr = 0;
 // 第八步观测：加速器 `probe` 的读数（由 X5000.cpp 记录、在此处【安全位置】输出）
 extern UInt64 gAccelProbeCalls;
 extern UInt64 gAccelProbeRet;
@@ -1099,8 +1109,9 @@ static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 //  Apple 经 rn_clk_mgr_construct 以 `f38(pp_smu+0x18, &dpm_clocks)` 调用（rdi=this, rsi=table），
 //  要求返回 1（tmp/re/fb_full.asm 0x131a9b–0x131ac4）。只填 FClocks[4]（+0x80，4×8B）；
 //  其余（DcfClocks/SocClocks/MemClocks/…）保持调用方已 memset 的 0（0x131895）。
-// A-12：回调调用计数（供 A-12 读数仪表判读"回调是否被调用"）。
-static UInt64 gNRedPpSmuOverlayCalls = 0;
+// A-12/A-27：回调调用计数（供读数仪表判读"回调是否被调用"）。
+//  ⚠️ A-27 起**非 static**：HWLibs.cpp 的 C2 出口延迟读需跨 TU 引用（零副作用、仅读）。
+UInt64 gNRedPpSmuOverlayCalls = 0;
 
 static int NRedPpSmuOverlayGetDpmClockTable(void* /*this_obj*/, void* table)
 {
@@ -1184,15 +1195,16 @@ void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* cons
               c, v58, v30, v118, pp, v0, v8, v10, v18, d, vCalls, vIri, vDummy);
     }
 
-    // A-12：读数仪表扩展（门控 -NRedClkLayoutReadout，默认关、仅观测）。
-    //  在 org 调用返回后读取：clk_mgr+0x130 bw 表、pp_smu->f38、回调计数、dc_context 布局。
     void* const ret = FunctionCast(wrapDcClkMgrCreate, singleton().orgDcClkMgrCreate)(ctx, ppSmu, dccg);
-    if (checkKernelArgument("-NRedClkLayoutReadout")) {
-        fw::nredClkLayoutReadoutHook(reinterpret_cast<UInt64>(ret), reinterpret_cast<UInt64>(ppSmu),
-                                     reinterpret_cast<UInt64>(ctx),
-                                     reinterpret_cast<UInt64>(&NRedPpSmuOverlayGetDpmClockTable),
-                                     gNRedPpSmuOverlayCalls);
-    }
+    // A-27（甲）线：出口存指针与哨兵计数，供 **C2 出口延迟读**（A-15 方案 A）。
+    //  ⚠️ 存储**无条件**（仅 5 个标量写，零副作用、零输出）；读数在 C2 出口且受门控
+    //  （A-12 的原地读数已移走——本机 `dc_clk_mgr_create` 可能不被调用，见 A-15 诊断）。
+    ++gClkMgrCreateCalls;
+    gClkMgrPtr = reinterpret_cast<UInt64>(ret);
+    gPpSmuPtr  = reinterpret_cast<UInt64>(ppSmu);
+    gDcCtxPtr  = reinterpret_cast<UInt64>(ctx);
+    gNRedPpSmuOverlayCbAddr = reinterpret_cast<UInt64>(&NRedPpSmuOverlayGetDpmClockTable);
+    (void)ctx;
     return ret;
 }
 

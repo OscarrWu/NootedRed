@@ -77,6 +77,7 @@ inline ClkLayoutReadout runClkLayoutReadout(uint64_t clkMgr, uint64_t ppSmu, uin
 {
     ClkLayoutReadout out{};
     out.overlayCalls = overlayCalls;
+    (void)readU32;   // 纯逻辑当前仅用 U64/U8；保留参数以兼容 kext 调用点（零行为差异）
 
     // ── （甲）线 A：bw 表 ──
     if (clkMgr != 0) {
@@ -147,10 +148,29 @@ inline ClkLayoutReadout runClkLayoutReadout(uint64_t clkMgr, uint64_t ppSmu, uin
     } else {
         out.p30Valid = 0;
     }
-
     return out;
 }
 
+// ── A-27：哨兵判定（纯逻辑，用户态可测）────────────────────────────────────────
+//  区分"函数未被调用"与"读数未执行/不可得"（A-15 双向自证设计）。
+//  @return 0 = 可读（clk_mgr 有效）；1 = dc_clk_mgr_create 未被调用；2 = 已调用但 clk_mgr 为空
+inline uint32_t clkLayoutSentinel(const uint64_t createCalls, const uint64_t clkMgr)
+{
+    if (createCalls == 0) { return 1; }   // 未被调用
+    if (clkMgr == 0)      { return 2; }   // 已调用但返回空
+    return 0;                             // 可读
+}
+
+// 哨兵文案（判读输出用）
+inline const char* clkLayoutSentinelText(const uint32_t s)
+{
+    switch (s) {
+        case 0:  return "readable";
+        case 1:  return "not-called";
+        case 2:  return "called-but-null";
+        default: return "?";
+    }
+}
 #ifndef FW_CLK_LAYOUT_NO_KEXT
 // ── kext 接线（仅 kext 环境编译）──
 // 注：本文件从 X6000FB.cpp（全局命名空间）包含，故自行开 namespace fw（本文件顶部已开）。

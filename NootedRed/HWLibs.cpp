@@ -40,10 +40,19 @@
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态落盘，见下方 IP 探针）
 #include <NRedTraceSafe.hpp>       // A-20：早期落盘安全前置检查（纯逻辑）
 #include <NRedTraceRing.hpp>       // A-22：早期 trace 内存环形缓冲（纯逻辑静态存储）
+#include <FwBringup/NRedClkLayoutReadout.hpp>   // A-27：（甲）线读数（C2 出口延迟读）
 
 // 根 vnode（XNU `bsd/sys/vnode.h`）：**内核态写文件的必备判据**，非空才表示根 FS 已挂载。
 // 与 `NvMsgBuf.hpp` 同一写法（`extern "C"` + weak），此处单独声明以免把它的静态缓冲带进来。
 extern "C" void *rootvnode __attribute__((weak));
+// A-27（甲）线：由 `X6000FB.cpp`（`wrapDcClkMgrCreate`）存入，本文件 C2 出口**延迟读**。
+extern UInt64 gClkMgrPtr;
+extern UInt64 gClkMgrCreateCalls;
+extern UInt64 gPpSmuPtr;
+extern UInt64 gDcCtxPtr;
+// A-6 回调地址与调用计数（X6000FB.cpp 存；本处仅读）
+extern UInt64 gNRedPpSmuOverlayCbAddr;
+extern UInt64 gNRedPpSmuOverlayCalls;
 // A-20：落盘安全计数器（文件作用域；早期路径调用 nredTraceLine 时未就绪 ⇒ 丢弃计数累加）
 nred::TraceSafe gTraceSafe;
 // A-22：早期 trace 内存环形缓冲（静态，无分配；早期路径只 push，不写文件）
@@ -1101,6 +1110,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // D-3 只读仪表门控（默认关）：SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位读数。
     // 解析一次存标量，仅观测、不写、不发送。
     singleton().smu13SegReadoutEnabled = checkKernelArgument("-NRedSegReadout");
+    // A-27（甲）线读数门控（默认关）：C2 出口延迟读 clk_mgr 读数（`gClkMgrPtr` 由
+    //  `X6000FB::wrapDcClkMgrCreate` 入口存入）。解析一次存标量，仅观测、不写、不发送。
+    singleton().smu13ClkLayoutEnabled = checkKernelArgument("-NRedClkLayoutReadout");
 
     NRed::singleton().hwLateInit();
 
@@ -2550,6 +2562,22 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     // D-3 只读仪表（门控 `-NRedSegReadout`，默认关）：C2 出口执行只读仪表（早于 S4、不写、不发送）。
     if (singleton().smu13SegReadoutEnabled) {
         fw::nredSegReadoutHook(nullptr);
+    }
+    // A-27（甲）线读数（门控 `-NRedClkLayoutReadout`，默认关）：**C2 出口延迟读**——
+    //  读 `wrapDcClkMgrCreate` 存入的 `gClkMgrPtr`/`gPpSmuPtr`/`gDcCtxPtr`。
+    //  双向自证：门控真 ⇒ 必出 `clk-layout-*`（含哨兵行 `clk-layout-S:`）；门控假 ⇒ 零输出。
+    //  通道：NRED_TRACE → A-22 内存环 → 安全时点刷盘（零文件系统写、零 MMIO、零寄存器探针）。
+    if (singleton().smu13ClkLayoutEnabled) {
+        const uint32_t sent = fw::clkLayoutSentinel(gClkMgrCreateCalls, gClkMgrPtr);
+        // 哨兵行：区分"dc_clk_mgr_create 未被调用"(=1) 与"调用了但 clk_mgr 为空"(=2)
+        NRED_TRACE("clk-layout-S: sentinel=%u(%s) calls=%llu clk_mgr=0x%llX",
+                   sent, fw::clkLayoutSentinelText(sent),
+                   (unsigned long long)gClkMgrCreateCalls, (unsigned long long)gClkMgrPtr);
+        if (sent == 0) {
+            fw::nredClkLayoutReadoutHook(gClkMgrPtr, gPpSmuPtr, gDcCtxPtr,
+                                         gNRedPpSmuOverlayCbAddr,
+                                         gNRedPpSmuOverlayCalls);
+        }
     }
     return kCAILResultOK;
 }
