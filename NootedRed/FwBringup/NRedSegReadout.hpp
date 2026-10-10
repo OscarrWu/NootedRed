@@ -24,13 +24,21 @@
 
 namespace fw {
 
+// ── 单点读取结果（含超时标志——B 项判读正确性：区分"设备未应答"与"真实读回 0xFFFFFFFF"）──
+struct SegReadPoint {
+    uint32_t value;      // 读回值（超时/无效时为 0xFFFFFFFF）
+    uint32_t timedOut;   // 1 = 超时（设备/索引端口未应答）；0 = 已读到值（即使值是 0xFFFFFFFF）
+};
+
 // ── 单点双段读数结果 ──
 struct SegDualPoint {
     uint32_t regOff;     // dword 偏移（相对段基址）
     uint32_t seg0Val;    // SEG0 基址下的读数
     uint32_t seg1Val;    // SEG1 基址下的读数
+    uint32_t seg0TimeOut; // 1 = SEG0 读取超时
+    uint32_t seg1TimeOut; // 1 = SEG1 读取超时
     uint32_t diff;       // seg0Val ^ seg1Val（位级差异）
-    uint32_t seg1Invalid; // 1 = SEG1 读数无效（全 1，或与 seg0 相同且非 0）——判据：SEG1 未使能
+    uint32_t seg1Invalid; // 1 = SEG1 读数无效（超时/全 1，或与 seg0 相同且非 0）——判据：SEG1 未使能
 };
 
 // ── 一轮只读仪表的完整读数集 ──
@@ -39,15 +47,15 @@ struct SegReadoutReadings {
     SegDualPoint dualSeg1;      // C2PMSG_83（MP1，偏移 0x293）
     SegDualPoint dualSeg2;      // C2PMSG_91（MP1，偏移 0x29B）双段
     SegDualPoint dualFwFlags;   // MP1_FIRMWARE_FLAGS（偏移 0x3010024 >> 2）
-    uint32_t c2pmsg91Mp0;       // 直读（SEG0 基址）
-    uint32_t c2pmsg83Mp1;       // 直读（SEG1 基址）
-    uint32_t c2pmsg91Mp1;       // 直读（SEG1 基址，MP1 C2PMSG_91 = 0x29B）
-    uint32_t fwFlags;           // PB 状态位（SEG1 基址）
+    SegReadPoint c2pmsg91Mp0;   // 直读（SEG0 基址）
+    SegReadPoint c2pmsg83Mp1;   // 直读（SEG1 基址）
+    SegReadPoint c2pmsg91Mp1;   // 直读（SEG1 基址，MP1 C2PMSG_91 = 0x29B）
+    SegReadPoint fwFlags;       // PB 状态位（SEG1 基址）
 };
 
 // ── 只读序列（纯逻辑；readFn 返回给定字节地址的读数；不得写）──
-// @param readFn  读取回调（字节地址 → 值）。返回 0xFFFFFFFF 表示读取失败。
-inline SegReadoutReadings runSegReadout(uint32_t (*readFn)(uint64_t byteAddr),
+// @param readFn  读取回调（字节地址 → SegReadPoint{value, timedOut}）
+inline SegReadoutReadings runSegReadout(SegReadPoint (*readFn)(uint64_t byteAddr),
                                         const uint32_t seg0Base,
                                         const uint32_t seg1Base)
 {
@@ -56,11 +64,16 @@ inline SegReadoutReadings runSegReadout(uint32_t (*readFn)(uint64_t byteAddr),
     // A 项：双段读数（同一偏移，两种段基址）
     auto dual = [&](uint32_t regOff) -> SegDualPoint {
         SegDualPoint p{};
-        p.regOff     = regOff;
-        p.seg0Val    = readFn(smnAddrWithBase(seg0Base, regOff));
-        p.seg1Val    = readFn(smnAddrWithBase(seg1Base, regOff));
-        p.diff       = p.seg0Val ^ p.seg1Val;
-        p.seg1Invalid = (p.seg1Val == 0xFFFFFFFFu) || (p.seg1Val == p.seg0Val && p.seg0Val != 0) ? 1u : 0u;
+        p.regOff       = regOff;
+        const SegReadPoint s0 = readFn(smnAddrWithBase(seg0Base, regOff));
+        const SegReadPoint s1 = readFn(smnAddrWithBase(seg1Base, regOff));
+        p.seg0Val      = s0.value;
+        p.seg1Val      = s1.value;
+        p.seg0TimeOut  = s0.timedOut;
+        p.seg1TimeOut  = s1.timedOut;
+        p.diff         = p.seg0Val ^ p.seg1Val;
+        p.seg1Invalid  = (p.seg1TimeOut || p.seg1Val == 0xFFFFFFFFu
+                          || (p.seg1Val == p.seg0Val && p.seg0Val != 0)) ? 1u : 0u;
         return p;
     };
     out.dualSeg0    = dual(0x9B);                 // MP0_SMN_C2PMSG_91
@@ -83,21 +96,23 @@ inline SegReadoutReadings runSegReadout(uint32_t (*readFn)(uint64_t byteAddr),
 // ── kext 接线（仅 kext 环境编译）──
 // 注：此文件从 HWLibs.cpp（已在 namespace fw 内）包含，故不再另开 namespace fw
 #include "../Regs/NBIO.hpp"        // PCIE_INDEX2 / PCIE_DATA2
+#include "../HWLibs.hpp"          // NRED_TRACE
+#include "../NRed.hpp"            // NRed::singleton().readReg32Raw/writeReg32Raw/hasRmmio
 
 // 内核侧只读回调：经 NRed::readReg32Ext（间接通道 + 回读刷写；只读）。
 // 有界超时（D-3 追加要求：有界超时＋失败即退＋不得重试，防 76/77 轮 ~45s 卡死机制）。
-static inline uint32_t segReadoutReadRegExt(const uint64_t byteAddr)
+// 返回 SegReadPoint{value, timedOut}：timedOut=1 表示超时（设备/索引端口未应答）。
+static inline SegReadPoint segReadoutReadRegExt(const uint64_t byteAddr)
 {
     constexpr uint32_t kMaxRetries = 1000;  // 1000 * 10us = 10ms 上界
-    uint32_t ret = 0xFFFFFFFFu;
     for (uint32_t attempt = 0; attempt < kMaxRetries; ++attempt) {
         NRed::singleton().writeReg32Raw(PCIE_INDEX2, static_cast<uint32_t>(byteAddr));
         (void)NRed::singleton().readReg32Raw(PCIE_INDEX2);  // 回读刷写
         const uint32_t val = NRed::singleton().readReg32Raw(PCIE_DATA2);
-        if (val != 0xFFFFFFFFu) { ret = val; break; }
+        if (val != 0xFFFFFFFFu) { return {val, 0u}; }
         IODelay(10);
     }
-    return ret;
+    return {0xFFFFFFFFu, 1u};  // 超时：值=0xFFFFFFFF，timedOut=1
 }
 
 // D-3 只读仪表（kext 入口；由 HWLibs.cpp 门控调用）。
@@ -112,19 +127,27 @@ inline void nredSegReadoutHook(void* const /*appleCtx*/)
     const fw::SegReadoutReadings r = fw::runSegReadout(&segReadoutReadRegExt,
                                                        fw::kMpSeg0Base, fw::kMpSeg1Base);
 
-    // A 项：双段读数
-    NRED_TRACE("seg-readout: dual C2PMSG_91_MP0 off=0x%X seg0=0x%X seg1=0x%X diff=0x%X inv=%u",
-               r.dualSeg0.regOff, r.dualSeg0.seg0Val, r.dualSeg0.seg1Val, r.dualSeg0.diff, r.dualSeg0.seg1Invalid);
-    NRED_TRACE("seg-readout: dual C2PMSG_83_MP1 off=0x%X seg0=0x%X seg1=0x%X diff=0x%X inv=%u",
-               r.dualSeg1.regOff, r.dualSeg1.seg0Val, r.dualSeg1.seg1Val, r.dualSeg1.diff, r.dualSeg1.seg1Invalid);
-    NRED_TRACE("seg-readout: dual C2PMSG_91_MP1 off=0x%X seg0=0x%X seg1=0x%X diff=0x%X inv=%u",
-               r.dualSeg2.regOff, r.dualSeg2.seg0Val, r.dualSeg2.seg1Val, r.dualSeg2.diff, r.dualSeg2.seg1Invalid);
-    // B 项：直读
-    NRED_TRACE("seg-readout: direct C2PMSG_91_MP0=0x%X C2PMSG_83_MP1=0x%X C2PMSG_91_MP1=0x%X",
-               r.c2pmsg91Mp0, r.c2pmsg83Mp1, r.c2pmsg91Mp1);
+    // A 项：双段读数（含超时标记 to0/to1）
+    NRED_TRACE("seg-readout: dual C2PMSG_91_MP0 off=0x%X seg0=0x%X to0=%u seg1=0x%X to1=%u diff=0x%X inv=%u",
+               r.dualSeg0.regOff, r.dualSeg0.seg0Val, r.dualSeg0.seg0TimeOut,
+               r.dualSeg0.seg1Val, r.dualSeg0.seg1TimeOut,
+               r.dualSeg0.diff, r.dualSeg0.seg1Invalid);
+    NRED_TRACE("seg-readout: dual C2PMSG_83_MP1 off=0x%X seg0=0x%X to0=%u seg1=0x%X to1=%u diff=0x%X inv=%u",
+               r.dualSeg1.regOff, r.dualSeg1.seg0Val, r.dualSeg1.seg0TimeOut,
+               r.dualSeg1.seg1Val, r.dualSeg1.seg1TimeOut,
+               r.dualSeg1.diff, r.dualSeg1.seg1Invalid);
+    NRED_TRACE("seg-readout: dual C2PMSG_91_MP1 off=0x%X seg0=0x%X to0=%u seg1=0x%X to1=%u diff=0x%X inv=%u",
+               r.dualSeg2.regOff, r.dualSeg2.seg0Val, r.dualSeg2.seg0TimeOut,
+               r.dualSeg2.seg1Val, r.dualSeg2.seg1TimeOut,
+               r.dualSeg2.diff, r.dualSeg2.seg1Invalid);
+    // B 项：直读（含超时标记 to）
+    NRED_TRACE("seg-readout: direct C2PMSG_91_MP0=0x%X to=%u C2PMSG_83_MP1=0x%X to=%u C2PMSG_91_MP1=0x%X to=%u",
+               r.c2pmsg91Mp0.value, r.c2pmsg91Mp0.timedOut,
+               r.c2pmsg83Mp1.value, r.c2pmsg83Mp1.timedOut,
+               r.c2pmsg91Mp1.value, r.c2pmsg91Mp1.timedOut);
 
     // C 项：PB 状态位
-    NRED_TRACE("seg-readout: FW_FLAGS=0x%X", r.fwFlags);
+    NRED_TRACE("seg-readout: FW_FLAGS=0x%X to=%u", r.fwFlags.value, r.fwFlags.timedOut);
 }
 #endif  // FW_SEG_READOUT_NO_KEXT
 
