@@ -45,6 +45,7 @@ class X5000
     mach_vm_address_t              orgInitializeTtl{0}; // 第八步观测：AMDRTHardware::initializeTtl（TTL 入参链）
     mach_vm_address_t              orgConfigureDevice{0}; // 第八步观测：accelerator::configureDevice（f140 的设置者）
     mach_vm_address_t              orgInitLinkToPeer{0};  // 第八步观测：accelerator::initLinkToPeer（按名查服务）
+    mach_vm_address_t              orgAmdHwInit{0};     // A-25：AMDHardware::init（`0x4ba9cea`）只读包装
     void                           (*notifyGfxAccess)(void*){nullptr};
 
 public:
@@ -70,6 +71,7 @@ private:
     static IOService* wrapAccelProbe(void* self, void* provider, SInt32* score);   // 第八步观测探针（匹配失败定位）
     static void   wrapInitializeTtl(void* self, void* gartParams);                 // 第八步观测探针（TTL 入参链）
     static UInt64 wrapConfigureDevice(void* self, void* provider);                 // 第八步观测（f140 设置者）
+    static bool   wrapAmdHwInit(void* self, void* provider, void* handler, UInt32* a3, void* gart, void* fb);  // A-25：AMDHardware::init 只读包装（快照水印）
     static void*  wrapInitLinkToPeer(void* self, const char* name);                // 第八步观测（按名查服务）
     static bool   fixedGetDisplayInfo(AMDRadeonX5000_AMDHWDisplay* self, UInt32 fbIndex, bool isCRTEnabled,
                                       bool ignoreCRTOffsetCheck, IOFramebuffer* fb, FramebufferInfo* fbInfo);

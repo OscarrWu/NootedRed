@@ -20,7 +20,8 @@
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <PenguinWizardry/PatcherPlus.hpp>
 #include <X5000.hpp>
-#include <kern/debug.h>    // panic()（第八步加速器 start 探针）
+#include <NRedWindowProbe.hpp>   // A-25：first-false 窗口法纯逻辑
+#include <HWLibs.hpp>            // NRED_TRACE（A-25：win-probe 输出通道）
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSObject.h>
 #include <libkern/c++/OSString.h>
@@ -444,17 +445,30 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     //  内部按 `-NRedAccelLog` 输出）。前者是 `this+0x1f40`（framebuffer 服务）的唯一设置者；
     //  后者按名查 `"ATIFramebuffer"`/`"IOFramebuffer"`。
     {
-        PenguinWizardry::PatternRouteRequest cfgReq{
-            "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator15configureDeviceEP11IOPCIDevice", wrapConfigureDevice,
-            this->orgConfigureDevice};
-        if (!cfgReq.route(patcher, id, slide, size)) {
-            SYSLOG("X5000", "cfgdev: failed to route configureDevice");
-        }
         PenguinWizardry::PatternRouteRequest l2pReq{
             "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator14initLinkToPeerEPKc", wrapInitLinkToPeer,
             this->orgInitLinkToPeer};
         if (!l2pReq.route(patcher, id, slide, size)) {
             SYSLOG("X5000", "cfgdev: failed to route initLinkToPeer");
+        }
+    }
+
+    // A-25：first-false 窗口法 · 最小只读探针——hook `AMDHardware::init`（kc `0x4ba9cea`）。
+    //  ✅ 红线②裁定（技术组长）：**"新增只读入口 hook"属合法观测，不属"注入 hook"**——
+    //     依据 A-19「调用 Apple 方法 ≠ 改写 Apple 状态」；本探针只在 `AMDHardware::init`
+    //     **返回后读内存**，不改 Apple 控制流/数据、不写 MMIO、不新增发送，与既有
+    //     `-NRed*Readout` 同类且已被接受。条件：自证"门控关 ⇒ 零读/零行为差异；门控开 ⇒ 仅内存读"。
+    //  ⇒ 本 hook **条件路由**（门控 `-NRedWindowProbe`，默认关）⇒ 门控假时**连 hook 都不安装**
+    //     （零读、零行为差异的机械自证：不 route ⇒ 不劫持 ⇒ 零影响）。
+    if (checkKernelArgument("-NRedWindowProbe")) {
+        PenguinWizardry::PatternRouteRequest hwInitReq{
+            "__ZN26AMDRadeonX5000_AMDHardware4initEP11IOPCIDeviceP28AMDRadeonX5000_IAMDHWHandlerRj"
+            "P16_GART_PARAMETERSP14_FB_PARAMETERS",
+            wrapAmdHwInit, this->orgAmdHwInit};
+        if (!hwInitReq.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "win-probe: failed to route AMDHardware::init");
+        } else {
+            DBGLOG("X5000", "win-probe: routed AMDHardware::init");
         }
     }
 
@@ -1909,6 +1923,81 @@ void* X5000::wrapInitLinkToPeer(void* const self, const char* const name)
     return ret;
 }
 
+// ─── A-25：`AMDHardware::init`（kc `0x4ba9cea`）first-false 窗口法 · 最小只读探针 ──────
+//  挂点：`ret = org(...)` 后、**`ret == 0` 时**快照 `this`（实例仍存活，`0x62f0` 的 release 在其后）。
+//  水印集（`this` 相对偏移）：P3 +0x2FC/0x2FE/0x300/0x302/0x30D；P5后半 +0x338/0x340；
+//  P12 +0x528/0x530；P15 +0x20810；P25 +0x3B8（引擎表首槽）；加速器侧 +0x1A38/+0x1E89bit0。
+//  判据：按程序序找"第一个为空的水印"（valid==1 且 value==0）⇒ first-false 窗口。
+//  P5 时序二值判：同读 `self+0x50`→`node+0xD8`/`node+0xD0`。
+//  纪律（技术组长红线②裁定 + 本卡硬约束）：
+//   · 只读内存、零 MMIO、零写、不新增发送；
+//   · 门控 `-NRedWindowProbe` 默认关 ⇒ 条件路由（本函数仅在门控真时被安装）；
+//   · 通道：NRED_TRACE（A-22 内存优先，安全时点刷盘），**不调任何文件系统写**。
+bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const handler,
+                          UInt32* const a3, void* const gart, void* const fb)
+{
+    const bool ret = FunctionCast(wrapAmdHwInit, singleton().orgAmdHwInit)(self, provider, handler, a3, gart, fb);
+    if (ret != false) { return ret; }   // 只在 init 成功（ret==0/false）后快照
+
+    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
+    auto rd64 = [](UInt64 base, UInt64 off) -> UInt64 {
+        return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+    };
+    auto rd8 = [](UInt64 base, UInt64 off) -> UInt64 {
+        return static_cast<UInt64>(*reinterpret_cast<const UInt8*>(reinterpret_cast<const UInt8*>(base) + off));
+    };
+
+    const UInt64 s = reinterpret_cast<UInt64>(self);
+    nred::WmVal wms[nred::WmCount];
+    const bool sValid = isKernelPtr(s);
+    for (uint32_t i = 0; i < nred::WmCount; ++i) {
+        wms[i].id    = i;
+        wms[i].value = 0;
+        wms[i].valid = 0;
+    }
+    if (sValid) {
+        wms[nred::WmP3_2FC].value  = rd8(s, 0x2FC);
+        wms[nred::WmP3_2FE].value  = rd8(s, 0x2FE);
+        wms[nred::WmP3_300].value  = rd8(s, 0x300);
+        wms[nred::WmP3_302].value  = rd8(s, 0x302);
+        wms[nred::WmP3_30D].value  = rd8(s, 0x30D);
+        wms[nred::WmP5_338].value  = rd64(s, 0x338);
+        wms[nred::WmP5_340].value  = rd64(s, 0x340);
+        wms[nred::WmP12_528].value = rd64(s, 0x528);
+        wms[nred::WmP12_530].value = rd64(s, 0x530);
+        wms[nred::WmP15_20810].value = rd64(s, 0x20810);
+        wms[nred::WmP25_3B8].value = rd64(s, 0x3B8);
+        wms[nred::WmAccel_1A38].value = rd64(s, 0x1A38);
+        wms[nred::WmAccel_1E89B0].value = rd8(s, 0x1E89) & 0x1ULL;
+        for (uint32_t i = 0; i < nred::WmCount; ++i) { wms[i].valid = 1; }
+    }
+
+    // P5 时序二值判：self+0x50 → node；node+0xD8 / node+0xD0
+    uint64_t nodeD8 = 0, nodeD0 = 0;
+    uint32_t nodeValid = 0;
+    if (sValid) {
+        const UInt64 node = rd64(s, 0x50);
+        if (isKernelPtr(node)) {
+            nodeD8 = rd64(node, 0xD8);
+            nodeD0 = rd64(node, 0xD0);
+            nodeValid = 1;
+        }
+    }
+    const nred::P5Binary p5 = nred::evalP5Binary(nodeD8, nodeD0, sValid ? 1u : 0u, nodeValid);
+    const nred::WindowResult w = nred::findFirstFalse(wms, nred::WmCount);
+
+    // 输出（NRED_TRACE → A-22 内存环 → 安全时点刷盘；零文件系统写）。
+    NRED_TRACE("win-probe: self=0x%llX ret=%u read=%u unknown=%u firstEmpty=%u(%s)",
+               (unsigned long long)s, ret ? 1u : 0u, w.readCount, w.unknownCount,
+               w.firstFalseId, nred::wmName(w.firstFalseId));
+    for (uint32_t i = 0; i < nred::WmCount; ++i) {
+        NRED_TRACE("win-probe: %s=0x%llX valid=%u",
+                   nred::wmName(wms[i].id), (unsigned long long)wms[i].value, wms[i].valid);
+    }
+    NRED_TRACE("win-probe: P5 nodeD8=0x%llX nodeD0=0x%llX valid=%u bothZero=%u",
+               (unsigned long long)p5.nodeD8, (unsigned long long)p5.nodeD0, p5.valid, p5.bothZero);
+    return ret;
+}
 // 第八步观测（第 14 轮）：`probe` 的结果**不在原地 panic**（第 13 轮实测：匹配阶段 panic 太早，
 // panic 通道未就绪 ⇒ 零分片、不自动重启），改为写入全局静态标量，由**安全位置**
 // （`AmdRadeonController::powerUp` 的 `-NRedAccelExist2` 探针）统一输出。
