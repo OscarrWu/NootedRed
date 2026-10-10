@@ -2,7 +2,9 @@
 #
 # 用法（从项目根执行）：
 #   make -f src/NootedRed/FwBringup/tests/Makefile test
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2 -DFW_NO_NRED_TRACE
+#   make -f src/NootedRed/FwBringup/tests/Makefile clean
+#
+# 这些测试仅覆盖可离线子集（纯计算、协议编解码、寄存器序列）——
 # 依据 docs/子任务/乙线自建固件层作战计划.md T3/T5 验收判据。
 #
 # ⚠️ IOKit 兼容：Regs/PSP13.hpp 包含 <IOKit/IOTypes.h>（UInt32）。
@@ -10,7 +12,7 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2 -DFW_NO_NRED_TRACE
 #    （仅 typedef，非真实 IOKit）。
 
 CXX      ?= g++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2 -DFW_NO_NRED_TRACE
 
 # 由本 Makefile 的调用路径推导「项目根」前缀（"" 或 "src/"）。
 MKFILE    = $(lastword $(MAKEFILE_LIST))
@@ -20,7 +22,7 @@ SEQDIR    = $(ROOT)NootedRed/DisplaySeq
 INCLUDES  = -I$(ROOT)NootedRed -I$(FWBDIR)/tests
 BUILDDIR  = $(FWBDIR)/tests/build
 
-# 显式目标清单（T3 SMU13 邮箱 + T5 PSP13 ring/bringup + RegSinkKernel + SmnReadProbe）
+# 显式目标清单（T3 SMU13 邮箱 + T5 PSP13 ring/bringup + RegSinkKernel + SmnReadProbe + A-2 FwFirmwareAsset + D-3 seg_readout）
 T3_TEST  = test_smu13_mailbox
 T5_TESTS = test_psp13_ring test_psp13_bringup
 T6_TESTS = test_reg_sink_kernel

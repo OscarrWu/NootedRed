@@ -145,11 +145,11 @@ struct BringupCtx {
     uint32_t          tmr_size;     // TMR 大小（由 load_toc 计算）
     const uint8_t*    toc_data;     // TOC 固件数据（psp_13_0_4_toc.bin）
     uint32_t          toc_size;     // TOC 大小
+    uint32_t          last_resp_status{0}; // A-10 ③：resp_status 判读（tmrInit/loadToc/tmrLoad 回填）
     BringupStep       last_step;    // 最后成功完成的步骤
     int               last_error;   // 最后错误码
     BlComponent       bl_comps[7];  // bootloader 组件表
 };
-
 
 // =============================================================================
 // 内联实现
@@ -350,7 +350,8 @@ inline int loadToc(display::RegSink& sink,
                    uint64_t fw_pri_mc_addr,
                    uint64_t cmd_buf_mc_addr,
                    uint64_t fence_mc_addr,
-                   uint32_t* out_tmr_size) {
+                   uint32_t* out_tmr_size,
+                   uint32_t* out_resp_status = nullptr) {
     // 切片：只送 payload（等 Linux psp_init_toc_microcode, amdgpu_psp.c:3986-4008）
     const uint8_t* payload = nullptr;
     uint32_t       payload_size = 0;
@@ -386,9 +387,10 @@ inline int loadToc(display::RegSink& sink,
     ret = ringWaitForFence(ring, sink, ring->fence_value);
     if (ret != 0) return ret;
 
-    // 读响应中的 tmr_size
+    // 读响应中的 tmr_size 与 resp_status
     const GfxCmdResp* resp = cmdBufGet(ring);
     *out_tmr_size = resp->resp_tmr_size;
+    if (out_resp_status) { *out_resp_status = resp->resp_status; }
     return 0;
 }
 
@@ -414,7 +416,8 @@ inline int tmrInit(display::RegSink& sink,
                    uint64_t fw_pri_mc_addr,
                    uint64_t cmd_buf_mc_addr,
                    uint64_t fence_mc_addr,
-                   uint32_t* tmr_size) {
+                   uint32_t* tmr_size,
+                   uint32_t* out_resp_status = nullptr) {
     // 默认 size (~4MB 或 ~8MB for Aldebaran)
     *tmr_size = 0x400000; // PSP_TMR_SIZE for non-Aldebaran (amdgpu_psp.h:40)
 
@@ -427,7 +430,7 @@ inline int tmrInit(display::RegSink& sink,
         int ret = loadToc(sink, ring, fw_pri_buf,
                           toc_data, toc_size,
                           fw_pri_mc_addr, cmd_buf_mc_addr, fence_mc_addr,
-                          tmr_size);
+                          tmr_size, out_resp_status);
         if (ret != 0) {
             NRED_TRACE("tmrInit: loadToc failed ret=%d", ret);
             return ret;
@@ -461,13 +464,13 @@ inline void prepTmrCmd(GfxCmdResp* cmd,
     cmd->cmd_payload[3]  = 0x00000002; // bitfield: virt_phy_addr = 1
 }
 
-/// 等 Linux psp_tmr_load (amdgpu_psp.c:935-956)
 inline int tmrLoad(display::RegSink& sink,
                    RingState* ring,
                    uint64_t tmr_mc_addr,
                    uint32_t tmr_size,
                    uint64_t cmd_buf_mc_addr,
-                   uint64_t fence_mc_addr) {
+                   uint64_t fence_mc_addr,
+                   uint32_t* out_resp_status = nullptr) {
     GfxCmdResp cmd;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
@@ -484,6 +487,7 @@ inline int tmrLoad(display::RegSink& sink,
 
     // 解码响应状态：0=成功；>0=TEE 错误码（psp_gfx_if.h:516-520）
     const GfxCmdResp* resp = cmdBufGet(ring);
+    if (out_resp_status) { *out_resp_status = resp->resp_status; }
     if (resp->resp_status == kTeeSuccess) return 0;
     return static_cast<int>(resp->resp_status); // TEE 错误码
 }
@@ -838,7 +842,8 @@ inline int bringupRun(BringupCtx* ctx,
                                   fw_pri_mc_addr,
                                   cmd_buf_mc_addr,
                                   fence_mc_addr,
-                                  &ctx->tmr_size);
+                                  &ctx->tmr_size,
+                                  &ctx->last_resp_status);
         if (ctx->last_error != 0) return ctx->last_error;
     }
 
@@ -859,7 +864,8 @@ inline int bringupRun(BringupCtx* ctx,
         ctx->last_error = tmrLoad(sink, ctx->ring,
                                   tmr_mc, ctx->tmr_size,
                                   cmd_buf_mc_addr,
-                                  fence_mc_addr);
+                                  fence_mc_addr,
+                                  &ctx->last_resp_status);
         if (ctx->last_error != 0) {
             NRED_TRACE("tmrLoad: failed ret=%d", ctx->last_error);
             return ctx->last_error;

@@ -46,11 +46,10 @@ struct SegReadoutReadings {
     SegDualPoint dualSeg0;      // C2PMSG_91（MP0，偏移 0x9B）
     SegDualPoint dualSeg1;      // C2PMSG_83（MP1，偏移 0x293）
     SegDualPoint dualSeg2;      // C2PMSG_91（MP1，偏移 0x29B）双段
-    SegDualPoint dualFwFlags;   // MP1_FIRMWARE_FLAGS（偏移 0x3010024 >> 2）
-    SegReadPoint c2pmsg91Mp0;   // 直读（SEG0 基址）
-    SegReadPoint c2pmsg83Mp1;   // 直读（SEG1 基址）
-    SegReadPoint c2pmsg91Mp1;   // 直读（SEG1 基址，MP1 C2PMSG_91 = 0x29B）
-    SegReadPoint fwFlags;       // PB 状态位（SEG1 基址）
+    SegReadPoint  c2pmsg91Mp0;  // C2PMSG_91 MP0 直读（SEG0 基址）
+    SegReadPoint  c2pmsg83Mp1;  // C2PMSG_83 MP1 直读（SEG1 基址）
+    SegReadPoint  c2pmsg91Mp1;  // C2PMSG_91 MP1 直读（SEG1 基址）
+    SegReadPoint  fwFlags;      // MP1_FIRMWARE_FLAGS（绝对字节地址 0x6B10024 = MP1_PUBLIC|0x3010024）
 };
 
 // ── 只读序列（纯逻辑；readFn 返回给定字节地址的读数；不得写）──
@@ -79,15 +78,16 @@ inline SegReadoutReadings runSegReadout(SegReadPoint (*readFn)(uint64_t byteAddr
     out.dualSeg0    = dual(0x9B);                 // MP0_SMN_C2PMSG_91
     out.dualSeg1    = dual(0x293);                // MP1_SMN_C2PMSG_83
     out.dualSeg2    = dual(0x29B);                // MP1_SMN_C2PMSG_91（双段）
-    out.dualFwFlags = dual(0x3010024u >> 2);      // MP1_FIRMWARE_FLAGS（dword 偏移）
+    // A-10 (a)：dualFwFlags → 绝对地址 0x6B10024 (MP1_PUBLIC|0x3010024)
+    out.fwFlags = readFn(0x6B10024u);
 
     // B 项：C2PMSG_91/83 直读
     out.c2pmsg91Mp0 = readFn(smnAddrWithBase(seg0Base, 0x9B));
     out.c2pmsg83Mp1 = readFn(smnAddrWithBase(seg1Base, 0x293));
     out.c2pmsg91Mp1 = readFn(smnAddrWithBase(seg1Base, 0x29B));
 
-    // C 项：PB 状态位
-    out.fwFlags = readFn(smnAddrWithBase(seg1Base, 0x3010024u >> 2));
+    // C 项：PB 状态位（绝对地址 0x6B10024）
+    out.fwFlags = readFn(0x6B10024u);
 
     return out;
 }

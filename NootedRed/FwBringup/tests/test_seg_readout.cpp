@@ -71,8 +71,7 @@ int main()
     addStub(smnAddrWithBase(kMpSeg1Base, 0x9B),  0xFFFFFFFF, 1);  // SEG1 超时
     addStub(smnAddrWithBase(kMpSeg0Base, 0x293), 0x12345678, 0);
     addStub(smnAddrWithBase(kMpSeg1Base, 0x293), 0xFFFFFFFF, 1);  // SEG1 超时
-    addStub(smnAddrWithBase(kMpSeg0Base, 0x3010024u >> 2), 0x1, 0);
-    addStub(smnAddrWithBase(kMpSeg1Base, 0x3010024u >> 2), 0xFFFFFFFF, 1);  // SEG1 超时
+    addStub(0x6B10024u, 0xFFFFFFFF, 1);   // FW_FLAGS 绝对地址 0x6B10024（A-10 (a)）：SEG0/SEG1 均超时
     addStub(smnAddrWithBase(kMpSeg1Base, 0x29B), 0x0, 0);   // C2PMSG_91 MP1 直读
 
     const SegReadoutReadings r = runSegReadout(&stubRead, kMpSeg0Base, kMpSeg1Base);
@@ -91,11 +90,9 @@ int main()
     assert(r.dualSeg1.seg1TimeOut == 1u);
     assert(r.dualSeg1.seg1Invalid == 1u);
 
-    assert(r.dualFwFlags.seg0Val == 0x1);
-    assert(r.dualFwFlags.seg1Val == 0xFFFFFFFF);
-    assert(r.dualFwFlags.seg0TimeOut == 0u);
-    assert(r.dualFwFlags.seg1TimeOut == 1u);
-    assert(r.dualFwFlags.seg1Invalid == 1u);
+    // A-10 (a)：FW_FLAGS 绝对地址 0x6B10024
+    assert(r.fwFlags.value == 0xFFFFFFFF);
+    assert(r.fwFlags.timedOut == 1u);
 
     // 直读
     assert(r.c2pmsg91Mp0.value == 0xDEADBEEF);
