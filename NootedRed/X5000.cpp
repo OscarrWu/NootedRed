@@ -2039,6 +2039,7 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         NRED_TRACE("win-probe: %s=0x%llX valid=%u",
                    nred::wmName(wms[i].id), (unsigned long long)wms[i].value, wms[i].valid);
     }
+    return ret;
 }
 // 第八步观测（第 14 轮）：`probe` 的结果**不在原地 panic**（第 13 轮实测：匹配阶段 panic 太早，
 // panic 通道未就绪 ⇒ 零分片、不自动重启），改为写入全局静态标量，由**安全位置**
