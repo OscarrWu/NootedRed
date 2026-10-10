@@ -1204,7 +1204,7 @@ void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* cons
     gPpSmuPtr  = reinterpret_cast<UInt64>(ppSmu);
     gDcCtxPtr  = reinterpret_cast<UInt64>(ctx);
     gNRedPpSmuOverlayCbAddr = reinterpret_cast<UInt64>(&NRedPpSmuOverlayGetDpmClockTable);
-    (void)ctx;
+
     return ret;
 }
 
