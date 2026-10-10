@@ -1090,6 +1090,26 @@ IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType,
 // 诊断：探针消息原始响应（文件作用域，供 wrapHandleCriticalError 的 panic 消息打印）
 static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 
+// A-6（路线乙×战线② 固件层）：pp_smu 最小覆盖——get_dpm_clock_table 回调（f38）。
+//  Apple 经 rn_clk_mgr_construct 以 `f38(pp_smu+0x18, &dpm_clocks)` 调用（rdi=this, rsi=table），
+//  要求返回 1（tmp/re/fb_full.asm 0x131a9b–0x131ac4）。只填 FClocks[4]（+0x80，4×8B）；
+//  其余（DcfClocks/SocClocks/MemClocks/…）保持调用方已 memset 的 0（0x131895）。
+static int NRedPpSmuOverlayGetDpmClockTable(void* /*this_obj*/, void* table)
+{
+    auto* p = reinterpret_cast<UInt32*>(table);
+    // dpm_clocks 布局（dm_pp_smu.h）：DcfClocks[8]@0x00、SocClocks[8]@0x40、FClocks[4]@0x80、MemClocks[4]@0xa0…
+    // 每项 dpm_clock = { u32 Freq(MHz); u32 Vol(mV, 2 fractional bits) }。
+    // Freq 取 rn_bw_params 兜底（rn_clk_mgr.c:578-614）；Vol=3600（=900mV，保守低端，仅作比对键）。
+    p[0x80 / 4 + 0] = 400;   p[0x80 / 4 + 1] = 3600;   // FClocks[0]
+    p[0x80 / 4 + 2] = 800;   p[0x80 / 4 + 3] = 3600;   // FClocks[1]
+    p[0x80 / 4 + 4] = 1067;  p[0x80 / 4 + 5] = 3600;   // FClocks[2]
+    p[0x80 / 4 + 6] = 1333;  p[0x80 / 4 + 7] = 3600;   // FClocks[3]
+    return 1;
+}
+
+// A-6：f18 占位指针（有效 ≥8B 对齐内核地址；本覆盖的回调不读 this，故仅作合法性占位）。
+static UInt64 gNRedPpSmuOverlayStub __attribute__((aligned(8))) = 0;
+
 // ─── 第八步观测探针：dc_clk_mgr_create（精确观测点）───────────────────────────
 //  为什么需要它：崩溃链是 `[[A+0x58]+0x30]+0x118`，其中 `A->f58` 由 `AmdDalHelper::powerUp`
 //  **内部**创建后再复制给 A（实测：在 powerUp 入口读 `dalHelper->f48->f58` 为 0，
@@ -1101,6 +1121,26 @@ static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 //  观测通道：panic（已验证可靠）；门控 boot-arg `-NRedStagePanic2`（与 DalHelper 探针互斥使用）。
 void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* const dccg)
 {
+    // A-6（路线乙×战线②）：pp_smu 最小覆盖（门控 -NRedPpSmuOverlay，默认关 ⇒ 零写入零行为差）。
+    //  ppSmu = factory_struct->f1c0（rn_clk_mgr_construct 读 f38 的那个 pp_smu_funcs）；
+    //  dc_clk_mgr_create 内部不再填/复位它（无 dm_pp_get_funcs 调用）⇒ 入口写 f0/f18/f38
+    //  必被 rn_clk_mgr_construct 读到。仅写 pp_smu_funcs 内 f0/f18/f38；factory_struct->f1c0/f408
+    //  （即 ppSmu/dccg 指针本身）不动。
+    if (checkKernelArgument("-NRedPpSmuOverlay")) {
+        auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
+        auto store64 = [](UInt64 base, UInt64 off, UInt64 v) {
+            *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base) + off) = v;
+        };
+        const UInt64 pp = reinterpret_cast<UInt64>(ppSmu);
+        if (isKernelPtr(pp)) {
+            store64(pp, 0x00, 1);   // f0：合法 version
+            store64(pp, 0x18, reinterpret_cast<UInt64>(&gNRedPpSmuOverlayStub));   // f18：有效 ≥8B 指针
+            store64(pp, 0x38, reinterpret_cast<UInt64>(&NRedPpSmuOverlayGetDpmClockTable));   // f38：我方回调
+            DBGLOG("X6000FB", "pp_smu overlay: pp=%llx set f0/f18/f38 (FClocks 400/800/1067/1333 MHz)",
+                   pp);
+        }
+    }
+
     if (checkKernelArgument("-NRedStagePanic2")) {
         auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
         auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
