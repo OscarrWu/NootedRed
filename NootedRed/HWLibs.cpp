@@ -80,8 +80,9 @@ int nredTraceFlush()
     static unsigned fseq = 0;
     char name[64];
     snprintf(name, sizeof(name), "/var/log/NRedTraceFlush-%03u.log", fseq++);
-    // 逐行拼进一个临时缓冲（上限：kLineMax × kLineBytes，此处按 16 KB 封顶避免栈溢出）
-    char body[16 * 1024];
+    // 逐行拼进一个**静态**缓冲（⚠️ 不落栈：XNU 内核线程栈默认 16 KB，栈上 16 KB 数组会溢出）。
+    //  静态缓冲 ⇒ 单写者假设（安全时点顺序执行；周期拍与 dumpNow 有 stBusy 互斥，本函数同类）。
+    static char body[4 * 1024];   // 4 KB：单次刷盘覆盖 ~21 行×192B 或 256 行×16B；封顶即止
     size_t off = 0;
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
