@@ -2,7 +2,7 @@
 //
 // 门控：`-NRedSegReadout`（默认关、仅观测）。门控假 ⇒ 零 MMIO、零调用。
 // 通道：NRED_TRACE（NRedTrace-NNN.log + SYSLOG/L1），不依赖 panic 门控。
-// 只读：不写任何寄存器、不发送任何 SMU 消息、不改 Apple 代码/数据。
+// 只读：不写任何功能寄存器（readReg32Ext 仅写 PCIE_INDEX2 索引寄存器以发起读取）、不发送任何 SMU 消息、不改 Apple 代码/数据。
 // 有界：每步单次读取（无轮询、无重试），总耗时 < 1ms。
 //
 // 结构：
@@ -37,6 +37,7 @@ struct SegDualPoint {
 struct SegReadoutReadings {
     SegDualPoint dualSeg0;      // C2PMSG_91（MP0，偏移 0x9B）
     SegDualPoint dualSeg1;      // C2PMSG_83（MP1，偏移 0x293）
+    SegDualPoint dualSeg2;      // C2PMSG_91（MP1，偏移 0x29B）双段
     SegDualPoint dualFwFlags;   // MP1_FIRMWARE_FLAGS（偏移 0x3010024 >> 2）
     uint32_t c2pmsg91Mp0;       // 直读（SEG0 基址）
     uint32_t c2pmsg83Mp1;       // 直读（SEG1 基址）
@@ -64,6 +65,7 @@ inline SegReadoutReadings runSegReadout(uint32_t (*readFn)(uint64_t byteAddr),
     };
     out.dualSeg0    = dual(0x9B);                 // MP0_SMN_C2PMSG_91
     out.dualSeg1    = dual(0x293);                // MP1_SMN_C2PMSG_83
+    out.dualSeg2    = dual(0x29B);                // MP1_SMN_C2PMSG_91（双段）
     out.dualFwFlags = dual(0x3010024u >> 2);      // MP1_FIRMWARE_FLAGS（dword 偏移）
 
     // B 项：C2PMSG_91/83 直读
@@ -80,13 +82,22 @@ inline SegReadoutReadings runSegReadout(uint32_t (*readFn)(uint64_t byteAddr),
 #ifndef FW_SEG_READOUT_NO_KEXT
 // ── kext 接线（仅 kext 环境编译）──
 // 注：此文件从 HWLibs.cpp（已在 namespace fw 内）包含，故不再另开 namespace fw
-#include "../HWLibs.hpp"          // NRED_TRACE
-#include "../NRed.hpp"            // NRed::singleton().readReg32Ext/hasRmmio
+#include "../Regs/NBIO.hpp"        // PCIE_INDEX2 / PCIE_DATA2
 
 // 内核侧只读回调：经 NRed::readReg32Ext（间接通道 + 回读刷写；只读）。
+// 有界超时（D-3 追加要求：有界超时＋失败即退＋不得重试，防 76/77 轮 ~45s 卡死机制）。
 static inline uint32_t segReadoutReadRegExt(const uint64_t byteAddr)
 {
-    return NRed::singleton().readReg32Ext(static_cast<uint32_t>(byteAddr));
+    constexpr uint32_t kMaxRetries = 1000;  // 1000 * 10us = 10ms 上界
+    uint32_t ret = 0xFFFFFFFFu;
+    for (uint32_t attempt = 0; attempt < kMaxRetries; ++attempt) {
+        NRed::singleton().writeReg32Raw(PCIE_INDEX2, static_cast<uint32_t>(byteAddr));
+        (void)NRed::singleton().readReg32Raw(PCIE_INDEX2);  // 回读刷写
+        const uint32_t val = NRed::singleton().readReg32Raw(PCIE_DATA2);
+        if (val != 0xFFFFFFFFu) { ret = val; break; }
+        IODelay(10);
+    }
+    return ret;
 }
 
 // D-3 只读仪表（kext 入口；由 HWLibs.cpp 门控调用）。
@@ -106,10 +117,8 @@ inline void nredSegReadoutHook(void* const /*appleCtx*/)
                r.dualSeg0.regOff, r.dualSeg0.seg0Val, r.dualSeg0.seg1Val, r.dualSeg0.diff, r.dualSeg0.seg1Invalid);
     NRED_TRACE("seg-readout: dual C2PMSG_83_MP1 off=0x%X seg0=0x%X seg1=0x%X diff=0x%X inv=%u",
                r.dualSeg1.regOff, r.dualSeg1.seg0Val, r.dualSeg1.seg1Val, r.dualSeg1.diff, r.dualSeg1.seg1Invalid);
-    NRED_TRACE("seg-readout: dual FW_FLAGS_MP1 off=0x%X seg0=0x%X seg1=0x%X diff=0x%X inv=%u",
-               r.dualFwFlags.regOff, r.dualFwFlags.seg0Val, r.dualFwFlags.seg1Val, r.dualFwFlags.diff,
-               r.dualFwFlags.seg1Invalid);
-
+    NRED_TRACE("seg-readout: dual C2PMSG_91_MP1 off=0x%X seg0=0x%X seg1=0x%X diff=0x%X inv=%u",
+               r.dualSeg2.regOff, r.dualSeg2.seg0Val, r.dualSeg2.seg1Val, r.dualSeg2.diff, r.dualSeg2.seg1Invalid);
     // B 项：直读
     NRED_TRACE("seg-readout: direct C2PMSG_91_MP0=0x%X C2PMSG_83_MP1=0x%X C2PMSG_91_MP1=0x%X",
                r.c2pmsg91Mp0, r.c2pmsg83Mp1, r.c2pmsg91Mp1);

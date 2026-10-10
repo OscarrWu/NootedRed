@@ -1058,11 +1058,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // D-3 只读仪表门控（默认关）：SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位读数。
     // 解析一次存标量，仅观测、不写、不发送。
     singleton().smu13SegReadoutEnabled = checkKernelArgument("-NRedSegReadout");
-    // D-3 只读仪表（门控 `-NRedSegReadout`，默认关）：SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位。
-    // 门控假 ⇒ 零 MMIO、零调用；门控真 ⇒ 执行只读仪表（不写、不发送）。
-    if (singleton().smu13SegReadoutEnabled) {
-        fw::nredSegReadoutHook(nullptr);
-    }
 
     NRed::singleton().hwLateInit();
 
@@ -2508,7 +2503,10 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     //    并置有效 smuCtxCache（I12）⇒ makeSmuChannel 在 S4 不再因 smuContext()==null 返 false。
     if (singleton().smu13FwBringupEnabled) {
         fw::nredFwBringupHook(ctx);
-        singleton().smuCtxCache = ctx;
+    }
+    // D-3 只读仪表（门控 `-NRedSegReadout`，默认关）：C2 出口执行只读仪表（早于 S4、不写、不发送）。
+    if (singleton().smu13SegReadoutEnabled) {
+        fw::nredSegReadoutHook(nullptr);
     }
     return kCAILResultOK;
 }
