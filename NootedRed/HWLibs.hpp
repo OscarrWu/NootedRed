@@ -51,6 +51,7 @@ class X5000HWLibs
     bool                                                         smu13SendGateDisabled{false};
     bool                                                         smu13ProbeInjectDisabled{true};
     bool                                                         smu13DirectEnabled{false};   // T15 方案II 直通门控（默认关）
+    bool                                                         smu13FwBringupEnabled{false};   // A-1 固件层第一增量门控（默认关）
     // 不释放（SMU 通过 Transfer 后仍指向该 DRAM 地址）。
     IOBufferMemoryDescriptor*                                    smu13MetricsBuffer{nullptr};
     ObjectField<void*>                                           smuGetUCodeConstsField;

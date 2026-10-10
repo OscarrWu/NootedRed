@@ -22,6 +22,7 @@
 #include <GPUDriversAMD/TTL/SWIP/SDMA.hpp>
 #include <GPUDriversAMD/TTL/SWIP/SMU.hpp>
 #include <HWLibs.hpp>
+#include <FwBringup/NRedFwBringupHook.hpp>   // A-1 固件层第一增量：薄封装（C2 挂点）
 #include <HWLibsSmuGate.hpp>
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
@@ -1050,6 +1051,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // T15 方案II 门控（默认关）：开启后白名单消息改走自有有界直通（D1/D2，案A+案B）。
     // 解析一次存标量，避免 smuSendMessage/注入路径频繁调用 checkKernelArgument。
     singleton().smu13DirectEnabled = checkKernelArgument("-NRedSmuDirectPath");
+    // A-1 固件层第一增量门控（默认关）：开启后在 C2（wrapSmuInitFunctionPointerList 出口）执行
+    // PSP bringup（fw::nredFwBringupHook）+ 置有效 smuCtxCache。解析一次存标量。
+    singleton().smu13FwBringupEnabled = checkKernelArgument("-NRedFwBringup");
 
     NRed::singleton().hwLateInit();
 
@@ -2488,6 +2492,15 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     SYSLOG_COND(ADDPR(debugEnabled), "HWLibs", "smu fp list: ret=%d ipVer=%d.%d effMajor=%d phoenix=%d", ret,
                 ipVersion.major, ipVersion.minor, effectiveMajor,
                 NRed::singleton().getAttributes().isPhoenix() ? 1 : 0);
+    // ─── A-1（2026-10-10）：固件层第一增量（C2 挂点＝本函数出口；门控 `-NRedFwBringup` 默认关）──
+    //  门控假 ⇒ 零 MMIO、零 bringup 调用（本块不执行）。
+    //  门控真 ⇒ 早于 S4（AMDGFX9DCN314Display::init 显示时钟）执行 fw::nredFwBringupHook(ctx)：
+    //    构造 BringupCtx/RegSinkKernel（SEG1 基准、RegSink 抽象、IODelay 注入）→ bringupRun → NRED_TRACE；
+    //    并置有效 smuCtxCache（I12）⇒ makeSmuChannel 在 S4 不再因 smuContext()==null 返 false。
+    if (singleton().smu13FwBringupEnabled) {
+        fw::nredFwBringupHook(ctx);
+        singleton().smuCtxCache = ctx;
+    }
     return kCAILResultOK;
 }
 

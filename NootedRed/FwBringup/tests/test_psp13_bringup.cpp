@@ -100,8 +100,11 @@ struct MockSink final : public RegSink {
     uint32_t   inject_status = 0;  // 0 = 不注入；非 0 = 门铃时写入响应状态
     uint32_t   wptr_reg      = 0;  // PSP 侧写指针状态（C2PMSG_67 读回值）
 
+    // 累计"真实睡眠"微秒数（T6 D3/N1 判据：bringup 路径每轮必须真睡，不得忙等）
+    uint64_t slept_us = 0;
+
     void reset() {
-        ops.clear(); stubs.clear();
+        ops.clear(); stubs.clear(); slept_us = 0;
         auto_fence = false; inject_status = 0; wptr_reg = 0;
     }
     void addStub(RegAddr a, RegValue v) { stubs.push_back({a, v}); }
@@ -133,8 +136,9 @@ struct MockSink final : public RegSink {
         }
     }
 
-    void delayMicroseconds(uint32_t) override {
-        // 轮询延迟压缩：不记录（测试需要快速超时）
+    void delayMicroseconds(uint32_t us) override {
+        ops.push_back({Delay, 0, us});
+        slept_us += us;  // 记录真实 µs：slept_us>0 即"归零＝D3 原形态"判别点（T6 N2）
     }
 };
 
@@ -325,9 +329,24 @@ static void testLoadIpFwTimeout() {
                               0x20000000ULL); // fence_mc_addr
     assert(ret == -1); // fence 超时
 
-    printf("PASS\n");
-}
+    // ★ T6 N1/N2 判别（2026-10-10，bringup 路径 delay 落点自证）：
+    //   executeLoadIpFw 内部经 ringWaitForFence 每轮 delayMicroseconds(kFencePollUs)，
+    //   MockSink 现记录真实 µs。若 kFencePollUs 退化为 0（D3 原形态/忙等）或产品代码
+    //   把延时吞掉，"slept_us==0"立刻判 FAIL —— 与 test 12 同源但作用于 bringup 原语。
+    uint32_t delays = 0;
+    for (auto& op : sink.ops) {
+        if (op.kind == MockSink::Delay) {
+            ++delays;
+            assert(op.value == kFencePollUs);  // 每轮 80µs，不得为 0
+        }
+    }
+    assert(delays == kFenceTimeout);            // 轮数必须走满预算（非提前返回）
+    assert(sink.slept_us == (uint64_t)kFenceTimeout * kFencePollUs);
+    assert(sink.slept_us > 0);                  // 归零＝D3 原形态（N2 判据）
 
+    printf("PASS (rounds=%u, slept=%lluus)\n",
+           delays, (unsigned long long)sink.slept_us);
+}
 // ════════════════════════════════════════════════════════════════════
 // 测试 5：isSosAlive 短路 — 7 条 bootloader 全部跳过
 // ════════════════════════════════════════════════════════════════════
@@ -394,7 +413,7 @@ static void testErrorCodeDecode() {
 // ════════════════════════════════════════════════════════════════════
 // 测试 7：寄存器序列导出（影子产物）
 // ════════════════════════════════════════════════════════════════════
-static const char* kTracePath = "kb/序列数据/psp13_bringup_trace.txt";
+static const char* kTracePath = "/tmp/psp13_bringup_trace.txt";
 
 static void testSequenceExport() {
     printf("[test 7] Register sequence export to %s... ", kTracePath);

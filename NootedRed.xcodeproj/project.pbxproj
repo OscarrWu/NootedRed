@@ -103,6 +103,12 @@
 		40FC5FDA29BF995E00367F9D /* X5000.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40FC5FD829BF995E00367F9D /* X5000.hpp */; };
 		40FC5FDD29BF996900367F9D /* HWLibs.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 40FC5FDB29BF996900367F9D /* HWLibs.cpp */; };
 		40FC5FDE29BF996900367F9D /* HWLibs.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40FC5FDC29BF996900367F9D /* HWLibs.hpp */; };
+		A1F7000100000000000000B1 /* Psp13Bringup.hpp in Sources */ = {isa = PBXBuildFile; fileRef = A1F7000100000000000000C1 /* Psp13Bringup.hpp */; };
+		A1F7000100000000000000B2 /* Psp13Ring.hpp in Sources */ = {isa = PBXBuildFile; fileRef = A1F7000100000000000000C2 /* Psp13Ring.hpp */; };
+		A1F7000100000000000000B3 /* RegSinkKernel.hpp in Sources */ = {isa = PBXBuildFile; fileRef = A1F7000100000000000000C3 /* RegSinkKernel.hpp */; };
+		A1F7000100000000000000B4 /* RegAddr.hpp in Sources */ = {isa = PBXBuildFile; fileRef = A1F7000100000000000000C4 /* RegAddr.hpp */; };
+		A1F7000100000000000000B5 /* FwUcodeHeader.hpp in Sources */ = {isa = PBXBuildFile; fileRef = A1F7000100000000000000C5 /* FwUcodeHeader.hpp */; };
+		A1F7000100000000000000B6 /* Smu13Mailbox.hpp in Sources */ = {isa = PBXBuildFile; fileRef = A1F7000100000000000000C6 /* Smu13Mailbox.hpp */; };
 		40FD2ACD2E6B6107007C2290 /* EnableIf.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40FD2ACC2E6B6107007C2290 /* EnableIf.hpp */; };
 		40FD2AD02E6B6296007C2290 /* Packet3.hpp in Headers */ = {isa = PBXBuildFile; fileRef = 40FD2ACF2E6B6296007C2290 /* Packet3.hpp */; };
 		6C1B36662A407C6100B184DD /* AppleGFXHDA.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 6C1B36642A407C6100B184DD /* AppleGFXHDA.cpp */; };
@@ -117,6 +123,12 @@
 		1C748C271C21952C0024EED2 /* NootedRed.kext */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NootedRed.kext; sourceTree = BUILT_PRODUCTS_DIR; };
 		1C748C2C1C21952C0024EED2 /* Plugin.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = Plugin.cpp; sourceTree = "<group>"; };
 		1C748C2E1C21952C0024EED2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1F7000100000000000000C1 /* Psp13Bringup.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FwBringup/Psp13Bringup.hpp; sourceTree = "<group>"; };
+		A1F7000100000000000000C2 /* Psp13Ring.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FwBringup/Psp13Ring.hpp; sourceTree = "<group>"; };
+		A1F7000100000000000000C3 /* RegSinkKernel.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FwBringup/RegSinkKernel.hpp; sourceTree = "<group>"; };
+		A1F7000100000000000000C4 /* RegAddr.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FwBringup/RegAddr.hpp; sourceTree = "<group>"; };
+		A1F7000100000000000000C5 /* FwUcodeHeader.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FwBringup/FwUcodeHeader.hpp; sourceTree = "<group>"; };
+		A1F7000100000000000000C6 /* Smu13Mailbox.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FwBringup/Smu13Mailbox.hpp; sourceTree = "<group>"; };
 		4003B5C230265145006F74E8 /* SurfaceInfo.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SurfaceInfo.hpp; sourceTree = "<group>"; };
 		4009098F2E9932F2006EC1EA /* HWMemory.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = HWMemory.hpp; sourceTree = "<group>"; };
 		400909912E9938DB006EC1EA /* HWMemory.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = HWMemory.cpp; sourceTree = "<group>"; };
@@ -353,6 +365,12 @@
 				40FC5FD729BF995E00367F9D /* X5000.cpp */,
 				40FC5FD429BF995000367F9D /* X6000FB.hpp */,
 				40FC5FD329BF995000367F9D /* X6000FB.cpp */,
+				A1F7000100000000000000C1 /* Psp13Bringup.hpp */,
+				A1F7000100000000000000C2 /* Psp13Ring.hpp */,
+				A1F7000100000000000000C3 /* RegSinkKernel.hpp */,
+				A1F7000100000000000000C4 /* RegAddr.hpp */,
+				A1F7000100000000000000C5 /* FwUcodeHeader.hpp */,
+				A1F7000100000000000000C6 /* Smu13Mailbox.hpp */,
 				4098F4EA302B9B6F00B475DE /* AmdAtomVramInfoIGP.hpp */,
 				4098F4EB302B9B6F00B475DE /* AmdAtomVramInfoIGP.cpp */,
 				40AF79753030BCC00005EFAB /* AmdAtomPspDirectoryDummy.hpp */,
@@ -777,6 +795,12 @@
 				40F43C6A302BC94700A7DDE9 /* BiosParser.cpp in Sources */,
 				4054608C2CDBDF8C007865E5 /* AGDP.cpp in Sources */,
 				40FC5FDD29BF996900367F9D /* HWLibs.cpp in Sources */,
+				A1F7000100000000000000B1 /* Psp13Bringup.hpp in Sources */,
+				A1F7000100000000000000B2 /* Psp13Ring.hpp in Sources */,
+				A1F7000100000000000000B3 /* RegSinkKernel.hpp in Sources */,
+				A1F7000100000000000000B4 /* RegAddr.hpp in Sources */,
+				A1F7000100000000000000B5 /* FwUcodeHeader.hpp in Sources */,
+				A1F7000100000000000000B6 /* Smu13Mailbox.hpp in Sources */,
 				6C1B36662A407C6100B184DD /* AppleGFXHDA.cpp in Sources */,
 				40FC5FD529BF995000367F9D /* X6000FB.cpp in Sources */,
 				4030EB382E3818E10070E610 /* AMDGFX9DCNDisplay.cpp in Sources */,
