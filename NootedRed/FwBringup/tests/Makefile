@@ -2,9 +2,7 @@
 #
 # 用法（从项目根执行）：
 #   make -f src/NootedRed/FwBringup/tests/Makefile test
-#   make -f src/NootedRed/FwBringup/tests/Makefile clean
-#
-# 这些测试仅覆盖可离线子集（纯计算、协议编解码、寄存器序列）——
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2 -DFW_NO_NRED_TRACE
 # 依据 docs/子任务/乙线自建固件层作战计划.md T3/T5 验收判据。
 #
 # ⚠️ IOKit 兼容：Regs/PSP13.hpp 包含 <IOKit/IOTypes.h>（UInt32）。
@@ -28,7 +26,8 @@ T5_TESTS = test_psp13_ring test_psp13_bringup
 T6_TESTS = test_reg_sink_kernel
 T7_TESTS = test_smn_read_probe
 A2_TESTS = test_fw_asset
-TESTS    = $(addprefix $(BUILDDIR)/,$(T3_TEST) $(T5_TESTS) $(T6_TESTS) $(T7_TESTS) $(A2_TESTS))
+D3_TESTS = test_seg_readout
+TESTS    = $(addprefix $(BUILDDIR)/,$(T3_TEST) $(T5_TESTS) $(T6_TESTS) $(T7_TESTS) $(A2_TESTS) $(D3_TESTS))
 
 test: $(TESTS)
 	@echo "── 运行 SMU13 邮箱 / PSP13 bringup 离线单元测试 ──"

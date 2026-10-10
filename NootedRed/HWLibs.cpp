@@ -23,6 +23,7 @@
 #include <GPUDriversAMD/TTL/SWIP/SMU.hpp>
 #include <HWLibs.hpp>
 #include <FwBringup/NRedFwBringupHook.hpp>   // A-1 固件层第一增量：薄封装（C2 挂点）
+#include <FwBringup/NRedSegReadout.hpp>   // D-3 只读仪表（SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位）
 #include <HWLibsSmuGate.hpp>
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
@@ -1054,6 +1055,14 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // A-1 固件层第一增量门控（默认关）：开启后在 C2（wrapSmuInitFunctionPointerList 出口）执行
     // PSP bringup（fw::nredFwBringupHook）+ 置有效 smuCtxCache。解析一次存标量。
     singleton().smu13FwBringupEnabled = checkKernelArgument("-NRedFwBringup");
+    // D-3 只读仪表门控（默认关）：SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位读数。
+    // 解析一次存标量，仅观测、不写、不发送。
+    singleton().smu13SegReadoutEnabled = checkKernelArgument("-NRedSegReadout");
+    // D-3 只读仪表（门控 `-NRedSegReadout`，默认关）：SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位。
+    // 门控假 ⇒ 零 MMIO、零调用；门控真 ⇒ 执行只读仪表（不写、不发送）。
+    if (singleton().smu13SegReadoutEnabled) {
+        fw::nredSegReadoutHook(nullptr);
+    }
 
     NRed::singleton().hwLateInit();
 

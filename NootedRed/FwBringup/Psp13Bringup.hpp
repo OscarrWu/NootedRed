@@ -34,10 +34,13 @@
 #include "Psp13Ring.hpp"
 #include "Regs/PSP13.hpp"
 #include "FwUcodeHeader.hpp"
+#ifndef FW_NO_NRED_TRACE
+#include "../HWLibs.hpp"          // NRED_TRACE（D-3 追加：tmrInit 子步 trace）
+#else
+// 测试环境：NRED_TRACE 空实现（离线不落盘；kext 构建由 HWLibs.hpp 提供真宏）
+#define NRED_TRACE(fmt, ...) ((void)0)
+#endif
 namespace fw {
-
-// =============================================================================
-// 步号枚举（供调用方观测执行进度）
 // =============================================================================
 
 enum class BringupStep : uint32_t {
@@ -415,20 +418,32 @@ inline int tmrInit(display::RegSink& sink,
     // 默认 size (~4MB 或 ~8MB for Aldebaran)
     *tmr_size = 0x400000; // PSP_TMR_SIZE for non-Aldebaran (amdgpu_psp.h:40)
 
+    // D-3 追加：tmrInit 子步 trace（D-3 追加要求：loadToc/fence/PSP 提交各输出 trace）
+    NRED_TRACE("tmrInit: start toc_valid=%u toc_size=%u", toc_data != nullptr ? 1u : 0u, toc_size);
+
     // 如果 toc 有效，通过 load_toc 获取实际所需 size
     if (toc_data && toc_size > 0 && fw_pri_buf) {
+        NRED_TRACE("tmrInit: loadToc start toc_size=%u", toc_size);
         int ret = loadToc(sink, ring, fw_pri_buf,
                           toc_data, toc_size,
                           fw_pri_mc_addr, cmd_buf_mc_addr, fence_mc_addr,
                           tmr_size);
-        if (ret != 0) return ret;
+        if (ret != 0) {
+            NRED_TRACE("tmrInit: loadToc failed ret=%d", ret);
+            return ret;
+        }
+        NRED_TRACE("tmrInit: loadToc ok tmr_size=0x%X", *tmr_size);
+    } else {
+        NRED_TRACE("tmrInit: skip loadToc (toc invalid or no fw_pri_buf)");
     }
 
     // 分配 TMR 由调用方完成（等 amdgpu_psp.c:911-917）
     // 调用方应确保 tmr_buf != nullptr 或跳过
 
+    NRED_TRACE("tmrInit: done tmr_size=0x%X", *tmr_size);
     return 0;
 }
+
 
 // ---------- 5b. TMR prep + submit ----------
 
@@ -831,17 +846,25 @@ inline int bringupRun(BringupCtx* ctx,
     // amdgpu_psp.c:3083: psp_tmr_load(psp) — 无条件（内部 skip_tmr 判断）
     ctx->last_step = BringupStep::TmrLoad;
     if (!skipTmr(boot_time_tmr, autoload_supported)) {
+        // D-3 追加：tmrLoad 子步 trace
+        NRED_TRACE("tmrLoad: start tmr_size=0x%X", ctx->tmr_size);
         // 等 Linux psp_tmr_load L940: if (psp_skip_tmr(psp)) return 0;
         // 若 tmr_buf 由调用方分配，这里使用其地址
         // 若 tmr_buf 为空，模拟地址 0 但提交操作仍执行
         const uint64_t tmr_mc = (ctx->tmr_buf)
             ? reinterpret_cast<uint64_t>(ctx->tmr_buf)
             : 0xDEAD0000ULL; // 虚拟地址，离线测试中可接受
+        NRED_TRACE("tmrLoad: submit tmr_mc=0x%llX tmr_size=0x%X",
+                   (unsigned long long)tmr_mc, ctx->tmr_size);
         ctx->last_error = tmrLoad(sink, ctx->ring,
                                   tmr_mc, ctx->tmr_size,
                                   cmd_buf_mc_addr,
                                   fence_mc_addr);
-        if (ctx->last_error != 0) return ctx->last_error;
+        if (ctx->last_error != 0) {
+            NRED_TRACE("tmrLoad: failed ret=%d", ctx->last_error);
+            return ctx->last_error;
+        }
+        NRED_TRACE("tmrLoad: ok");
     }
 
     ctx->last_step = BringupStep::Done;
