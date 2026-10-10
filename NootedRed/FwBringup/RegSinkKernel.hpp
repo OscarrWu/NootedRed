@@ -209,12 +209,23 @@ public:
 
 // RegSinkKernel —— 实现 display::RegSink 的内核态实现类
 // 通过构造函数注入 SmnCallbacks（函数指针 + void* 上下文），不依赖 IOKit 头文件
+// 段基址：默认 SEG0（Apple cgs 现役已实证可达）；可通过 setSegmentBase 切换 SEG1（真机验证后）。
+// 传入的地址为 dword 偏移（相对段基址）；内部加段基址后 ×4 得字节地址。
 class RegSinkKernel final : public display::RegSink {
 public:
-    explicit RegSinkKernel(const SmnCallbacks& cb) : cb_(cb) {
+    explicit RegSinkKernel(const SmnCallbacks& cb, uint32_t segBase = kMpSeg0Base)
+        : segBase_(segBase), cb_(cb) {
         // 编译期断言：Phoenix 最大 SMN 地址 < 4GB，HI 恒不需要
-        static_assert(fw::smnAddr(0xFF) < (1ull << 32), "Phoenix SMN addresses must fit in 32 bits");
+        static_assert(fw::smnAddrWithBase(kMpSeg1Base, 0xFF) < (1ull << 32),
+                      "Phoenix SMN addresses must fit in 32 bits");
     }
+
+    // 设置段基址（dword 单位，如 kMpSeg0Base / kMpSeg1Base）。
+    // 仅在构造后、首次 read/write 前调用；运行期不可重入。
+    void setSegmentBase(uint32_t segBase) { segBase_ = segBase; }
+
+    // 获取当前段基址（dword 单位）。
+    uint32_t segmentBase() const { return segBase_; }
 
     // 禁止拷贝（含函数指针上下文，语义上不可共享）
     RegSinkKernel(const RegSinkKernel&) = delete;
@@ -223,19 +234,23 @@ public:
     RegSinkKernel& operator=(RegSinkKernel&&) = default;
     ~RegSinkKernel() override = default;
 
-    // 读取寄存器（地址为 display::RegAddr = uint32_t，此处按字节地址传入）
-    display::RegValue read(display::RegAddr byteAddr) override {
+    // 读取寄存器（地址为 dword 偏移，相对段基址）。
+    display::RegValue read(display::RegAddr dwordOffset) override {
+        const uint64_t byteAddr = (static_cast<uint64_t>(segBase_) + dwordOffset) * 4;
         auto result = SmnIndirectAccess::read(byteAddr, cb_);
         lastValue_ = result.value;
         lastError_ = result.error;
         return result.value;
     }
 
-    // 写入寄存器
-    void write(display::RegAddr byteAddr, display::RegValue value) override {
+    // 写入寄存器（地址为 dword 偏移，相对段基址）。
+    void write(display::RegAddr dwordOffset, display::RegValue value) override {
+        const uint64_t byteAddr = (static_cast<uint64_t>(segBase_) + dwordOffset) * 4;
         lastError_ = SmnIndirectAccess::write(byteAddr, value, cb_);
         lastValue_ = value;
     }
+
+
 
     // —— 64 位 SMN 字节地址专用接口（供 PSP/SMU bringup 直接调用）——
     // RegSink 基类接口仅支持 u32，SMN 间接访问可能需要 48 位地址（HI 处理）
@@ -265,13 +280,12 @@ public:
         delayCtx_ = ctx;
     }
 
+    // 获取最后读/写的值（本类自行维护，不依赖基类私有成员）
+    display::RegValue lastValue() const { return lastValue_; }
     // 获取最后一次操作的错误码
     SmnAccessError lastError() const { return lastError_; }
 
-    // 获取最后读/写的值（本类自行维护，不依赖基类私有成员）
-    display::RegValue lastValue() const { return lastValue_; }
-
-private:
+    uint32_t segBase_{kMpSeg0Base};
     SmnCallbacks cb_;
     void (*delayFn_)(void*, uint32_t) = nullptr;
     void* delayCtx_ = nullptr;

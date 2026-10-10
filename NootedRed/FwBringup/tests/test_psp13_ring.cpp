@@ -212,27 +212,38 @@ static void testWaitRegTimeout() {
 
 // ════════════════════════════════════════════════════════════════════
 // 测试 5：smnAddr 等价关系 —— 验证字节地址公式与单一事实源一致
-//   依据 RegAddr.hpp：smnAddr(off) = (kMpSeg1Base + off) * 4
-//   （等价 Linux RREG32_SOC15_EXT，soc15_common.h:201-204；SEG1=0x0243FC00）
+//   依据 RegAddr.hpp：smnAddrWithBase(segBase, off) = (segBase + off) * 4
+//   （等价 Linux RREG32_SOC15_EXT，soc15_common.h:201-204；SEG0=0x00016000 / SEG1=0x0243FC00）
+//   A-2 追加：双段实现 —— 同一 off 在两段下字节地址差恒为 (SEG1-SEG0)*4。
 // ════════════════════════════════════════════════════════════════════
 static void testSmnAddrEquivalence() {
-    printf("[test 5] smnAddr equivalence (SEG1 byte address)... ");
+    printf("[test 5] smnAddr dual-segment equivalence... ");
 
-    // 公式本身：smnAddr(off) == (SEG1 + off) * 4，对任意 off 成立
-    assert(smnAddr(0x51) == (0x0243FC00u + 0x51) * 4);
-    assert(smnAddr(0x00) == (0x0243FC00u + 0x00) * 4);
-    assert(smnAddr(0x29A) == (0x0243FC00u + 0x29A) * 4);
+    // 公式本身：smnAddrWithBase(segBase, off) == (segBase + off) * 4，对任意 off 成立
+    assert(smnAddrWithBase(kMpSeg0Base, 0x51) == (0x00016000u + 0x51) * 4);
+    assert(smnAddrWithBase(kMpSeg1Base, 0x51) == (0x0243FC00u + 0x51) * 4);
+    assert(smnAddrWithBase(kMpSeg0Base, 0x00) == (0x00016000u + 0x00) * 4);
+    assert(smnAddrWithBase(kMpSeg1Base, 0x00) == (0x0243FC00u + 0x00) * 4);
+    assert(smnAddrWithBase(kMpSeg0Base, 0x29A) == (0x00016000u + 0x29A) * 4);
+    assert(smnAddrWithBase(kMpSeg1Base, 0x29A) == (0x0243FC00u + 0x29A) * 4);
 
-    // 定标寄存器：kC2PMSG* 必须由 smnAddr(对应偏移) 计算得出
-    //   C2PMSG_35 (0x63) → (0x0243FC00+0x63)*4 = 0x090FF18C
-    //   C2PMSG_81 (0x91) → (0x0243FC00+0x91)*4 = 0x090FF244
-    assert(kC2PMSG35 == smnAddr(MP0_SMN_C2PMSG_35));
-    assert(kC2PMSG35 == (0x0243FC00u + MP0_SMN_C2PMSG_35) * 4);
-    assert(kC2PMSG35 == 0x090FF18Cu);
-    assert(kC2PMSG81 == smnAddr(MP0_SMN_C2PMSG_81));
-    assert(kC2PMSG81 == (0x0243FC00u + MP0_SMN_C2PMSG_81) * 4);
-    assert(kC2PMSG81 == 0x090FF244u);
+    // 双段差恒定：同一 off 下 byteAddr(SEG1) - byteAddr(SEG0) == (SEG1-SEG0)*4
+    assert(smnAddrWithBase(kMpSeg1Base, 0x91) - smnAddrWithBase(kMpSeg0Base, 0x91)
+           == (kMpSeg1Base - kMpSeg0Base) * 4);
+    assert(smnAddrWithBase(kMpSeg1Base, 0x91) - smnAddrWithBase(kMpSeg0Base, 0x91)
+           == 0x090A7000u);
 
+    // 定标寄存器：kC2PMSG* 现为 **dword 偏移**（相对段基址，SEG1 为事实源）；
+    //   字节地址 = smnAddrWithBase(段基址, 偏移)
+    //   C2PMSG_35 (0x63) → SEG0 字节地址 0x0005824C / SEG1 0x090FF18C
+    //   C2PMSG_81 (0x91) → SEG0 字节地址 0x00058244 / SEG1 0x090FF244
+    assert(kC2PMSG35 == MP0_SMN_C2PMSG_35);   // 0x63（dword 偏移）
+    assert(kC2PMSG35 == 0x63u);
+    assert(kC2PMSG81 == MP0_SMN_C2PMSG_81);   // 0x91（dword 偏移）
+    assert(smnAddrWithBase(kMpSeg0Base, kC2PMSG81) == 0x00058244u);
+    assert(smnAddrWithBase(kMpSeg1Base, kC2PMSG81) == 0x090FF244u);
+    assert(smnAddrWithBase(kMpSeg0Base, kC2PMSG35) == 0x0005818Cu);
+    assert(smnAddrWithBase(kMpSeg1Base, kC2PMSG35) == 0x090FF18Cu);
     printf("PASS\n");
 }
 

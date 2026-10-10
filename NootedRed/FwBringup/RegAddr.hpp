@@ -44,22 +44,31 @@
 
 namespace fw {
 
+// MP0/MP1 SMN 寄存器的 SEG0 段基址（dword 单位）。
+// 依据：dcn314_smu.c:38-43（MP1_BASE__INST0_SEG0 = 0x00016000）。
+//       mp_13_0_4_offset.h 对勾选的 MP0/MP1 C2PMSG 寄存器 BASE_IDX = 1 ⇒ SEG1 为默认，
+//       但 Apple cgs 现役走 SEG0（已实证可达），故**默认取 SEG0**。
+inline constexpr uint32_t kMpSeg0Base = 0x00016000;
+
 // MP0/MP1 SMN 寄存器的 SEG1 段基址（dword 单位）。
 // 依据：dcn314_smu.c:38-43（MP1_BASE__INST0_SEG1 = 0x0243FC00）；
-//       mp_13_0_4_offset.h 对勾选的 MP0/MP1 C2PMSG 寄存器 BASE_IDX = 1 ⇒ 用 SEG1。
+//       mp_13_0_4_offset.h 对勾选的 MP0/MP1 C2PMSG 寄存器 BASE_IDX = 1 ⇒ SEG1。
 inline constexpr uint32_t kMpSeg1Base = 0x0243FC00;
 
-// 计算 MP0/MP1 SMN 寄存器的字节地址（供 NRed::readReg32/writeReg32 的越窗间接分支）。
-//
-// @param regOff  寄存器 dword 偏移（mp_13_0_4_offset.h 的 reg* 值，如 C2PMSG_81 = 0x91）
-// @return        SMN 字节地址 = (kMpSeg1Base + regOff) * 4   （smn_base64 = 0，见上 §3）
-//
-// 等价 Linux：RREG32_SOC15_EXT(MP0_HWIP, inst, reg) 展开为
-//   RREG32_PCIE_EXT((reg_offset[MP0_HWIP][inst][reg##_BASE_IDX] + reg) * 4 + smn_base64)
-// 其中 reg_offset[...][BASE_IDX=1] 即 SEG1 = kMpSeg1Base，smn_base64 = 0。
-inline constexpr display::RegAddr smnAddr(uint32_t regOff) {
-    return (kMpSeg1Base + regOff) * 4;
+// 计算 MP0/MP1 SMN 寄存器的字节地址（给定段基址）。
+// @param segBase  段基址（dword 单位，如 kMpSeg0Base 或 kMpSeg1Base）
+// @param regOff   寄存器 dword 偏移
+// @return         SMN 字节地址 = (segBase + regOff) * 4
+inline constexpr display::RegAddr smnAddrWithBase(uint32_t segBase, uint32_t regOff) {
+    return (segBase + regOff) * 4;
 }
+
+// 兼容旧接口：默认 SEG1（历史行为，保留供静态断言/现有代码）。
+// ⚠️ 新代码应显式指定段基址；此函数仅供兼容/静态断言。
+inline constexpr display::RegAddr smnAddr(uint32_t regOff) {
+    return smnAddrWithBase(kMpSeg1Base, regOff);
+}
+
 
 // ── 编译期自检：等价关系与定标寄存器的真实字节地址 ──
 // smnAddr(off) == (SEG1 + off) * 4  对任意 off 成立（公式本身）

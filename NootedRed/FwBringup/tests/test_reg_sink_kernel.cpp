@@ -136,21 +136,22 @@ static RegOp g_seqBuffer[256];
 
 // ── 测试用例 ──
 
-// ① 正常读：地址 < 4GB（无 HI），单次成功
+// ① 正常读：地址 < 4GB（无 HI），单次成功。RegSinkKernel 默认 SEG0：
+//    read(0x91) → 字节地址 (kMpSeg0Base + 0x91) * 4 = 0x00058244
 static void test_normal_read() {
     MockContext ctx;
-    ctx.pushReadReturn(0x090FF244);  // 回读 PCIE_INDEX2
+    ctx.pushReadReturn(0x00058244);  // 回读 PCIE_INDEX2（= 写入的 SEG0 字节地址）
     ctx.pushReadReturn(0xDEADBEEF);  // 读 PCIE_DATA2
 
     RegSinkKernel sink(makeCallbacks(&ctx));
 
-    uint32_t val = sink.read(fw::smnAddr(0x91));
+    uint32_t val = sink.read(0x91);
 
     assert(val == 0xDEADBEEF);
     assert(sink.lastError() == SmnAccessError::None);
 
     ctx.assertCalls({
-        {CallRecord::Write, kPcieIndex2Offset, 0x090FF244},
+        {CallRecord::Write, kPcieIndex2Offset, 0x00058244},
         {CallRecord::Read,  kPcieIndex2Offset, 0},
         {CallRecord::Read,  kPcieData2Offset,  0},
     }, "test_normal_read");
@@ -160,18 +161,18 @@ static void test_normal_read() {
 // ② 正常写：地址 < 4GB（无 HI），单次成功
 static void test_normal_write() {
     MockContext ctx;
-    ctx.pushReadReturn(0x090FF244);  // 回读 PCIE_INDEX2
+    ctx.pushReadReturn(0x00058244);  // 回读 PCIE_INDEX2（= 写入的 SEG0 字节地址）
     ctx.pushReadReturn(0xCAFEBABE);  // 回读 PCIE_DATA2（写后 flush）
 
     RegSinkKernel sink(makeCallbacks(&ctx));
 
-    sink.write(fw::smnAddr(0x91), 0xCAFEBABE);
+    sink.write(0x91, 0xCAFEBABE);
 
     assert(sink.lastError() == SmnAccessError::None);
     assert(sink.lastValue() == 0xCAFEBABE);
 
     ctx.assertCalls({
-        {CallRecord::Write, kPcieIndex2Offset, 0x090FF244},
+        {CallRecord::Write, kPcieIndex2Offset, 0x00058244},
         {CallRecord::Read,  kPcieIndex2Offset, 0},
         {CallRecord::Write, kPcieData2Offset,  0xCAFEBABE},
         {CallRecord::Read,  kPcieData2Offset,  0},
@@ -217,7 +218,7 @@ static void test_index_readback_mismatch_retry_exhaust() {
     }
 
     RegSinkKernel sink(makeCallbacks(&ctx));
-    uint32_t val = sink.read(fw::smnAddr(0x91));
+    uint32_t val = sink.read(0x91);
 
     assert(val == 0xFFFFFFFF);
     assert(sink.lastError() == SmnAccessError::IndexWriteFail);  // 重试耗尽返回最后一个错误
@@ -285,14 +286,14 @@ static void test_hi_clear_readback_nonzero() {
 static void test_poll_timeout() {
     MockContext ctx;
     for (int i = 0; i < 5; ++i) {
-        ctx.pushReadReturn(0x090FF244);  // 回读 INDEX2 匹配
+        ctx.pushReadReturn(0x00058244);  // 回读 INDEX2 匹配（SEG0 字节地址）
         ctx.pushReadReturn(0x00000000);  // 读 DATA2 返回 0（busy）
     }
 
     RegSinkKernel sink(makeCallbacks(&ctx));
     sink.setPollLimits(5, 0);
 
-    RegOp pollOp = regPollUntilNot(fw::smnAddr(0x91), 0x0, "poll_test");
+    RegOp pollOp = regPollUntilNot(0x91, 0x0, "poll_test");
     bool ok = sink.execute(pollOp);
 
     assert(!ok);  // 超时返回 false
@@ -305,16 +306,16 @@ static void test_poll_timeout() {
 static void test_poll_success() {
     MockContext ctx;
     for (int i = 0; i < 2; ++i) {
-        ctx.pushReadReturn(0x090FF244);
+        ctx.pushReadReturn(0x00058244);
         ctx.pushReadReturn(0x00000000);
     }
-    ctx.pushReadReturn(0x090FF244);
+        ctx.pushReadReturn(0x00058244);
     ctx.pushReadReturn(0x00000001);
 
     RegSinkKernel sink(makeCallbacks(&ctx));
     sink.setPollLimits(10, 0);
 
-    RegOp pollOp = regPollUntilNot(fw::smnAddr(0x91), 0x0, "poll_test");
+    RegOp pollOp = regPollUntilNot(0x91, 0x0, "poll_test");
     bool ok = sink.execute(pollOp);
 
     assert(ok);
@@ -326,22 +327,22 @@ static void test_poll_success() {
 // ⑩ 验证 RegSink::executeAll 顺序执行
 static void test_execute_all_sequence() {
     MockContext ctx;
-    ctx.pushReadReturn(0x090FF244);
+        ctx.pushReadReturn(0x00058244);
     ctx.pushReadReturn(0xCAFEBABE);
-    ctx.pushReadReturn(0x090FF244);
+        ctx.pushReadReturn(0x00058244);
     ctx.pushReadReturn(0xDEADBEEF);
-    ctx.pushReadReturn(0x090FF244);
+        ctx.pushReadReturn(0x00058244);
     ctx.pushReadReturn(0x00000000);
-    ctx.pushReadReturn(0x090FF244);
+        ctx.pushReadReturn(0x00058244);
     ctx.pushReadReturn(0x00000001);
 
     RegSinkKernel sink(makeCallbacks(&ctx));
     sink.setPollLimits(10, 0);
 
     RegSeq seq(g_seqBuffer, 256);
-    seq.push(regWrite(fw::smnAddr(0x91), 0xCAFEBABE, "write"));
-    seq.push(regRead(fw::smnAddr(0x91), "read"));
-    seq.push(regPollUntilNot(fw::smnAddr(0x91), 0x0, "poll"));
+    seq.push(regWrite(0x91, 0xCAFEBABE, "write"));
+    seq.push(regRead(0x91, "read"));
+    seq.push(regPollUntilNot(0x91, 0x0, "poll"));
 
     size_t executed = sink.executeAll(seq);
 

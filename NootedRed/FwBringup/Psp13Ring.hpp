@@ -27,20 +27,19 @@
 namespace fw {
 
 // =============================================================================
-// 绝对 SMN 字节地址（供 RegSink → NRed::readReg32/writeReg32 越窗间接分支使用）
-// PSP13.hpp 常量为 dword 偏移（mp_13_0_4_offset.h BASE_IDX = 1 ⇒ SEG1）；
-// 字节地址 = smnAddr(偏移) = (SEG1 + 偏移) × 4（smn_base64 = 0）。详见 RegAddr.hpp。
+// PSP/SMU 邮箱寄存器 dword 偏移（相对段基址，BASE_IDX=1 ⇒ SEG1 为事实源）。
+// 字节地址 = (段基址 + 偏移) × 4。RegSinkKernel 会在运行时按选定段基址加基址。
+// 依据：mp_13_0_4_offset.h（BASE_IDX = 1 ⇒ SEG1 为事实源）；Apple cgs 现役走 SEG0。
 // =============================================================================
 
-inline constexpr display::RegAddr kC2PMSG35 = smnAddr(MP0_SMN_C2PMSG_35);
-inline constexpr display::RegAddr kC2PMSG36 = smnAddr(MP0_SMN_C2PMSG_36);
-inline constexpr display::RegAddr kC2PMSG64 = smnAddr(MP0_SMN_C2PMSG_64);
-inline constexpr display::RegAddr kC2PMSG67 = smnAddr(MP0_SMN_C2PMSG_67);
-inline constexpr display::RegAddr kC2PMSG69 = smnAddr(MP0_SMN_C2PMSG_69);
-inline constexpr display::RegAddr kC2PMSG70 = smnAddr(MP0_SMN_C2PMSG_70);
-inline constexpr display::RegAddr kC2PMSG71 = smnAddr(MP0_SMN_C2PMSG_71);
-inline constexpr display::RegAddr kC2PMSG81 = smnAddr(MP0_SMN_C2PMSG_81);
-
+inline constexpr uint32_t kC2PMSG35 = MP0_SMN_C2PMSG_35;   // 0x63
+inline constexpr uint32_t kC2PMSG36 = MP0_SMN_C2PMSG_36;   // 0x64
+inline constexpr uint32_t kC2PMSG64 = MP0_SMN_C2PMSG_64;   // 0x80
+inline constexpr uint32_t kC2PMSG67 = MP0_SMN_C2PMSG_67;   // 0x83
+inline constexpr uint32_t kC2PMSG69 = MP0_SMN_C2PMSG_69;   // 0x85
+inline constexpr uint32_t kC2PMSG70 = MP0_SMN_C2PMSG_70;   // 0x86
+inline constexpr uint32_t kC2PMSG71 = MP0_SMN_C2PMSG_71;   // 0x87
+inline constexpr uint32_t kC2PMSG81 = MP0_SMN_C2PMSG_81;   // 0x91
 // =============================================================================
 // GPCOM 环帧常量（与 Linux psp_gfx_if.h 一致）
 // =============================================================================
