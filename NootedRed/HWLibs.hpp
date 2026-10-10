@@ -22,6 +22,10 @@
 //   （不经 msgbuf；seq 无上限、无轮转，文件序==调用序；⚠️ rootvnode 未挂载时只 SYSLOG、不写文件）。
 //   NRED_TRACE：同时写内核日志（SYSLOG→L1/L2）与上述落盘（第三通道 `NRedTrace-NNN.log`，手册 §5.7）。
 void nredTraceLine(char* const buf, const int n);
+// A-22：把内存环里的早期 trace 行刷盘（仅允许在**既有安全时点**调用：`NvMsgBuf::dumpNow`／
+//  `NRed::init` 定时拍／panic 分片路径）。早期路径（bringupRun/tmrInit/tmrLoad/hook 早期段）
+//  **禁止**调用。返回实际写出行数（0 = 无内容或未就绪；写失败保留内存，下拍重试）。
+int nredTraceFlush();
 #define NRED_TRACE(fmt, ...)                                                                        \
     do {                                                                                            \
         SYSLOG("HWLibs", fmt, ##__VA_ARGS__);                                                       \

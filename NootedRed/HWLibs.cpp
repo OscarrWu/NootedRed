@@ -39,31 +39,67 @@
 #include <Regs/VBIOSSMC.hpp>
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态落盘，见下方 IP 探针）
 #include <NRedTraceSafe.hpp>       // A-20：早期落盘安全前置检查（纯逻辑）
+#include <NRedTraceRing.hpp>       // A-22：早期 trace 内存环形缓冲（纯逻辑静态存储）
 
 // 根 vnode（XNU `bsd/sys/vnode.h`）：**内核态写文件的必备判据**，非空才表示根 FS 已挂载。
 // 与 `NvMsgBuf.hpp` 同一写法（`extern "C"` + weak），此处单独声明以免把它的静态缓冲带进来。
 extern "C" void *rootvnode __attribute__((weak));
 // A-20：落盘安全计数器（文件作用域；早期路径调用 nredTraceLine 时未就绪 ⇒ 丢弃计数累加）
 nred::TraceSafe gTraceSafe;
-// 捎带落盘缓冲与其相关全局已全部移除（2026-09-28 第 30 轮）：改为在关键探针处直接调用
-// `NvMsgBuf::dumpNow()` 立即落一拍，不再需要跨翻译单元的全局符号（那是本会话唯一
-// 无法用静态检查排除的挂死嫌疑来源，按"减少不确定性"的原则清除）。
+// A-22：早期 trace 内存环形缓冲（静态，无分配；早期路径只 push，不写文件）
+nred::TraceRing gTraceRing;
+
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
 //  关键读数在 34–39 s ⇒ **必须自建落盘**（自检已证明该通道可用：`selftest: rootvnode=… err=0`）。
 //  文件名带 **kext slide** ⇒ 每次启动天然不同，归档后不会混轮次。⚠️ 必须先判 `rootvnode`（手册 §5.1）。
+//
+// A-22（重写）：bringup 早期路径（bringupRun/tmrInit/tmrLoad/hook 早期段）**只写内存环形缓冲**，
+//  **绝不**调 `FileIO::writeBufferToFile`。依据（技术组长原话）：B7/B10 的 panic 栈确实经过
+//  `nredTraceLine`→`FileIO::writeBufferToFile`→**APFS btree lookup**，说明当时 `rootvnode` 非空
+//  （A-20 检查会放行）⇒ **在 bringup 早期调"APFS 写文件"本身就不安全**，加检查不解决，
+//  必须改"落地方式"。⇒ 本函数改为：行写入内存环，由**既有安全时点**（`NvMsgBuf::dumpNow`／
+//  `NRed::init` 定时拍／panic 分片路径）再刷盘（与 L2 `-NRedObserveDisk` 同构）。
+//  行同时经 `NRED_TRACE` 的 `SYSLOG` 进内核 console 环形缓冲 ⇒ **双通道冗余**。
+//  A-20 的 `dropped`/`written` 计数保留在内存侧（`gTraceSafe`）。
 void nredTraceLine(char* const buf, const int n)
 {
-    // A-20：早期落盘安全前置检查——`rootvnode` 未就绪 ⇒ 跳过落盘（计数，失败即退、不重试）。
-    //  依据：手册 §5.1（根 FS 未挂载时写文件会阻塞内核线程）＋ HWLibs.hpp:21-23（NRedTrace 需 rootvnode）。
-    //  ⚠️ 本函数可能被早期路径调用 ⇒ 必须先判后写；未就绪时**绝不**调 `FileIO::writeBufferToFile`。
-    if (!gTraceSafe.shouldWrite(rootvnode != nullptr, n)) { return; }
-    // ⚠️ 每次调用写**独立文件**（2026-09-28 第 19 轮实测：`O_APPEND` 组合未生效，追加写退化成覆盖，
-    //  文件里只剩最后一行）⇒ 用递增序号命名，天然不互相覆盖；判读时按文件名排序即得完整轨迹。
-    static unsigned seq = 0;
+    // A-20 前置检查（保留）+ A-22 改走内存：不再有任何文件系统写接口调用。
+    if (!gTraceSafe.shouldWrite(true, n)) { return; }   // 内存侧恒"可写"（rootvnode 无关）
+    gTraceRing.push(buf, n);
+}
+
+// A-22：把内存环里的早期 trace 行**刷盘**（仅在**既有安全时点**调用）。
+//  安全时点 = `NvMsgBuf::dumpNow()`／`NRed::init` 定时拍／panic 分片路径（与 L2 `-NRedObserveDisk` 同构）。
+//  ⚠️ 本函数**是唯一**允许在 bringup 之外调 `FileIO::writeBufferToFile` 写 NRedTrace 的地方；
+//     早期路径（bringupRun/tmrInit/tmrLoad/hook 早期段）**禁止**调用本函数。
+//  返回：实际写出的行数（0 = 无内容或未就绪）。
+int nredTraceFlush()
+{
+    if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
+    static unsigned fseq = 0;
     char name[64];
-    snprintf(name, sizeof(name), "/var/log/NRedTrace-%03u.log", seq++);
-    FileIO::writeBufferToFile(name, buf, static_cast<size_t>(n), O_TRUNC | O_CREAT | FWRITE | O_NOFOLLOW);
+    snprintf(name, sizeof(name), "/var/log/NRedTraceFlush-%03u.log", fseq++);
+    // 逐行拼进一个临时缓冲（上限：kLineMax × kLineBytes，此处按 16 KB 封顶避免栈溢出）
+    char body[16 * 1024];
+    size_t off = 0;
+    const uint32_t n = gTraceRing.count;
+    for (uint32_t i = 0; i < n; ++i) {
+        const char* line = nullptr;
+        const uint32_t len = gTraceRing.get(i, &line);
+        if (len == 0 || line == nullptr) { continue; }
+        if (off + len + 1 > sizeof(body)) { break; }   // 封顶即止（剩余丢弃）
+        __builtin_memcpy(body + off, line, len);
+        off += len;
+        body[off++] = '\n';
+    }
+    if (off == 0) { return 0; }
+    const int err = FileIO::writeBufferToFile(name, body, off);
+    if (err == 0) {
+        gTraceRing.reset();   // 刷盘成功 ⇒ 清空，避免重复刷
+        return static_cast<int>(n);
+    }
+    return 0;   // 写失败 ⇒ 保留在内存，下一安全时点重试（与 L2 周期拍同构）
 }
 
 #include <kern/assert.h>
