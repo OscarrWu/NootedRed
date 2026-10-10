@@ -197,19 +197,21 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                                      cmdBufMc,
                                      ringMc);
     if (rc != 0) {
-        NRED_TRACE("bringup: phase1 failed step=%u error=%d",
-                   static_cast<unsigned>(ctx.last_step), rc);
+        NRED_TRACE("bringup: phase1 failed step=%u error=%d loadToc_resp=0x%X",
+                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_load_toc);
         ringDesc->complete(); ringDesc->release();
         cmdDesc->complete(); cmdDesc->release();
         fenceDesc->complete(); fenceDesc->release();
         fwPriDesc->complete(); fwPriDesc->release();
         return;
     }
+    // A-13 D1′：分开记录 loadToc resp_status
+    NRED_TRACE("bringup: loadToc resp_status=0x%X", ctx.last_resp_status_load_toc);
 
     // ⑥ A-11：TMR 物理连续缓冲分配（PSP 可 DMA）。tmrInit 计算 tmr_size 后，在此分配。
     // 依据：Linux psp_tmr_init (amdgpu_psp.c:881-923) 先 loadToc 取 tmr_size，再分配 TMR。
     // 分配失败 ⇒ trace 并跳过（可判、不静默）。
-    constexpr UInt32 kTmrAlign = 4096;
+    constexpr UInt32 kTmrAlign = 0x100000;
     IOBufferMemoryDescriptor* tmrDesc = nullptr;
     addr64_t tmrPhys = 0;
     uint8_t* tmrVa = nullptr;
@@ -238,6 +240,30 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     }
     ctx.tmr_buf = tmrVa;
 
+    // M2（零风险仪表）：只读打印已有量（ring/cmd/fence/fw_pri/tmr PA、tmr_size、
+    // fbLocationBase 及长度、BAR0 物理地址与长度）。
+    // ⚠️ "读 0 的陷阱"：捕获时点未证 ⇒ 0 只能读作"尚未捕获"，不代表真实为 0。
+    {
+        // fbLocationBase 及长度（Apple getVRAMRange 返回的基址；长度无直接 getter，标注未捕获）
+        const UInt64 fbLocBase = NRed::singleton().getFbLocationBase();
+        const UInt64 fbOff     = NRed::singleton().getFbOffset();
+        // BAR0 物理地址（PCI 配置空间 BAR0 寄存器，mask 掉低 4 位标志位）
+        UInt64 bar0Phys = 0;
+        if (auto* igpu = NRed::singleton().getIGPU()) {
+            const UInt32 bar0Reg = igpu->configRead32(kIOPCIConfigBaseAddress0);
+            bar0Phys = (bar0Reg & ~0xFUL);
+        }
+        // BAR0 长度：无直接可靠读取路径，标注未捕获
+        NRED_TRACE("M2: ring_pa=0x%llX cmd_pa=0x%llX fence_pa=0x%llX fwpri_pa=0x%llX tmr_pa=0x%llX tmr_sz=0x%X"
+                   " | fbLocBase=0x%llX fbOff=0x%llX fbLen=未捕获"
+                   " | bar0_pa=0x%llX bar0_len=未捕获",
+                   (unsigned long long)ringPhys, (unsigned long long)cmdPhys,
+                   (unsigned long long)fencePhys, (unsigned long long)fwPriPhys,
+                   (unsigned long long)tmrPhys, ctx.tmr_size,
+                   (unsigned long long)fbLocBase, (unsigned long long)fbOff,
+                   (unsigned long long)bar0Phys);
+    }
+
     // ⑦ Phase 2: TmrLoad (SETUP_TMR)，使用真实 tmr_mc_addr
     rc = fw::bringupRunTmrLoad(&ctx,
                                false,      // boot_time_tmr
@@ -246,21 +272,26 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                                cmdBufMc,
                                fenceMc);
     if (rc != 0) {
-        NRED_TRACE("bringup: phase2 failed step=%u error=%d resp_status=0x%X",
-                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status);
+        NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
+                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);
     }
+    // A-13 D1′：分开记录 tmrLoad resp_status
+    NRED_TRACE("bringup: tmrLoad resp_status=0x%X", ctx.last_resp_status_tmr_load);
 
     // I10：结构化逐步 trace（含 resp_status——A-10 ③，区分超时与固件应答）。
-    NRED_TRACE("bringup: step=%u last_error=%d resp_status=0x%X",
-               static_cast<unsigned>(ctx.last_step), ctx.last_error, ctx.last_resp_status);
+    NRED_TRACE("bringup: step=%u last_error=%d loadToc_resp=0x%X tmrLoad_resp=0x%X",
+               static_cast<unsigned>(ctx.last_step), ctx.last_error,
+               ctx.last_resp_status_load_toc, ctx.last_resp_status_tmr_load);
     (void) rc;
 
+    // D3: TMR 缓冲保留至卸载（对齐 Linux"保留至卸载"契约，防提前释放）。
+    // 此处不释放 tmrDesc，保留至 kext 卸载（static 持有）。
     // 释放（引导期单次执行；结束后释放，避免长期占用）。
     ringDesc->complete(); ringDesc->release();
     cmdDesc->complete(); cmdDesc->release();
     fenceDesc->complete(); fenceDesc->release();
     fwPriDesc->complete(); fwPriDesc->release();
-    tmrDesc->complete(); tmrDesc->release();
+    // tmrDesc 故意不释放：保留至卸载（D3）
 }
 
 }  // namespace fw

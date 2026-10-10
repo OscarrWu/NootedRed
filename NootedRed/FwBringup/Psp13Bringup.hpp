@@ -146,6 +146,8 @@ struct BringupCtx {
     const uint8_t*    toc_data;     // TOC 固件数据（psp_13_0_4_toc.bin）
     uint32_t          toc_size;     // TOC 大小
     uint32_t          last_resp_status{0}; // A-10 ③：resp_status 判读（tmrInit/loadToc/tmrLoad 回填）
+    uint32_t          last_resp_status_load_toc{0}; // A-13 D1′：loadToc 单独 resp_status
+    uint32_t          last_resp_status_tmr_load{0}; // A-13 D1′：tmrLoad 单独 resp_status
     BringupStep       last_step;    // 最后成功完成的步骤
     int               last_error;   // 最后错误码
     BlComponent       bl_comps[7];  // bootloader 组件表
@@ -391,6 +393,11 @@ inline int loadToc(display::RegSink& sink,
     const GfxCmdResp* resp = cmdBufGet(ring);
     *out_tmr_size = resp->resp_tmr_size;
     if (out_resp_status) { *out_resp_status = resp->resp_status; }
+    // 硬化：resp_status 校验（非 0 即 TEE 错误码，静默吞掉 ⇒ 硬化）
+    if (resp->resp_status != kTeeSuccess) {
+        NRED_TRACE("loadToc: resp_status=0x%X", resp->resp_status);
+        return static_cast<int>(resp->resp_status);
+    }
     return 0;
 }
 
@@ -451,17 +458,23 @@ inline int tmrInit(display::RegSink& sink,
 // ---------- 5b. TMR prep + submit ----------
 
 /// 等 Linux psp_prep_tmr_cmd_buf (amdgpu_psp.c:820-843) 非 SRIOV 分支
+/// cmd_payload: buf_phy_addr_lo/hi, buf_size, flags, sys_phy_addr_lo/hi (6 dword)
 inline void prepTmrCmd(GfxCmdResp* cmd,
                        uint64_t tmr_mc_addr,
                        uint32_t tmr_size) {
     cmd->buf_size        = kCmdBufSize;
     cmd->buf_version     = 1;
     cmd->cmd_id          = GFX_CMD_ID_SETUP_TMR;
-    // cmd_payload packed: buf_phy_addr_lo/hi, buf_size, flags, sys_phy_addr_lo/hi
+    // buf_phy_addr_lo/hi
     cmd->cmd_payload[0]  = static_cast<uint32_t>(tmr_mc_addr & 0xFFFFFFFF);
     cmd->cmd_payload[1]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
+    // buf_size
     cmd->cmd_payload[2]  = tmr_size;
-    cmd->cmd_payload[3]  = 0x00000002; // bitfield: virt_phy_addr = 1
+    // flags: virt_phy_addr = 1
+    cmd->cmd_payload[3]  = 0x00000002;
+    // D1: system_phy_addr_lo/hi (同值起步，依据 G-6 Q2/Q4)
+    cmd->cmd_payload[4]  = static_cast<uint32_t>(tmr_mc_addr & 0xFFFFFFFF);
+    cmd->cmd_payload[5]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
 }
 
 inline int tmrLoad(display::RegSink& sink,
