@@ -78,39 +78,67 @@ void nredTraceLine(char* const buf, const int n)
     gTraceRing.push(buf, n);
 }
 
-// A-22：把内存环里的早期 trace 行**刷盘**（仅在**既有安全时点**调用）。
-//  安全时点 = `NvMsgBuf::dumpNow()`／`NRed::init` 定时拍／panic 分片路径（与 L2 `-NRedObserveDisk` 同构）。
+// A-22/A-28：把内存环里的早期 trace 行**刷盘**（仅在**既有安全时点**调用）。
+//  安全时点（A-28 起）：
+//    ① L2 周期拍 `dumpTick` 的 **stBusy 保护区**内（**本卡新增**，每拍都刷 ⇒ 死亡时点可读到秒）；
+//    ② `NvMsgBuf::dumpNow()`（PP helper 入口即时落一拍）；
+//    ③ panic 分片路径。
 //  ⚠️ 本函数**是唯一**允许在 bringup 之外调 `FileIO::writeBufferToFile` 写 NRedTrace 的地方；
 //     早期路径（bringupRun/tmrInit/tmrLoad/hook 早期段）**禁止**调用本函数。
 //  返回：实际写出的行数（0 = 无内容或未就绪）。
-int nredTraceFlush()
+//
+// A-28 修掉的 A-22 三处并发差异（技术组长 R1 规格）：
+//  ① **接 stBusy 互斥**：本函数只在 `dumpTick` 已持 `stBusy()` 的临界区内被调用（见 NvMsgBuf.hpp），
+//     与 `dumpNow` 共用同一把标志 ⇒ 不会与周期拍并发写同一卷。
+//  ② **fseq/body 无锁无原子**：改为**函数内静态 + 仅在 stBusy 保护区内改写**（顺序执行，无并发）；
+//     且 `fseq` 只在写成功后递增（与 L2 `stSeq` 同构）。
+//  ③ **唯一落盘点＝单点故障**：由"仅 X6000FB.cpp 一处"扩为"L2 周期拍每拍 + dumpNow + panic 路径"多点。
+//
+// A-28 "最后一拍可读到秒"：文件名带**秒级时间戳**（`sec`），并写一行 `[flush-stamp] sec=<n>` 首行标签
+//  ⇒ 判读侧从"最后存在的那个 NRedTraceFlush 文件"即可读出本轮死亡时点（秒级）。
+int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
+    // A-28 风险①处理：flush 用**独立** `stFlushBusy` 互斥（与 L2 的 `stBusy` 分开）⇒
+    //  万一 FS 阻塞，只影响本 flush，不会让 L2 周期拍后续全部跳过（唯一存活计时器保住）。
+    if (NvMsgBuf::stFlushBusy()) { return 0; }
+    NvMsgBuf::stFlushBusy() = true;
     static unsigned fseq = 0;
-    char name[64];
-    snprintf(name, sizeof(name), "/var/log/NRedTraceFlush-%03u.log", fseq++);
-    // 逐行拼进一个**静态**缓冲（⚠️ 不落栈：XNU 内核线程栈默认 16 KB，栈上 16 KB 数组会溢出）。
-    //  静态缓冲 ⇒ 单写者假设（安全时点顺序执行；周期拍与 dumpNow 有 stBusy 互斥，本函数同类）。
-    static char body[4 * 1024];   // 4 KB：单次刷盘覆盖 ~21 行×192B 或 256 行×16B；封顶即止
+    char name[96];
+    // A-28 风险②处理：文件名带 **slide**（认属主）+ 首行带 **uptime 指纹 + sec**（认本轮/秒级）。
+    const uint64_t slide = static_cast<uint64_t>(X5000HWLibs::singleton().getKcSlide());
+    snprintf(name, sizeof(name), "/var/log/NRedTraceFlush-s%llx-%03u-%05ds.txt",
+             (unsigned long long)slide, fseq, secTag);
+    static char body[4 * 1024];
     size_t off = 0;
+    // 首行指纹（复用 NvMsgBuf 的既有指纹格式）+ 秒级标签
+    off += NvMsgBuf::formatFingerprint(body, sizeof(body));
+    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off, "[flush-stamp] sec=%d\n", secTag));
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
         const char* line = nullptr;
         const uint32_t len = gTraceRing.get(i, &line);
         if (len == 0 || line == nullptr) { continue; }
-        if (off + len + 1 > sizeof(body)) { break; }   // 封顶即止（剩余丢弃）
+        if (off + len + 1 > sizeof(body)) { break; }
         __builtin_memcpy(body + off, line, len);
         off += len;
         body[off++] = '\n';
     }
-    if (off == 0) { return 0; }
+    if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
     const int err = FileIO::writeBufferToFile(name, body, off);
     if (err == 0) {
-        gTraceRing.reset();   // 刷盘成功 ⇒ 清空，避免重复刷
+        gTraceRing.reset();
+        ++fseq;
+        NvMsgBuf::stFlushBusy() = false;
         return static_cast<int>(n);
     }
-    return 0;   // 写失败 ⇒ 保留在内存，下一安全时点重试（与 L2 周期拍同构）
+    NvMsgBuf::stFlushBusy() = false;
+    return 0;
 }
+// 无参兼容封装（既有调用点 X6000FB.cpp 曾用）：秒级标签取"当前拍序号×kTickSecs"。
+int nredTraceFlush() { return nredTraceFlush(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs); }
+
+
 
 #include <kern/assert.h>
 #include <libkern/OSTypes.h>

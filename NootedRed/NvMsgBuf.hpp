@@ -80,6 +80,12 @@ extern "C" {
 	extern void *rootvnode __attribute__((weak));
 }
 
+// A-28：跨 TU 前向声明（定义于 HWLibs.cpp）。周期拍 `dumpTick` 在 stBusy 保护区内调用它，
+//  把 A-22 内存环（`gTraceRing`）里的早期 trace 行刷盘（与 L2 `-NRedObserveDisk` 同构）。
+//  @param secTag 秒级时间戳（写入文件名与首行标签 ⇒ 判读"最后一拍"可读到秒）
+int nredTraceFlush(int secTag);
+int nredTraceFlush();   // 无参兼容封装（既有 dumpNow 调用点）
+
 namespace NvMsgBuf {
 	static constexpr int kMagic   = 0x063061;
 	static constexpr int kMaxDump = 32768;       // 单次最多 32 KB
@@ -182,6 +188,9 @@ namespace NvMsgBuf {
 	inline thread_call_t &stCall()      { static thread_call_t v = nullptr; return v; }
 	// 立即落盘与周期拍的互斥标志（见 `dumpNow`）：`FileIO::writeBufferToFile` 不是为并发设计的。
 	inline bool          &stBusy()      { static bool v = false; return v; }
+	// A-28：`nredTraceFlush` 的独立互斥标志（与 stBusy **分开**——flush 写可能变长阻塞，
+	//  若与 stBusy 共用则一次 FS 阻塞会让 L2 周期拍全部跳过、唯一存活计时器失效）。
+	inline bool          &stFlushBusy() { static bool v = false; return v; }
 
 	// 计算"自上次成功写出之后新增的部分"，填充 gBuf；成功则把本帧终点记入 stPendingEnd。
 	// ⚠️ **不推进 stLastBufx**（推进由 commit 完成）⇒ 写失败时下拍重算同一段（自然重试）。
@@ -299,6 +308,9 @@ namespace NvMsgBuf {
 				stSeq()++;
 			}
 		}
+		// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之前**调用 ⇒ 与周期拍互斥，
+		//  不会并发写同一卷）。秒级标签取"当前拍序号×kTickSecs"。
+		nredTraceFlush(stTick() * kTickSecs);
 		stBusy() = false;
 	}
 
@@ -341,6 +353,10 @@ namespace NvMsgBuf {
 					SYSLOG("NvMsgBuf", "L2 write@%ds failed (%d), will retry", sec, err);
 				}
 			}
+
+			// A-28：把内存环里的早期 trace 行刷盘（在 stBusy 保护区内，与 L2 同构）。
+			//  传本拍秒级标签 ⇒ 文件名与首行带 `sec=`，判读"最后一拍"可读到秒。
+			nredTraceFlush(sec);
 
 			scheduleNextTick(kTickSecs);
 			stBusy() = false;

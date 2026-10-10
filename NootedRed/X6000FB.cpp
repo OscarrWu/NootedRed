@@ -1269,9 +1269,8 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                static_cast<unsigned long long>(gPpHelperSelf),
                wantProbe ? 1 : 0, wantRegister ? 1 : 0, wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
         NvMsgBuf::dumpNow();
-        // A-22：既有安全时点（与 L2 `-NRedObserveDisk` 同构）⇒ 把内存环里的早期 trace 行刷盘一次。
-        //  此时 rootvnode 已挂载（pass 到 PP helper 阶段）、且不在 bringup 早期路径上 ⇒ 安全。
-        nredTraceFlush();
+        // A-28：刷盘已并入 `dumpNow()` 的 stBusy 保护区（见 NvMsgBuf.hpp），
+        //  此处**不再**单独调用（避免与 L2 周期拍并发写同一卷）。
     }
 
     if (wantProbe || wantRegister || wantAccelProbe || wantAccelLog) {

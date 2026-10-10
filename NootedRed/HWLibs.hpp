@@ -26,6 +26,8 @@ void nredTraceLine(char* const buf, const int n);
 //  `NRed::init` 定时拍／panic 分片路径）。早期路径（bringupRun/tmrInit/tmrLoad/hook 早期段）
 //  **禁止**调用。返回实际写出行数（0 = 无内容或未就绪；写失败保留内存，下拍重试）。
 int nredTraceFlush();
+// A-28：秒级标签版本（由 L2 周期拍 `dumpTick` 在 stBusy 保护区内调用；文件名与首行带 `sec=`）
+int nredTraceFlush(int secTag);
 #define NRED_TRACE(fmt, ...)                                                                        \
     do {                                                                                            \
         SYSLOG("HWLibs", fmt, ##__VA_ARGS__);                                                       \
@@ -113,6 +115,9 @@ public:
     X5000HWLibs();
 
     void processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size);
+
+    // A-28：公开 slide 供 `nredTraceFlush`（自由函数）写入文件名认属主（只读访问器，零副作用）。
+    auto getKcSlide() const { return this->kcSlide; }
 
 private:
     static void       wrapPopulateFirmwareDirectory(void* self);
