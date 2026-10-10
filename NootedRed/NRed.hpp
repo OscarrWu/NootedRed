@@ -51,6 +51,10 @@ class NRed
     // §简化项 15：Apple 侧认定的 VRAM 基址（`IOFramebuffer::getVRAMRange()` 的地址）。
     // 由 X5000::fixedGetDisplayInfo 捕获；与 fbOffset 的消费方（Apple 的地址换算）天然同源。
     UInt64           fbLocationBase{0};
+    // A-23：同一 `getVRAMRange()` 对象的**窗长**（`IOMemoryDescriptor::getLength()`）。
+    //  与 fbLocationBase 同点捕获（同一既有 Apple API 调用，非新增寄存器探针）⇒ 供"TMR 是否落在窗内"判定。
+    //  ⚠️ 同为"读 0 陷阱"字段：0 只能读作"尚未捕获"，不得当作"窗长为 0"。
+    UInt64           fbLocationSize{0};
 
 public:
     static NRed& singleton();
@@ -63,6 +67,8 @@ public:
     auto  getFbOffset() const { return fbOffset; }              // TODO: Remove!
     auto  getFbLocationBase() const { return this->fbLocationBase; }     // §简化项 15
     void  setFbLocationBase(const UInt64 v) { this->fbLocationBase = v; }    // §简化项 15
+    auto  getFbLocationSize() const { return this->fbLocationSize; }     // A-23：窗长（读 0 陷阱同）
+    void  setFbLocationSize(const UInt64 v) { this->fbLocationSize = v; }    // A-23：窗长
     IOPCIDevice* getIGPU() const { return this->iGPU; }         // §16.52: HWLibs 需映射 BAR0 写驱动表
 
     void init();

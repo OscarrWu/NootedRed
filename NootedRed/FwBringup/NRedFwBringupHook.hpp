@@ -38,7 +38,7 @@
 #include "Psp13Ring.hpp"          // RingState / ringInit / 缓冲尺寸
 #include "RegSinkKernel.hpp"      // SmnCallbacks / RegSinkKernel
 #include "FwFirmwareAsset.hpp"    // fnv1a64 / FwAssetDesc / fwAssetVerify（A-2 固件完整性）
-
+#include "../NRedTmrAddrReadout.hpp"  // A-23：三个只读仪表（纯逻辑）
 // ── A-2：真实固件内嵌（来源：src/NootedRed/Firmware/，既有 T1 资产）──
 //  `#embed` 需要 clang 19+（本工程 HWLibs.cpp 已用 53 处）；路径相对本文件（FwBringup/）解析。
 //  期望哈希 = 离线对源文件实测的 fnv1a64（TOC 2560 B / TA 254976 B；sha256 见 A-2 报告 §固件来源）。
@@ -240,26 +240,31 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     }
     ctx.tmr_buf = tmrVa;
 
-
-    // ⑦ Phase 2: TmrLoad (SETUP_TMR)，使用真实 tmr_mc_addr
-    rc = fw::bringupRunTmrLoad(&ctx,
-                               false,      // boot_time_tmr
-                               false,      // autoload_supported
-                               tmrPhys,
-                               cmdBufMc,
-                               fenceMc);
-    if (rc != 0) {
-        NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
-                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);
+    // A-23：三个只读仪表（门控 `-NRedTmrAddrReadout`，默认关、仅观测）。
+    //  通道：NRED_TRACE（A-22 内存优先，安全时点刷盘）⇒ 绝不调任何写文件接口。
+    //  第 ③ 项用 NRed 既有内存字段（`fbLocationBase`/`fbLocationSize`），**零寄存器探针**。
+    if (checkKernelArgument("-NRedTmrAddrReadout")) {
+        const uint64_t fbBase = NRed::singleton().getFbLocationBase();
+        const uint64_t fbSize = NRed::singleton().getFbLocationSize();
+        const nred::TmrAddrReadout r = nred::runTmrAddrReadout(tmrPhys, tmrPhys, ctx.tmr_size,
+                                                                fbBase, fbSize, tmrPhys);
+        // ① 值本身
+        NRED_TRACE("tmr-addr: buf_phy=0x%llX sys_phy=0x%llX size=0x%X",
+                   (unsigned long long)r.buf_phy, (unsigned long long)r.sys_phy, r.tmr_size);
+        // ② 自然对齐余数
+        if (r.align_rem == ~0ULL) {
+            NRED_TRACE("tmr-addr: align_rem=哨兵(tmr_size=0)");
+        } else {
+            NRED_TRACE("tmr-addr: align_rem=%llu (tmr_mc=0x%llX %% tmr_size=0x%X)",
+                       (unsigned long long)r.align_rem, (unsigned long long)tmrPhys, ctx.tmr_size);
+        }
+        // ③ 窗内判定（含"读 0 陷阱"——base/size 为 0 ⇒ unknown）
+        const char* inWindowStr = (r.in_window == 2) ? "unknown(0陷阱)"
+                                 : (r.in_window == 1) ? "in" : "out";
+        NRED_TRACE("tmr-addr: in_window=%s base=0x%llX size=0x%llX tmr_mc=0x%llX",
+                   inWindowStr, (unsigned long long)r.win_base, (unsigned long long)r.win_size,
+                   (unsigned long long)tmrPhys);
     }
-    // A-13 D1′：分开记录 tmrLoad resp_status
-    NRED_TRACE("bringup: tmrLoad resp_status=0x%X", ctx.last_resp_status_tmr_load);
-
-    // I10：结构化逐步 trace（含 resp_status——A-10 ③，区分超时与固件应答）。
-    NRED_TRACE("bringup: step=%u last_error=%d loadToc_resp=0x%X tmrLoad_resp=0x%X",
-               static_cast<unsigned>(ctx.last_step), ctx.last_error,
-               ctx.last_resp_status_load_toc, ctx.last_resp_status_tmr_load);
-    (void) rc;
 
     // D3: TMR 缓冲保留至卸载（对齐 Linux"保留至卸载"契约，防提前释放）。
     // 此处不释放 tmrDesc，保留至 kext 卸载（static 持有）。

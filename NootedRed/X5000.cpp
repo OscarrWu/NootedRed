@@ -837,6 +837,10 @@ bool X5000::fixedGetDisplayInfo(AMDRadeonX5000_AMDHWDisplay* const self, const U
     if (vram != nullptr) {
         const auto vramBase = static_cast<UInt64>(vram->getPhysicalSegment(0, nullptr));
         if (vramBase != 0) { NRed::singleton().setFbLocationBase(vramBase); }
+        // A-23：同点捕获窗长（`getVRAMRange()` 对象自带；同一既有 Apple API，非新增寄存器探针）。
+        //  ⚠️ 与 fbLocationBase 同为"读 0 陷阱"字段：0 ⇒ 尚未捕获，不得当作窗长为 0。
+        const auto vramLen = static_cast<UInt64>(vram->getLength());
+        if (vramLen != 0) { NRed::singleton().setFbLocationSize(vramLen); }
     }
 
     [[clang::suppress]] OSSafeReleaseNULL(aperture);
