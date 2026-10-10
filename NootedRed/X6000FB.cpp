@@ -45,6 +45,7 @@
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（PP 观测落盘，见下方 helper）
 #include <FwBringup/SmnReadProbe.hpp>   // 乙线「只读单点规范 SMN 访问」探针（门控 -NRedSmnRead1，默认关）
 #include <FwBringup/NbioFbEnProbe.hpp>   // 乙线 B 方案·序①「NBIO BIF_FB_EN 写入探针」（门控 -NRedNbioFbEn，默认关）
+#include <FwBringup/NRedClkLayoutReadout.hpp>   // A-12 读数仪表扩展（门控 -NRedClkLayoutReadout，默认关）
 
 // 第八步观测：加速器 `probe` 的读数（由 X5000.cpp 记录、在此处【安全位置】输出）
 extern UInt64 gAccelProbeCalls;
@@ -1094,8 +1095,12 @@ static UInt32 gProbeResp[7] = {0, 0, 0, 0, 0, 0, 0};
 //  Apple 经 rn_clk_mgr_construct 以 `f38(pp_smu+0x18, &dpm_clocks)` 调用（rdi=this, rsi=table），
 //  要求返回 1（tmp/re/fb_full.asm 0x131a9b–0x131ac4）。只填 FClocks[4]（+0x80，4×8B）；
 //  其余（DcfClocks/SocClocks/MemClocks/…）保持调用方已 memset 的 0（0x131895）。
+// A-12：回调调用计数（供 A-12 读数仪表判读"回调是否被调用"）。
+static UInt64 gNRedPpSmuOverlayCalls = 0;
+
 static int NRedPpSmuOverlayGetDpmClockTable(void* /*this_obj*/, void* table)
 {
+    ++gNRedPpSmuOverlayCalls;  // A-12：回调调用计数
     auto* p = reinterpret_cast<UInt32*>(table);
     // dpm_clocks 布局（dm_pp_smu.h）：DcfClocks[8]@0x00、SocClocks[8]@0x40、FClocks[4]@0x80、MemClocks[4]@0xa0…
     // 每项 dpm_clock = { u32 Freq(MHz); u32 Vol(mV, 2 fractional bits) }。
@@ -1175,7 +1180,16 @@ void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* cons
               c, v58, v30, v118, pp, v0, v8, v10, v18, d, vCalls, vIri, vDummy);
     }
 
-    return FunctionCast(wrapDcClkMgrCreate, singleton().orgDcClkMgrCreate)(ctx, ppSmu, dccg);
+    // A-12：读数仪表扩展（门控 -NRedClkLayoutReadout，默认关、仅观测）。
+    //  在 org 调用返回后读取：clk_mgr+0x130 bw 表、pp_smu->f38、回调计数、dc_context 布局。
+    void* const ret = FunctionCast(wrapDcClkMgrCreate, singleton().orgDcClkMgrCreate)(ctx, ppSmu, dccg);
+    if (checkKernelArgument("-NRedClkLayoutReadout")) {
+        fw::nredClkLayoutReadoutHook(reinterpret_cast<UInt64>(ret), reinterpret_cast<UInt64>(ppSmu),
+                                     reinterpret_cast<UInt64>(ctx),
+                                     reinterpret_cast<UInt64>(&NRedPpSmuOverlayGetDpmClockTable),
+                                     gNRedPpSmuOverlayCalls);
+    }
+    return ret;
 }
 
 // ─── 第八步观测探针：填充 pp_smu_funcs 的函数（终局证据）──────────────────────
