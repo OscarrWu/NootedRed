@@ -308,10 +308,10 @@ namespace NvMsgBuf {
 				stSeq()++;
 			}
 		}
-		// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之前**调用 ⇒ 与周期拍互斥，
-		//  不会并发写同一卷）。秒级标签取"当前拍序号×kTickSecs"。
-		nredTraceFlush(stTick() * kTickSecs);
+		// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之后**调用 ⇒
+		//  flush 耗时（含 FS 阻塞）不计入 stBusy 持有时间）。flush 用独立 stFlushBusy 互斥。
 		stBusy() = false;
+		nredTraceFlush(stTick() * kTickSecs);
 	}
 
 	// 一拍：有增量就写一个文件；无论成败都排下一拍，直到用完 kMaxTicks 或写满 kMaxTotal。
@@ -354,12 +354,13 @@ namespace NvMsgBuf {
 				}
 			}
 
-			// A-28：把内存环里的早期 trace 行刷盘（在 stBusy 保护区内，与 L2 同构）。
-			//  传本拍秒级标签 ⇒ 文件名与首行带 `sec=`，判读"最后一拍"可读到秒。
-			nredTraceFlush(sec);
-
 			scheduleNextTick(kTickSecs);
 			stBusy() = false;
+
+			// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之后**调用 ⇒
+			//  flush 的耗时（含 FS 阻塞）不计入 stBusy 持有时间 ⇒ L2 计时器不被拖住）。
+			//  flush 自身用独立的 stFlushBusy 互斥（防并发写同一卷）。
+			nredTraceFlush(sec);
 			return;
 		}
 
