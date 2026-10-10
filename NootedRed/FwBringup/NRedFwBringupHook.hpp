@@ -240,29 +240,6 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     }
     ctx.tmr_buf = tmrVa;
 
-    // M2（零风险仪表）：只读打印已有量（ring/cmd/fence/fw_pri/tmr PA、tmr_size、
-    // fbLocationBase 及长度、BAR0 物理地址与长度）。
-    // ⚠️ "读 0 的陷阱"：捕获时点未证 ⇒ 0 只能读作"尚未捕获"，不代表真实为 0。
-    {
-        // fbLocationBase 及长度（Apple getVRAMRange 返回的基址；长度无直接 getter，标注未捕获）
-        const UInt64 fbLocBase = NRed::singleton().getFbLocationBase();
-        const UInt64 fbOff     = NRed::singleton().getFbOffset();
-        // BAR0 物理地址（PCI 配置空间 BAR0 寄存器，mask 掉低 4 位标志位）
-        UInt64 bar0Phys = 0;
-        if (auto* igpu = NRed::singleton().getIGPU()) {
-            const UInt32 bar0Reg = igpu->configRead32(kIOPCIConfigBaseAddress0);
-            bar0Phys = (bar0Reg & ~0xFUL);
-        }
-        // BAR0 长度：无直接可靠读取路径，标注未捕获
-        NRED_TRACE("M2: ring_pa=0x%llX cmd_pa=0x%llX fence_pa=0x%llX fwpri_pa=0x%llX tmr_pa=0x%llX tmr_sz=0x%X"
-                   " | fbLocBase=0x%llX fbOff=0x%llX fbLen=未捕获"
-                   " | bar0_pa=0x%llX bar0_len=未捕获",
-                   (unsigned long long)ringPhys, (unsigned long long)cmdPhys,
-                   (unsigned long long)fencePhys, (unsigned long long)fwPriPhys,
-                   (unsigned long long)tmrPhys, ctx.tmr_size,
-                   (unsigned long long)fbLocBase, (unsigned long long)fbOff,
-                   (unsigned long long)bar0Phys);
-    }
 
     // ⑦ Phase 2: TmrLoad (SETUP_TMR)，使用真实 tmr_mc_addr
     rc = fw::bringupRunTmrLoad(&ctx,
