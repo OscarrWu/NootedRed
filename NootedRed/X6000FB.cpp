@@ -46,6 +46,7 @@
 #include <FwBringup/SmnReadProbe.hpp>   // 乙线「只读单点规范 SMN 访问」探针（门控 -NRedSmnRead1，默认关）
 #include <FwBringup/NbioFbEnProbe.hpp>   // 乙线 B 方案·序①「NBIO BIF_FB_EN 写入探针」（门控 -NRedNbioFbEn，默认关）
 #include <FwBringup/NRedClkLayoutReadout.hpp>   // A-12 读数仪表扩展（门控 -NRedClkLayoutReadout，默认关）
+#include <NRedTraceSafe.hpp>   // A-20：早期落盘安全前置检查（纯逻辑）
 
 // 第八步观测：加速器 `probe` 的读数（由 X5000.cpp 记录、在此处【安全位置】输出）
 extern UInt64 gAccelProbeCalls;
@@ -245,6 +246,9 @@ extern int    gPluginNodeValid;
 //   （26–27 s），捎带机制在时间上根本排不上；而周期拍（每 1 s）的下一拍落在 panic 之后。
 //   ⇒ 唯一可靠做法是在本函数内写完日志后**立刻**调用 `NvMsgBuf::dumpNow()` 拍一张。
 //   ⚠️ 这里刻意不再引入任何跨翻译单元的全局符号（本会话唯一无法静态排除的挂死嫌疑）。
+// A-20：早期落盘安全前置检查（`rootvnode` 未就绪 ⇒ 跳过落盘；计数，失败即退、不重试）。
+//  与 `nredTraceLine`（HWLibs.cpp）同一纪律；PP 侧独立计数器，互不干扰。
+static nred::TraceSafe gPPTraceSafe;
 static void nredPPTrace(char* const buf, const int n)
 {
     if (n <= 0) { return; }
@@ -254,7 +258,7 @@ static void nredPPTrace(char* const buf, const int n)
     // 通道 2：立即把 msgbuf 增量落盘（失败静默，不影响流程）
     NvMsgBuf::dumpNow();
     // 通道 3：直写文件（前两条都失效时的兜底；本时刻 `FileIO` 可能不可用，故仅作冗余）
-    if (rootvnode != nullptr) {
+    if (gPPTraceSafe.shouldWrite(rootvnode != nullptr, static_cast<int>(len))) {
         static unsigned seq = 0;
         char name[64];
         snprintf(name, sizeof(name), "/var/log/NRedPP-%03u.log", seq++);

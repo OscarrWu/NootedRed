@@ -38,10 +38,13 @@
 #include <Regs/SMU.hpp>
 #include <Regs/VBIOSSMC.hpp>
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态落盘，见下方 IP 探针）
+#include <NRedTraceSafe.hpp>       // A-20：早期落盘安全前置检查（纯逻辑）
 
 // 根 vnode（XNU `bsd/sys/vnode.h`）：**内核态写文件的必备判据**，非空才表示根 FS 已挂载。
 // 与 `NvMsgBuf.hpp` 同一写法（`extern "C"` + weak），此处单独声明以免把它的静态缓冲带进来。
 extern "C" void *rootvnode __attribute__((weak));
+// A-20：落盘安全计数器（文件作用域；早期路径调用 nredTraceLine 时未就绪 ⇒ 丢弃计数累加）
+nred::TraceSafe gTraceSafe;
 // 捎带落盘缓冲与其相关全局已全部移除（2026-09-28 第 30 轮）：改为在关键探针处直接调用
 // `NvMsgBuf::dumpNow()` 立即落一拍，不再需要跨翻译单元的全局符号（那是本会话唯一
 // 无法用静态检查排除的挂死嫌疑来源，按"减少不确定性"的原则清除）。
@@ -51,7 +54,10 @@ extern "C" void *rootvnode __attribute__((weak));
 //  文件名带 **kext slide** ⇒ 每次启动天然不同，归档后不会混轮次。⚠️ 必须先判 `rootvnode`（手册 §5.1）。
 void nredTraceLine(char* const buf, const int n)
 {
-    if (n <= 0 || rootvnode == nullptr) { return; }
+    // A-20：早期落盘安全前置检查——`rootvnode` 未就绪 ⇒ 跳过落盘（计数，失败即退、不重试）。
+    //  依据：手册 §5.1（根 FS 未挂载时写文件会阻塞内核线程）＋ HWLibs.hpp:21-23（NRedTrace 需 rootvnode）。
+    //  ⚠️ 本函数可能被早期路径调用 ⇒ 必须先判后写；未就绪时**绝不**调 `FileIO::writeBufferToFile`。
+    if (!gTraceSafe.shouldWrite(rootvnode != nullptr, n)) { return; }
     // ⚠️ 每次调用写**独立文件**（2026-09-28 第 19 轮实测：`O_APPEND` 组合未生效，追加写退化成覆盖，
     //  文件里只剩最后一行）⇒ 用递增序号命名，天然不互相覆盖；判读时按文件名排序即得完整轨迹。
     static unsigned seq = 0;
@@ -1359,7 +1365,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         const int err = (rootvnode != nullptr)
                             ? FileIO::writeBufferToFile("/var/log/NRedSelfTest.txt", kSelfTest, sizeof(kSelfTest) - 1)
                             : -999;
-        NRED_TRACE("selftest: rootvnode=%llx err=%d", static_cast<unsigned long long>(reinterpret_cast<UInt64>(rootvnode)), err);
+        NRED_TRACE("selftest: rootvnode=%llx err=%d dropped=%u written=%u", static_cast<unsigned long long>(reinterpret_cast<UInt64>(rootvnode)), err, gTraceSafe.dropped, gTraceSafe.written);
     }
 
     // ★ 修复（2026-09-28）：把 IP 发现表的 `num_base_address` 上限从 6 放宽到 9（详见常量处注释）。

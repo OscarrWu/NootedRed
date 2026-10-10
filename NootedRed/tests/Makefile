@@ -21,7 +21,7 @@ STUBDIR   = $(NRDIR)/tests/stub
 INCLUDES  = -I$(STUBDIR) -I$(NRDIR)
 BUILDDIR  = build/nred-tests
 
-TESTS = $(BUILDDIR)/test_nbio_strap $(BUILDDIR)/test_smu_gate $(BUILDDIR)/test_ppsmsc_table $(BUILDDIR)/test_pp_smu_overlay
+TESTS = $(BUILDDIR)/test_nbio_strap $(BUILDDIR)/test_smu_gate $(BUILDDIR)/test_ppsmsc_table $(BUILDDIR)/test_pp_smu_overlay $(BUILDDIR)/test_trace_safe
 
 .PHONY: test clean
 
