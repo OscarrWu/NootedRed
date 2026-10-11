@@ -1450,8 +1450,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             DBGLOG("HWLibs", "%s: resolved at expected offset", tag);
             return slide + offset;
         };
-        // 构建身份自证：本 kext 已成功注册的 hook 数（hookProbe 成功时 +1）
-        static unsigned nHooks = 0;
+        // 构建身份自证：本 kext 本轮成功注册的 hook 数（hookProbe 成功时 +1）
+        //  ⚠️ 刻意用**块局部**而非 static：作用域就是本块（注册完即打印），
+        //   若用 static 且 processKext 被多次调用会跨调用累加 ⇒ 计数失真。
+        unsigned nHooks = 0;
         const auto hookProbe = [&](const mach_vm_address_t from, KernelPatcher::RouteRequest&& req,
                                    const char* tag)
         {
