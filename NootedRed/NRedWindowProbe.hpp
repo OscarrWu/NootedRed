@@ -64,9 +64,12 @@ inline const char* wmName(const uint32_t id)
 }
 
 // ── A-30：扩展口径 · 写侧指针哨兵（A-26 §4/§10，判据"字段==0 ⇒ 该条失败"）──
-//  程序序（A-26 §2）：P4<P6<P7<P8<P10<P11<P12<P13<P14<P15<P16<P17<P18<P19<P21<…<P31
+//  程序序（A-26 §2）：P4<P5<P6<P7<P8<P10<P11<P12<P13<P14<P15<P16<P17<P18<P19<P21<…<P31
 enum SentryId : uint32_t {
-    P4_20630 = 0, P6_370,
+    P4_20630 = 0,
+    P5_Services,                     // A-44：P5 合成判据（`+0x338` ∧ `+0x340` 均非 0）
+    P5_bit13,                        // A-44：P5 的掩码忠实位（bit13；与上项同值、互为印证）
+    P6_370,
     P6Obj_44,                        // A-34：P6 对象（`AMDHWRegisters`）`+0x44` 内部成功位（= P7 通过位）
     P7_bit14, P8_bit15,
     P10_3B0,                         // P11 恒真，无哨兵
@@ -120,11 +123,22 @@ inline uint32_t maskBitSample(const volatile uint8_t* const accelBase, const uin
     return 1;
 }
 
+// ── A-44：P5 的**合成判据**（A-26 §1.2 #2）──
+//  `this+0x338`（HW 服务 TTL 对象）与 `this+0x340`（CAIL 对象）**同时非 0** ⟺
+//  P5（`AMDHardware::initializeExternalInterfaces`，kc `0x4baa9ba`）返回真。
+//  返回 1 = P5 通过、0 = 未通过。
+inline uint64_t p5ServicesVerdict(const uint64_t v338, const uint64_t v340)
+{
+    return (v338 != 0 && v340 != 0) ? 1ULL : 0ULL;
+}
+
 // 哨兵名（判读输出用；与 SentryId 同序）
 inline const char* sentryName(const uint32_t id)
 {
     switch (id) {
         case SentryId::P4_20630:   return "P4+0x20630";
+        case SentryId::P5_Services: return "P5 svc(338/340)";
+        case SentryId::P5_bit13:   return "P5 bit13";
         case SentryId::P6_370:     return "P6+0x370";
         case SentryId::P6Obj_44:   return "P6obj+0x44";
         case SentryId::P7_bit14:   return "P7 bit14";

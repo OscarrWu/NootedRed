@@ -1962,6 +1962,7 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
     const bool accelValid = isKernelPtr(accel);
     uint32_t mask32 = 0;        // A-38 修 3：`accel+0x1e88` 的 4 字节条件结果位掩码真值
     UInt64 maskBaseAddr = 0;    // A-41：实际用于掩码读的基址（＝ accel；`win-probe-B` 自证行打印）
+    uint32_t bit9 = 0, bit10 = 0;   // A-44："本次尝试"判据（位 9 = init 被进入、位 10 = 该次结果）
     nred::WmVal wms[nred::WmCount];
     nred::SentryVal sent[nred::SentryId::SentryCount];
     nred::P25Slots p25{};
@@ -2017,6 +2018,14 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
                      ((uint32_t)maskBase[0x1E8A] << 16) | ((uint32_t)maskBase[0x1E8B] << 24);
         }
 
+        // ── A-44："本次尝试"判据（位 9 = `AMDHardware::init` 被进入、位 10 = 该次整体结果）──
+        //  位 8 与 13–24 不被 `AMDHardware::free` 清零（A-35 §4.4 ③）⇒ 可能残留**更早一次尝试**的值；
+        //  位 9/10/11 会被 `free` 清 ⇒ 可作"本次"的参照。基址沿用 A-41 的加速器侧。
+        if (accelValid) {
+            bit9  = (uint32_t)nred::maskBitAt(maskBase, 9);
+            bit10 = (uint32_t)nred::maskBitAt(maskBase, 10);
+        }
+
         // ── A-30：扩展口径 · 写侧哨兵（13 指针字段 + 位掩码统一解包）──
         //  读法：指针字段 rd64/rd32；位掩码**按位读 byte**（A-34）且**基址＝加速器**（A-41）——
         //  位 n ⇔ byte `0x1E88+(n>>3)` 的第 `n&7` 位（A-26 §5.2）。P14 的 `0x2F8` 是 **u32** 字段
@@ -2024,6 +2033,12 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         //  （PCI 配置空间）⇒ **恒定非零**、判据失效（A-35 Q1）。
         // 哨兵值（指针字段直接读数；位掩码走 putBit）
         putSent(sent[nred::SentryId::P4_20630], rd64(s, 0x20630));
+        // A-44：P5 的两枚哨兵——① 合成判据（A-26 §1.2 #2：`+0x338`(TTL) ∧ `+0x340`(CAIL) 均非 0）；
+        //  ② 掩码忠实位 bit13（A-26 §5.2：P5 结果的双边写位）。两者同值、互为印证；插在 P4 与 P6
+        //  之间以保"数组序＝程序序"（此前缺 P5 ⇒ P5 失败被误报为 P6）。
+        putSent(sent[nred::SentryId::P5_Services],
+                nred::p5ServicesVerdict(rd64(s, 0x338), rd64(s, 0x340)));
+        putBit(sent[nred::SentryId::P5_bit13], 13);
         putSent(sent[nred::SentryId::P6_370], rd64(s, 0x370));
         putBit(sent[nred::SentryId::P7_bit14], 14);
         putBit(sent[nred::SentryId::P8_bit15], 15);
@@ -2081,6 +2096,8 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
                (unsigned long long)maskBaseAddr, (unsigned long long)accel, accelValid ? 1u : 0u);
     NRED_TRACE("win-probe-S: firstFalse=%u(%s) read=%u unknown=%u",
                ws.firstFalseId, nred::sentryName(ws.firstFalseId), ws.readCount, ws.unknownCount);
+    // ── A-44 新增行（"本次尝试"判据）── 基址无效时两者保持 0，其有效性由 `win-probe-B` 的 valid 承担。
+    NRED_TRACE("win-probe-S: bit9=%u bit10=%u", (unsigned)bit9, (unsigned)bit10);
     for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) {
         NRED_TRACE("win-probe-S: %s=0x%llX valid=%u",
                    nred::sentryName(sent[i].id), (unsigned long long)sent[i].value, sent[i].valid);

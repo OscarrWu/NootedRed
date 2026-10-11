@@ -185,6 +185,38 @@ static void test_mask_base_is_accel_not_self() {
     printf("  PASS: 位取样走 accel 侧；基址非法不出数\n");
 }
 
+// ── A-44 用例：P5 合成判据（`+0x338` ∧ `+0x340` 均非 0）─────────────────────────────
+static void test_p5_sentry_verdict() {
+    printf("▶ test_p5_sentry_verdict\n");
+    assert(nred::p5ServicesVerdict(1, 1) == 1 && "both non-zero ⇒ P5 passed");
+    assert(nred::p5ServicesVerdict(0x1000, 0x2000) == 1 && "both non-zero（任意非零值）⇒ 1");
+    assert(nred::p5ServicesVerdict(0, 0) == 0 && "both zero ⇒ P5 failed");
+    assert(nred::p5ServicesVerdict(0, 1) == 0 && "0x338==0 ⇒ P5 failed");
+    assert(nred::p5ServicesVerdict(1, 0) == 0 && "0x340==0 ⇒ P5 failed");
+    printf("  PASS: P5 合成判据真值表\n");
+}
+
+// ── A-44 对照（能失败）：P5 必须早于 P6，否则 P5 失败会被误报为 P6 ──────────────────
+static void test_p5_precedes_p6_in_scan() {
+    printf("▶ test_p5_precedes_p6_in_scan\n");
+    assert(nred::SentryId::P5_Services < nred::SentryId::P6_370 && "P5 must precede P6");
+    // 场景：P5 失败（合成判据 0）且 P5 未通过 ⇒ P6 未到达（0x370 == 0）⇒ firstFalse 必须是 P5
+    nred::SentryVal vals[nred::SentryId::SentryCount];
+    for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) {
+        vals[i].id    = i;
+        vals[i].value = 1;
+        vals[i].valid = 1;
+    }
+    vals[nred::SentryId::P5_Services].value = 0;
+    vals[nred::SentryId::P5_bit13].value    = 0;
+    vals[nred::SentryId::P6_370].value      = 0;
+    const nred::WindowResult r = nred::findFirstFalseSentry(vals, nred::SentryId::SentryCount);
+    assert(r.firstFalseId == nred::SentryId::P5_Services
+           && "P5 failure must be reported as P5 (not P6)");
+    assert(r.firstFalseValid == 1 && "P5 读数有效 ⇒ firstFalseValid=1");
+    printf("  PASS: P5 失败归属 P5（数组序早于 P6）\n");
+}
+
 int main() {
     printf("=== A-25 window probe offline tests ===\n");
     test_first_false_ordering();
@@ -198,6 +230,8 @@ int main() {
     test_mask_bit_spec_consistency();
     test_p13_not_first_false();
     test_mask_base_is_accel_not_self();
+    test_p5_sentry_verdict();
+    test_p5_precedes_p6_in_scan();
     printf("=== ALL TESTS PASSED ===\n");
     return 0;
 }
