@@ -460,6 +460,7 @@ static const UInt8 kMode9440fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  原判据 `lea edx,[rcx-1]; cmp dl,08; ja fail` 导致 nba=0 时 dl=0xFF>8 判失败。
 //  改为 `lea edx,[rcx+0]`（disp8 00）保留 nba 原值，配合 imm8 08 ⇒ fail iff nba>8（无符号）。
 //  nba=0 走零拷贝（拷贝循环执行 0 次，槽已预清零，指针推进有显式 nba=0 分支），安全。
+//  ⚠️ 勘误（2026-10-12 张力钉死）：本补丁非 step2 失败点修复——第 62 轮「链路全通」归因已被证伪（失败在 G/0x929ac/0x9440f）；nba 校验在真机路径被前置跳过分支先行跳过，补丁作用未证实（保留无害）。详见 kb/技术草案/第62轮与B21B22张力钉死-2026-10-12.md。
 static const UInt8 kIpNbaLimitOriginal[] = {0x8D, 0x51, 0xFF, 0x80, 0xFA, 0x05, 0x0F, 0x87};
 static const UInt8 kIpNbaLimitPatched[]  = {0x8D, 0x51, 0x00, 0x80, 0xFA, 0x08, 0x0F, 0x87};
 
