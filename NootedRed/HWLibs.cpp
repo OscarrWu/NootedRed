@@ -1118,6 +1118,36 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
+    // ─── 判据 B：64KB 表区全量转储（`-NRedAccelLog`，默认关）───────────────────────
+    //  位置：`wrapMode2Tail` 现有 IP 探针块之后，同一门控下。`b` 是 0x2ab00e 读取的 64KB 缓冲。
+    //  安全：先判 `rootvnode`（空 ⇒ 只写内存环哨兵行 `tbl-noroot`，绝不碰 FS——同 `ip-noroot` 政策）。
+    //  写入：分配 64KB 缓冲（非栈上），拷贝源数据，单次写入（FileIO 每次调用完整 open/write/close，
+    //  O_APPEND 语义在单次调用内无意义；一次性写入更可靠、也避免 16 次 vnode_open 开销）。
+    //  哨兵：无论成败输出 `tbl-dump: buf=%llx sz=65536 err=%d`（err=-1 表 rootvnode 空），
+    //   保证"门控真⇒必有 tbl-dump 行"的双向自证。成功后调 `NvMsgBuf::dumpNow()` 拍点。
+    {
+        constexpr size_t kTblSize = 65536;
+        const UInt64 aVal = reinterpret_cast<UInt64>(a);
+        int err = -1;
+        if (rootvnode != nullptr) {
+            void* buf = IOMalloc(kTblSize);
+            if (buf != nullptr) {
+                __builtin_memcpy(buf, b, kTblSize);
+                char name[80];
+                snprintf(name, sizeof(name), "/var/log/NRedTblDump-%llx.bin",
+                         static_cast<unsigned long long>(aVal));
+                err = FileIO::writeBufferToFile(name, buf, kTblSize);
+                IOFree(buf, kTblSize);
+            } else {
+                err = ENOMEM;
+            }
+        }
+        NRED_TRACE("tbl-dump: buf=%llx sz=65536 err=%d",
+                   static_cast<unsigned long long>(aVal), err);
+        if (err == 0) {
+            NvMsgBuf::dumpNow();
+        }
+    }
     }
     return ret;
 }

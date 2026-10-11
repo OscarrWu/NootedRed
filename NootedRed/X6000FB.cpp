@@ -1493,6 +1493,48 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                    static_cast<unsigned long long>(lAcc), static_cast<unsigned long long>(c7960),
                    static_cast<unsigned long long>(hsD8));
         }
+        // ─── 判据 B 续：TTL 双对象指针同一性（`-NRedAccelLog`，默认关）────────────────
+        //  位置：同一 `wantAccelLog` 门控下，复用既有 `hsD8`（HWServices TTL = node+0xd8）。
+        //  对象 B：AMDRTHardware+0x338（P13 initializeTtl 所用 TTL），经 probeSvc 取 AMDHardware 实例。
+        //  读法：纯内存读 + 三重内核地址校验（照抄 TtlAsm 既有 `rd` lambda 政策）。
+        //  输出：`ttl-ident: objD8=%llx vtD8=%llx obj338=%llx vt338=%llx same=%u`
+        //   same=1 当且仅当 objD8==obj338 且两者非 0；vtable=各对象 *(0)。
+        if (wantAccelLog) {
+            auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
+            auto rd = [](UInt64 base, UInt64 off) -> UInt64 {
+                return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+            };
+            // 对象 A：HWServices TTL（node+0xd8），既有读数 hsD8
+            UInt64 objD8 = hsD8;
+            UInt64 vtD8  = 0;
+            if (isKernelPtr(objD8)) { vtD8 = rd(objD8, 0x000); }
+            // 对象 B：AMDRTHardware+0x338
+            UInt64 obj338 = 0, vt338 = 0;
+            auto probeSvc = [](const char* const cls) -> UInt64 {
+                auto* m = IOService::serviceMatching(cls);
+                UInt64 r = 0;
+                if (m != nullptr) {
+                    auto* it = IOService::getMatchingServices(m);
+                    if (it != nullptr) {
+                        auto* svc = OSDynamicCast(IOService, it->getNextObject());
+                        if (svc != nullptr) { r = reinterpret_cast<UInt64>(svc); }
+                        it->release();
+                    }
+                    m->release();
+                }
+                return r;
+            };
+            const UInt64 hw = probeSvc("AMDRadeonX5000_AMDHardware");
+            if (isKernelPtr(hw)) {
+                obj338 = rd(hw, 0x338);
+                if (isKernelPtr(obj338)) { vt338 = rd(obj338, 0x000); }
+            }
+            const unsigned same = (objD8 != 0 && objD8 == obj338) ? 1u : 0u;
+            SYSLOG("X6000FB", "ttl-ident: objD8=%llx vtD8=%llx obj338=%llx vt338=%llx same=%u",
+                   static_cast<unsigned long long>(objD8), static_cast<unsigned long long>(vtD8),
+                   static_cast<unsigned long long>(obj338), static_cast<unsigned long long>(vt338),
+                   same);
+        }
     }
     // ─── R1'-Diag：HWServices 两接口字段 + `ATY,bin_image` 更晚复读（`-NRedDiagProvider`，默认关）──
     //  判别 P5 后半判据：`node+0xd0`（CAIL 接口）/`node+0xd8`（TTL 接口）是否非 0
