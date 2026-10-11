@@ -221,6 +221,38 @@ static void test_p5_precedes_p6_in_scan() {
     printf("  PASS: P5 失败归属 P5（数组序早于 P6）\n");
 }
 
+// ── A-47 用例：P5 入口只读采样的纯逻辑（期望串比较 / 类型分支与 sentinel / 上限截断 / 有界复制）──
+static void test_p5_sampling_pure_logic() {
+    printf("▶ test_p5_sampling_pure_logic\n");
+    // 期望串（A-46 核实字面值；A-46 登记：不得与 `…HWServicesVega` 混用）
+    assert(nred::p5StrEq(nred::p5MatchCategory(), "AMDRadeonX5000HWServices") == 1 && "literal match");
+    assert(nred::p5StrEq(nred::p5MatchCategory(), "AMDRadeonX5000HWServicesVega") == 0 && "not the same");
+    assert(nred::p5StrEq(nullptr, "x") == 0 && "nullptr ⇒ 不等");
+    assert(nred::p5StrEq("abc", "abd") == 0 && "differ");
+    assert(nred::p5StrEq("abc", "abcd") == 0 && "长度不同 ⇒ 不等");
+    assert(nred::p5StrEq("", "") == 1 && "两个空串 ⇒ 等");
+    // `IOMatchCategory` 类型码：0=缺失／1=OSString／2=其它（sentinel）
+    assert(nred::p5PropTypeCode(1, 0) == 0 && "missing ⇒ 0");
+    assert(nred::p5PropTypeCode(0, 1) == 1 && "OSString ⇒ 1");
+    assert(nred::p5PropTypeCode(0, 0) == 2 && "其它类型 ⇒ 2（sentinel）");
+    // sentinel 语义：只有 type==1 才允许继续取 C 串（= 不再对未知类型调用取值方法）
+    assert(nred::p5ShouldReadCString(1) == 1 && "type=1 ⇒ 取 C 串");
+    assert(nred::p5ShouldReadCString(0) == 0 && "type=0 ⇒ 不取");
+    assert(nred::p5ShouldReadCString(2) == 0 && "type=2（sentinel）⇒ 不取");
+    // client 明细上限截断（≤8；超出仅计数）
+    assert(nred::p5DetailCap() == 8 && "明细上限 8");
+    for (uint32_t i = 0; i < 8; ++i) { assert(nred::p5DetailWanted(i) == 1 && "上限内 ⇒ 出明细"); }
+    for (uint32_t i = 8; i < 12; ++i) { assert(nred::p5DetailWanted(i) == 0 && "超上限 ⇒ 不出明细"); }
+    // 有界复制：截断到 cap-1、必 NUL 结尾、不越界；nullptr ⇒ 空串
+    char buf[8];
+    memset(buf, 0x7F, sizeof(buf));
+    nred::p5StrCopyBounded(buf, sizeof(buf), "0123456789abcdef");
+    assert(memcmp(buf, "0123456", sizeof(buf)) == 0 && "截断 + NUL 结尾");
+    nred::p5StrCopyBounded(buf, sizeof(buf), nullptr);
+    assert(buf[0] == '\0' && "nullptr ⇒ 空串");
+    printf("  PASS: P5 采样纯逻辑（期望串/类型分支/sentinel/上限/有界复制）\n");
+}
+
 int main() {
     printf("=== A-25 window probe offline tests ===\n");
     test_first_false_ordering();
@@ -236,6 +268,7 @@ int main() {
     test_mask_base_is_accel_not_self();
     test_p5_sentry_verdict();
     test_p5_precedes_p6_in_scan();
+    test_p5_sampling_pure_logic();
     printf("=== ALL TESTS PASSED ===\n");
     return 0;
 }

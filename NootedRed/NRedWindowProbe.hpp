@@ -132,6 +132,47 @@ inline uint64_t p5ServicesVerdict(const uint64_t v338, const uint64_t v340)
     return (v338 != 0 && v340 != 0) ? 1ULL : 0ULL;
 }
 
+// ── A-47：P5 入口只读采样的**纯逻辑**（用户态可测；IOKit 侧调用留在 `X5000.cpp`）──
+//  期望匹配类别串（A-46 核实：personality 的 `IOMatchCategory` 逐字值；与 Apple 在
+//  `findHWServices` 内取 `this->vptr[0x710]()` 的结果同语义）。
+inline const char* p5MatchCategory() { return "AMDRadeonX5000HWServices"; }
+
+//  逐 client 明细上限（客户端**计数**另有更宽的硬上限，见调用方 `kP5ClientCap`）。
+inline uint32_t p5DetailCap() { return 8u; }
+inline uint32_t p5DetailWanted(const uint32_t i) { return (i < p5DetailCap()) ? 1u : 0u; }
+
+//  `IOMatchCategory` 属性的**类型码**（判读输出 `type=%u`）：
+//    0 = 属性缺失；1 = `OSString`（可继续取 C 串）；2 = 存在但非 `OSString`
+//    ——**sentinel 语义**：调用方**不得**再对该项调用任何取值方法（避免对未知类型误用）。
+inline uint32_t p5PropTypeCode(const uint32_t isMissing, const uint32_t isString)
+{
+    if (isMissing != 0) { return 0u; }
+    return (isString != 0) ? 1u : 2u;
+}
+inline uint32_t p5ShouldReadCString(const uint32_t typeCode) { return (typeCode == 1u) ? 1u : 0u; }
+
+//  **有界**字符串复制（永不越界、必 NUL 结尾；`nullptr`/空串 ⇒ 空串）——供 `%s` 打印。
+inline void p5StrCopyBounded(char* const dst, const uint32_t cap, const char* const src)
+{
+    if (dst == nullptr || cap == 0) { return; }
+    uint32_t i = 0;
+    if (src != nullptr) {
+        for (; i + 1u < cap && src[i] != '\0'; ++i) { dst[i] = src[i]; }
+    }
+    dst[i] = '\0';
+}
+
+//  **有界**字符串相等（`nullptr` ⇒ 不等；逐字节比较到任一串结束）。
+inline uint32_t p5StrEq(const char* const a, const char* const b)
+{
+    if (a == nullptr || b == nullptr) { return 0u; }
+    uint32_t i = 0;
+    for (; a[i] != '\0' && b[i] != '\0'; ++i) {
+        if (a[i] != b[i]) { return 0u; }
+    }
+    return (a[i] == b[i]) ? 1u : 0u;
+}
+
 // 哨兵名（判读输出用；与 SentryId 同序）
 inline const char* sentryName(const uint32_t id)
 {

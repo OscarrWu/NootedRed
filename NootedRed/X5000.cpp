@@ -24,6 +24,7 @@
 #include <HWLibs.hpp>            // NRED_TRACE（A-25：win-probe 输出通道）
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSObject.h>
+#include <libkern/c++/OSIterator.h>   // A-47：`IOService::getClientIterator()` 的遍历（client 采样）
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
@@ -469,6 +470,19 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
             SYSLOG("X5000", "win-probe: failed to route AMDHardware::init");
         } else {
             DBGLOG("X5000", "win-probe: routed AMDHardware::init");
+        }
+
+        // A-47：P5 判据函数 `AMDHardware::initializeExternalInterfaces`（kc `0x4baa9ba`）入口只读采样
+        //  （同门控：门控关 ⇒ **连本 hook 也不安装**）。目的＝把 P5 失败的 C2（实例不是该 provider
+        //  的 client）／C3（client 上缺 `IOMatchCategory`）／C4（时序）三者三选一（依据 A-46）。
+        //  **不干预 IOKit attach／父子关系、不写任何字段**（红线）。
+        PenguinWizardry::PatternRouteRequest p5Req{
+            "__ZN26AMDRadeonX5000_AMDHardware28initializeExternalInterfacesEv",
+            wrapInitExtIfaces, this->orgInitExtIfaces};
+        if (!p5Req.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "win-probe-P5: failed to route initializeExternalInterfaces");
+        } else {
+            DBGLOG("X5000", "win-probe-P5: routed initializeExternalInterfaces");
         }
     }
 
@@ -2114,6 +2128,130 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         NRED_TRACE("win-probe: %s=0x%llX valid=%u",
                    nred::wmName(wms[i].id), (unsigned long long)wms[i].value, wms[i].valid);
     }
+    return ret;
+}
+
+// ─── A-47：P5（`initializeExternalInterfaces`）入口**只读采样** ────────────────────────
+//  门控＝既有 `-NRedWindowProbe`（hook 只在门控开时 route ⇒ 门控关 ⇒ 本函数永不执行）。
+//  依据（A-46）：`findHWServices`（kc `0x4baaa68`/Z `0x73a68`）以 `provider = *(this+0x10)` 调
+//   `provider->vptr[0x6a8]()`（= `IOService::getClientIterator`）逐 client 判：是 `IOService`
+//   ∧ `getProperty("IOMatchCategory")` 是 `OSString` ∧ `isEqualTo(this->vptr[0x710]())`；
+//   期望串 = `"AMDRadeonX5000HWServices"`（kc `0x4c1b49a`）。本函数只做**同一套只读判定**并打印读数。
+//  纪律（硬）：零写、零 MMIO、零新增发送；只用既有先例的只读接口（`getProperty`/`getMetaClass`/
+//   `getClassName`/`getClientIterator`/`OSString::getCStringNoCopy`）＋一个**按 A-46 槽级证据**取的期望串
+//   getter（`this->vptr[0x710]()`，Apple 在 `findHWServices` 内照同法调用，见 `x5_full.asm:134390-134396`）。
+//  有界：client 迭代上限 `kP5ClientCap`；逐 client 明细上限 `nred::p5DetailCap()`（= 8）。
+//  失败即退：任一项读不到 ⇒ 记 sentinel（`0`/`type=0`），**不重试、不再对该项调用**。
+static const UInt32 kP5ClientCap = 64;   // client **计数**硬上限（防病态链表）
+
+static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
+{
+    const UInt64 s = reinterpret_cast<UInt64>(selfArg);
+    if (s < 0xffffff7f80000000ULL) { return; }   // self 非法 ⇒ 静默（不产生误导性读数）
+
+    // 只读快照：provider（`*(self+0x10)`）、findHWServices 的结果（`this+0x320`）与 P5 两产物（+0x338/+0x340）
+    const UInt8* const sb = reinterpret_cast<const UInt8*>(s);
+    const UInt64 prov = *reinterpret_cast<const UInt64*>(sb + 0x10);
+    const UInt64 f320 = *reinterpret_cast<const UInt64*>(sb + 0x320);
+    const UInt64 f338 = *reinterpret_cast<const UInt64*>(sb + 0x338);
+    const UInt64 f340 = *reinterpret_cast<const UInt64*>(sb + 0x340);
+    NRED_TRACE("win-probe-P5: ret=%u prov=0x%llX f320=0x%llX f338=0x%llX f340=0x%llX", (unsigned)ret,
+               (unsigned long long)prov, (unsigned long long)f320, (unsigned long long)f338,
+               (unsigned long long)f340);
+
+    // ② 期望匹配类别串：`this->vptr[0x710]()`（AMDHW vtable 槽，A-46 已钉；只读、不改参数/返回值）
+    const char* wantCStr = nullptr;
+    UInt64      wantObj  = 0;
+    if (prov >= 0xffffff7f80000000ULL) {
+        const UInt64 vptr = *reinterpret_cast<const UInt64*>(sb);   // 对象首字 = vptr（纯读）
+        if (vptr >= 0xffffff7f80000000ULL) {
+            auto const wantFn = reinterpret_cast<void* (*)(void*)>(
+                *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(vptr) + 0x710));
+            if (wantFn != nullptr) {
+                void* const o = wantFn(reinterpret_cast<void*>(s));
+                wantObj       = reinterpret_cast<UInt64>(o);
+                if (auto* const ws = OSDynamicCast(OSString, reinterpret_cast<OSMetaClassBase*>(o))) {
+                    wantCStr = ws->getCStringNoCopy();
+                }
+            }
+        }
+    }
+    if (wantCStr == nullptr || wantCStr[0] == '\0') { wantCStr = nred::p5MatchCategory(); }   // 回退字面值
+
+    // ①③ 逐 client（有界）：计数 + 前 8 个出明细（元类名 / IOMatchCategory 类型与值 / 是否与期望吻合）
+    UInt32 clients  = 0;
+    UInt64 hitProp  = 0;
+    UInt64 hitObj   = 0;
+    if (prov >= 0xffffff7f80000000ULL) {
+        auto* const provSvc = reinterpret_cast<IOService*>(reinterpret_cast<void*>(prov));
+        OSIterator* const it = provSvc->getClientIterator();
+        if (it != nullptr) {
+            for (UInt32 i = 0; i < kP5ClientCap; ++i) {
+                OSObject* const obj = it->getNextObject();
+                if (obj == nullptr) { break; }
+                ++clients;
+                if (nred::p5DetailWanted(i) == 0) { continue; }   // 上限截断：只计数、不再取明细
+
+                const char* cls = nullptr;
+                if (const OSMetaClass* const mc = obj->getMetaClass()) { cls = mc->getClassName(); }
+                IOService* const svc = OSDynamicCast(IOService, obj);
+                OSMetaClassBase* const prop =
+                    (svc != nullptr) ? svc->getProperty("IOMatchCategory") : nullptr;
+                const uint32_t type =
+                    nred::p5PropTypeCode((prop == nullptr) ? 1u : 0u,
+                                         (prop != nullptr && OSDynamicCast(OSString, prop) != nullptr) ? 1u : 0u);
+                char     iomc[41] = {0};
+                if (nred::p5ShouldReadCString(type) != 0) {   // sentinel：仅 OSString 才继续取值
+                    const char* const pc = static_cast<OSString*>(prop)->getCStringNoCopy();
+                    nred::p5StrCopyBounded(iomc, sizeof(iomc), pc);
+                    if (hitProp == 0 && nred::p5StrEq(pc, wantCStr) != 0) {
+                        hitProp = reinterpret_cast<UInt64>(prop);
+                        hitObj  = reinterpret_cast<UInt64>(obj);
+                    }
+                }
+                char clsBuf[33] = {0};
+                nred::p5StrCopyBounded(clsBuf, sizeof(clsBuf), cls);
+                NRED_TRACE("win-probe-P5: c%u class=%s iomc=%s type=%u", (unsigned)i, clsBuf, iomc,
+                           (unsigned)type);
+            }
+            it->release();
+        }
+    }
+    NRED_TRACE("win-probe-P5: clients=%u cap=%u", (unsigned)clients, (unsigned)kP5ClientCap);
+    NRED_TRACE("win-probe-P5: want=0x%llX got=0x%llX match=0x%llX", (unsigned long long)wantObj,
+               (unsigned long long)hitProp, (hitProp != 0) ? 1ULL : 0ULL);
+
+    // ⑤ 命中对象的 `+0xD8`／`+0xD0`（A-42/A-46：＝ `getTtl()`／`getCail()` 的返回；纯内存读）
+    UInt64 d8 = 0, d0 = 0;
+    if (hitObj >= 0xffffff7f80000000ULL) {
+        const UInt8* const hb = reinterpret_cast<const UInt8*>(hitObj);
+        d8 = *reinterpret_cast<const UInt64*>(hb + 0xD8);
+        d0 = *reinterpret_cast<const UInt64*>(hb + 0xD0);
+    }
+    NRED_TRACE("win-probe-P5: hit=0x%llX d8=0x%llX d0=0x%llX", (unsigned long long)hitObj,
+               (unsigned long long)d8, (unsigned long long)d0);
+
+    // ④ 对照：按**类名**全注册表搜（既有 `probeSvc` 形态）。A-46 登记：与 `findHWServices`
+    //   （provider client ＋属性值）**不是同一机制**，故两者并列打印、不得互相替代。
+    UInt64 svcByClass = 0;
+    auto*  match      = IOService::serviceMatching("AMDRadeonX5000_AMDRadeonHWServicesVega");
+    if (match != nullptr) {
+        auto* const svc = IOService::copyMatchingService(match);
+        match->release();
+        if (svc != nullptr) {
+            svcByClass = reinterpret_cast<UInt64>(svc);
+            svc->release();
+        }
+    }
+    NRED_TRACE("win-probe-P5: probeSvc=0x%llX", (unsigned long long)svcByClass);
+}
+
+// A-47：`AMDHardware::initializeExternalInterfaces` 入口包装（**不改参数/返回值/控制流**：
+//  返回值原样透传，采样只读）。
+bool X5000::wrapInitExtIfaces(void* const self)
+{
+    const bool ret = FunctionCast(wrapInitExtIfaces, singleton().orgInitExtIfaces)(self);
+    p5SampleExtIfaces(self, ret ? 1u : 0u);
     return ret;
 }
 // 第八步观测（第 14 轮）：`probe` 的结果**不在原地 panic**（第 13 轮实测：匹配阶段 panic 太早，
