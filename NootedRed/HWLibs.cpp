@@ -452,8 +452,12 @@ static const UInt8 kMode2TailPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  （真机取证：`kb/sequences/raw/observe-20260928-1046-ipt5/`），于是 `0x2ab00e` 恒返回 1 ⇒
 //  `bgm_create` 失败 ⇒ TTL 初始化失败 ⇒ PP 上电 panic（`Failed to get TTL RTS from HW Services`）。
 //  放宽到 nba ≤ 9：目标缓冲的布局已核查（每实例 60 字节，8 个基址仅占 32 字节 ⇒ 不越界）。
+// ★ M 补丁（B21 终判 2026-10-11）：消除减 1 下溢，通过域精确 {0..8}。
+//  原判据 `lea edx,[rcx-1]; cmp dl,08; ja fail` 导致 nba=0 时 dl=0xFF>8 判失败。
+//  改为 `lea edx,[rcx+0]`（disp8 00）保留 nba 原值，配合 imm8 08 ⇒ fail iff nba>8（无符号）。
+//  nba=0 走零拷贝（拷贝循环执行 0 次，槽已预清零，指针推进有显式 nba=0 分支），安全。
 static const UInt8 kIpNbaLimitOriginal[] = {0x8D, 0x51, 0xFF, 0x80, 0xFA, 0x05, 0x0F, 0x87};
-static const UInt8 kIpNbaLimitPatched[]  = {0x8D, 0x51, 0xFF, 0x80, 0xFA, 0x08, 0x0F, 0x87};
+static const UInt8 kIpNbaLimitPatched[]  = {0x8D, 0x51, 0x00, 0x80, 0xFA, 0x08, 0x0F, 0x87};
 
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
