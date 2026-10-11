@@ -1530,6 +1530,29 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                 if (isKernelPtr(obj338)) { vt338 = rd(obj338, 0x000); }
             }
             const unsigned same = (objD8 != 0 && objD8 == obj338) ? 1u : 0u;
+            char line[256];
+            const int n = snprintf(line, sizeof(line),
+                "ttl-ident: objD8=%llx vtD8=%llx obj338=%llx vt338=%llx same=%u\n",
+                static_cast<unsigned long long>(objD8), static_cast<unsigned long long>(vtD8),
+                static_cast<unsigned long long>(obj338), static_cast<unsigned long long>(vt338),
+                same);
+            if (n > 0) {
+                if (rootvnode == nullptr) {
+                    // 根 FS 未挂载 ⇒ 绝不碰文件系统（会阻塞内核线程、被 watchdog 强重启）
+                    SYSLOG("X6000FB", "ttl-ident-noroot");
+                } else {
+                    const int err = FileIO::writeBufferToFile("/var/log/NRedTtlIdent.txt", line, static_cast<size_t>(n));
+                    if (err != 0) {   // 失败 ⇒ 把错误码写进文件名，便于事后判定原因
+                        char name[80];
+                        snprintf(name, sizeof(name), "/var/log/NRedTtlIdent-err%d.txt", err);
+                        FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
+                    }
+                    // ★ 立即落一拍：本点已验证可执行且可写盘（`ip:` 行与 NRedIpProbe-*.txt 就是证据），
+                    //   在此主动调用一次 NvMsgBuf 的即时落盘，把此前累积的 msgbuf 增量立刻写成文件。
+                    NvMsgBuf::dumpNow();
+                }
+            }
+            // 双通道：SYSLOG 保留（正常上下文可达时进内核日志）；主通道是上面的自建落盘
             SYSLOG("X6000FB", "ttl-ident: objD8=%llx vtD8=%llx obj338=%llx vt338=%llx same=%u",
                    static_cast<unsigned long long>(objD8), static_cast<unsigned long long>(vtD8),
                    static_cast<unsigned long long>(obj338), static_cast<unsigned long long>(vt338),
