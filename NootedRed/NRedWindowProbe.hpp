@@ -192,6 +192,28 @@ inline uint32_t p5TypeCheckAllowed(const uint32_t source, const uint64_t ptr)
     return (ptr >= 0xffffff7f80000000ULL) ? 1u : 0u;
 }
 
+// ── A-55（G1）：命中对象 vptr 的**纯逻辑**比对（只做数值比较，**不据此调任何虚方法**）──
+//  `_ZTV42AMDRadeonX5000_AMDRadeonHWServicesAbstract + 0x10` = kc 绝对 `0x4D61CF8`
+//  （`kb/符号表/fixups_13.6_X5000HWServices.tsv:910`：该地址处为 `…HWServicesAbstractD1Ev` 槽）；
+//  amdhw 归零基址 `0x4B37000` ⇒ 归零 VM 形式 = `0x4D61CF8 − 0x4B37000` = **`0x22ACF8`**；
+//  运行时 = `gX5000Slide + 0x22ACF8`（工程既有换算式，`X5000.cpp:1508`）。
+inline uint64_t p5HwsAbstractVt() { return 0x4D61CF8ULL; }          // kc 绝对
+inline uint64_t p5HwsAbstractVtZvm() { return 0x22ACF8ULL; }        // 归零 VM
+inline uint64_t p5VtZvm(const uint64_t vptr, const uint64_t slide)
+{
+    return (slide != 0 && vptr > slide) ? (vptr - slide) : 0ULL;
+}
+inline uint32_t p5IsAbstractVt(const uint64_t vptrZvm) { return (vptrZvm == p5HwsAbstractVtZvm()) ? 1u : 0u; }
+
+// ── A-55（G2）：命中判定**所用串**的来源（消除"漏命中盲区"）──
+//  Apple 的接受条件＝client 的 `IOMatchCategory`（`OSString`）与 `vptr[0x710]()` 返回的 `const char*`
+//  **逐字节相等** ⇒ 判定必须用 **getter 串**（返回 1）；仅当 getter 串不可用（空/nullptr）时才回退
+//  A-46 核实字面值（返回 0，判读须知悉）。
+inline uint32_t p5WantSource(const char* const getterStr)
+{
+    return (getterStr != nullptr && getterStr[0] != '\0') ? 1u : 0u;
+}
+
 // 哨兵名（判读输出用；与 SentryId 同序）
 inline const char* sentryName(const uint32_t id)
 {

@@ -2182,16 +2182,23 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
             }
         }
     }
-    char wantBuf[41] = {0};
-    nred::p5StrCopyBounded(wantBuf, sizeof(wantBuf), wantCStr);
-    const uint32_t wantEq = nred::p5StrEq(wantBuf, nred::p5MatchCategory());   // 与 A-46 核实字面值比对
-    if (wantEq == 0) { nred::p5StrCopyBounded(wantBuf, sizeof(wantBuf), nred::p5MatchCategory()); }
-    wantCStr = wantBuf;   // 比较目标：getter 串（非空）否则字面值；二者关系由 `eq=` 行给出
+    // ── A-55（G2）：getter 串与"字面值回退"**分离**存放；命中判定所用串单列（`wantSrc`）──
+    //  依据：Apple 的接受条件＝client 的 `IOMatchCategory` 与 **getter 串**逐字节相等 ⇒ 判定必须用
+    //  getter 串（`wantSrc=1`）；仅当它取不到/为空时才回退 A-46 核实字面值（`wantSrc=0`，判读须知悉）。
+    char getterBuf[41] = {0};
+    if (wantPtr != 0) { nred::p5StrCopyBounded(getterBuf, sizeof(getterBuf), reinterpret_cast<const char*>(wantPtr)); }
+    const uint32_t wantEq  = nred::p5StrEq(getterBuf, nred::p5MatchCategory());   // getter 串 vs 字面值
+    const uint32_t wantSrc = nred::p5WantSource(getterBuf);                       // 1=getter 串被采用
+    char usedBuf[41] = {0};
+    nred::p5StrCopyBounded(usedBuf, sizeof(usedBuf), (wantSrc != 0) ? getterBuf : nred::p5MatchCategory());
+    wantCStr = usedBuf;   // 命中判定一律用这一串（= Apple 的等价条件）
 
-    // ①③ 逐 client（有界）：计数 + 前 8 个出明细（元类名 / IOMatchCategory 类型与值 / 是否与期望吻合）
-    UInt32 clients  = 0;
-    UInt64 hitProp  = 0;
-    UInt64 hitObj   = 0;
+    // ①③ 逐 client（有界）：**每个 client 都做命中判定**（不受明细上限约束）；前 8 个另出明细行
+    UInt32 clients   = 0;
+    UInt32 matchWant = 0;   // 与"判定所用的串"（`usedBuf`）相等的 client 数
+    UInt32 matchLit  = 0;   // 仅与 A-46 核实字面值相等的 client 数（暴露两串不同的盲区）
+    UInt64 hitProp   = 0;
+    UInt64 hitObj    = 0;
     if (prov >= 0xffffff7f80000000ULL) {
         auto* const provSvc = reinterpret_cast<IOService*>(reinterpret_cast<void*>(prov));
         OSIterator* const it = provSvc->getClientIterator();
@@ -2200,13 +2207,10 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
                 OSObject* const obj = it->getNextObject();
                 if (obj == nullptr) { break; }
                 ++clients;
-                if (nred::p5DetailWanted(i) == 0) { continue; }   // 上限截断：只计数、不再取明细
-
                 // A-51：iterator 元素是 IOKit 明确返回的对象 ⇒ 允许进入类型判定路径（否则跳过该项）
                 const UInt64 objU = reinterpret_cast<UInt64>(obj);
                 if (nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, objU) == 0) { continue; }
-                const char* cls = nullptr;
-                if (const OSMetaClass* const mc = obj->getMetaClass()) { cls = mc->getClassName(); }
+                const uint32_t detail = nred::p5DetailWanted(i);   // 明细（类名/逐 client 行）仅前 8 个
                 IOService* const svc = OSDynamicCast(IOService, obj);
                 OSMetaClassBase* const prop =
                     (svc != nullptr) ? svc->getProperty("IOMatchCategory") : nullptr;
@@ -2219,19 +2223,28 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
                 const uint32_t type =
                     nred::p5PropTypeCode((propOk == 0) ? 1u : 0u,
                                          (propOk != 0 && OSDynamicCast(OSString, prop) != nullptr) ? 1u : 0u);
-                char     iomc[41] = {0};
+                char iomc[41] = {0};
                 if (nred::p5ShouldReadCString(type) != 0) {   // sentinel：仅 OSString 才继续取值
                     const char* const pc = static_cast<OSString*>(prop)->getCStringNoCopy();
-                    nred::p5StrCopyBounded(iomc, sizeof(iomc), pc);
-                    if (hitProp == 0 && nred::p5StrEq(pc, wantCStr) != 0) {
-                        hitProp = reinterpret_cast<UInt64>(prop);
-                        hitObj  = reinterpret_cast<UInt64>(obj);
+                    // A-55：命中判定对**每个 client**做（旧实现的明细上限会把第 9 个之后的命中漏掉）
+                    if (nred::p5StrEq(pc, wantCStr) != 0) {
+                        ++matchWant;
+                        if (hitProp == 0) {
+                            hitProp = reinterpret_cast<UInt64>(prop);
+                            hitObj  = objU;
+                        }
                     }
+                    if (nred::p5StrEq(pc, nred::p5MatchCategory()) != 0) { ++matchLit; }
+                    if (detail != 0) { nred::p5StrCopyBounded(iomc, sizeof(iomc), pc); }
                 }
-                char clsBuf[33] = {0};
-                nred::p5StrCopyBounded(clsBuf, sizeof(clsBuf), cls);
-                NRED_TRACE("win-probe-P5: c%u class=%s iomc=%s type=%u", (unsigned)i, clsBuf, iomc,
-                           (unsigned)type);
+                if (detail != 0) {
+                    const char* cls = nullptr;
+                    if (const OSMetaClass* const mc = obj->getMetaClass()) { cls = mc->getClassName(); }
+                    char clsBuf[33] = {0};
+                    nred::p5StrCopyBounded(clsBuf, sizeof(clsBuf), cls);
+                    NRED_TRACE("win-probe-P5: c%u class=%s iomc=%s type=%u", (unsigned)i, clsBuf, iomc,
+                               (unsigned)type);
+                }
             }
             it->release();
         }
@@ -2239,8 +2252,11 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
     NRED_TRACE("win-probe-P5: clients=%u cap=%u", (unsigned)clients, (unsigned)kP5ClientCap);
     NRED_TRACE("win-probe-P5: want=0x%llX got=0x%llX match=0x%llX", (unsigned long long)wantPtr,
                (unsigned long long)hitProp, (hitProp != 0) ? 1ULL : 0ULL);
-    // ── A-51 新增行：期望串的**内容**与 A-46 核实字面值的关系（`eq=0` ⇒ 比较用了字面值回退）──
-    NRED_TRACE("win-probe-P5: wantStr=%s exp=%s eq=%u", wantBuf, nred::p5MatchCategory(), (unsigned)wantEq);
+    // ── A-51 新增行：期望串的**内容**与 A-46 核实字面值的关系（`eq=0` ⇒ 两串不同）──
+    NRED_TRACE("win-probe-P5: wantStr=%s exp=%s eq=%u", getterBuf, nred::p5MatchCategory(), (unsigned)wantEq);
+    // ── A-55 新增行（G2）：判定所用串的来源与内容；以及"按判定串/按字面值"两种命中数 ──
+    NRED_TRACE("win-probe-P5: wantSrc=%u fallback=%s", (unsigned)wantSrc, nred::p5MatchCategory());
+    NRED_TRACE("win-probe-P5: matchWant=%u matchLit=%u used=%s", (unsigned)matchWant, (unsigned)matchLit, usedBuf);
 
     // ⑤ 命中对象的 `+0xD8`／`+0xD0`（A-42/A-46：＝ `getTtl()`／`getCail()` 的返回；纯内存读）
     UInt64 d8 = 0, d0 = 0;
@@ -2251,6 +2267,17 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
     }
     NRED_TRACE("win-probe-P5: hit=0x%llX d8=0x%llX d0=0x%llX", (unsigned long long)hitObj,
                (unsigned long long)d8, (unsigned long long)d0);
+    // ── A-55 新增行（G1）：命中对象的 vptr（`hit+0x0`，纯读）与 `…HWServicesAbstract + 0x10` 的**数值**比对 ──
+    //  `hitVtZ` = `hitVt − gX5000Slide`（工程既有换算式，X5000.cpp:1508，可直接与静态 kc 值 0x4D61CF8 对照）；
+    //  `absVt` = `gX5000Slide + 0x22ACF8`（该静态值的运行时形态）；**只打印数值，不据此调任何虚方法**。
+    const UInt64 hitVt = (hitObj >= 0xffffff7f80000000ULL)
+                             ? *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(hitObj))
+                             : 0;
+    const UInt64 hitVtZ = nred::p5VtZvm(hitVt, gX5000Slide);
+    const UInt64 absVt  = (gX5000Slide != 0) ? (gX5000Slide + nred::p5HwsAbstractVtZvm()) : 0;
+    NRED_TRACE("win-probe-P5: hitVt=0x%llX absVt=0x%llX hitVtZ=0x%llX isAbstract=0x%llX",
+               (unsigned long long)hitVt, (unsigned long long)absVt, (unsigned long long)hitVtZ,
+               (unsigned long long)nred::p5IsAbstractVt(hitVtZ));
 
     // ④ 对照：按**类名**全注册表搜（既有 `probeSvc` 形态）。A-46 登记：与 `findHWServices`
     //   （provider client ＋属性值）**不是同一机制**，故两者并列打印、不得互相替代。

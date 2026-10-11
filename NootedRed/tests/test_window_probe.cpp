@@ -274,6 +274,41 @@ static void test_p5_typecheck_gate() {
     printf("  PASS: 类型判定准入门（字符串地址被拒、IOKit 返回准入、阈值边界正确）\n");
 }
 
+// ── A-55 用例（G2 盲区回归）：两串不同时，命中判定必须用 getter 串 ──────────────────
+static void test_p5_want_source_two_strings() {
+    printf("▶ test_p5_want_source_two_strings\n");
+    // 来源标记：getter 串非空 ⇒ 1（判定用 getter 串＝Apple 的等价条件）；否则 0（回退字面值）
+    assert(nred::p5WantSource("AMDRadeonX5000HWServices") == 1 && "非空 ⇒ 用 getter 串");
+    assert(nred::p5WantSource("AMDRadeonX5000HWServicesVega") == 1 && "两串不同的场景 ⇒ 仍用 getter 串");
+    assert(nred::p5WantSource("") == 0 && "空串 ⇒ 回退字面值");
+    assert(nred::p5WantSource(nullptr) == 0 && "nullptr ⇒ 回退字面值");
+    // 机械论证（G2 盲区消除）：设 getter 串＝A、字面值＝B（A≠B）、某 client 的 iomc＝A
+    const char* const getterStr = "AMDRadeonX5000HWServicesVega";   // 假设 getter 返回 A
+    const char* const clientStr = "AMDRadeonX5000HWServicesVega";   // client 的属性＝A
+    assert(nred::p5WantSource(getterStr) == 1 && "A 非空 ⇒ 判定用 A");
+    assert(nred::p5StrEq(clientStr, getterStr) == 1 && "Apple 会接受（A==A）");
+    assert(nred::p5StrEq(clientStr, nred::p5MatchCategory()) == 0
+           && "但 A ≠ A-46 字面值 ⇒ 旧实现（只用字面值判定）会漏掉该命中");
+    printf("  PASS: 判定用 getter 串；两串不同时不再漏命中\n");
+}
+
+// ── A-55 用例（G1）：命中对象 vptr 与 HWServicesAbstract 静态槽的数值比对 ─────────────
+static void test_p5_abstract_vt_compare() {
+    printf("▶ test_p5_abstract_vt_compare\n");
+    assert(nred::p5HwsAbstractVt() == 0x4D61CF8ULL && "kc 绝对值");
+    assert(nred::p5HwsAbstractVtZvm() == nred::p5HwsAbstractVt() - 0x4B37000ULL && "归零 VM 换算自洽");
+    assert(nred::p5HwsAbstractVtZvm() == 0x22ACF8ULL && "0x4D61CF8 − 0x4B37000");
+    // 换算与判定（只做数值比较）
+    const uint64_t slide = 0xffffff800fc00000ULL;   // 示例 slide（非 0）
+    assert(nred::p5VtZvm(slide + 0x22ACF8ULL, slide) == 0x22ACF8ULL && "运行时 → 归零 VM");
+    assert(nred::p5IsAbstractVt(nred::p5VtZvm(slide + 0x22ACF8ULL, slide)) == 1 && "抽象基类 vtable ⇒ 1");
+    assert(nred::p5IsAbstractVt(0) == 0 && "vptr 未读到（0）⇒ 0（不得误报）");
+    assert(nred::p5IsAbstractVt(0x123456ULL) == 0 && "其它 vtable ⇒ 0");
+    assert(nred::p5VtZvm(0, slide) == 0 && "vptr=0 ⇒ 0");
+    assert(nred::p5VtZvm(slide + 0x22ACF8ULL, 0) == 0 && "slide=0（未取到）⇒ 0");
+    printf("  PASS: 抽象 vtable 数值比对（含边界）\n");
+}
+
 int main() {
     printf("=== A-25 window probe offline tests ===\n");
     test_first_false_ordering();
@@ -291,6 +326,8 @@ int main() {
     test_p5_precedes_p6_in_scan();
     test_p5_sampling_pure_logic();
     test_p5_typecheck_gate();
+    test_p5_want_source_two_strings();
+    test_p5_abstract_vt_compare();
     printf("=== ALL TESTS PASSED ===\n");
     return 0;
 }
