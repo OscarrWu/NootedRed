@@ -168,6 +168,31 @@ static UInt64 sP5ReadoutNode = 0;
 static UInt64 sP5ReadoutCail = 0;
 static UInt64 sP5ReadoutTtl  = 0;
 static int    sP5ReadoutValid = 0;
+
+// ─── A-60（类 A）：panic 路径所需的门控值——**正常上下文预存**，panic 路径只读 ─────────────
+//  铁律（`docs/真机测试手册.md` §1.3）：panic 路径禁调门控解析函数（Lilu 的 boot-arg 解析，
+//  内部是 Apple `PE_parse_boot_argn`，**会取锁**）——在崩溃流程中调用会导致"不自动重启"。
+//  ⇒ 下列值只在 `armPanicGateValues()`（由 `X6000FB::processKext` 在**正常上下文**调用一次）
+//     求值；`wrapHandleCriticalError` 内**只读**这些静态量。boot-arg 启动后不变 ⇒ 语义等价。
+//  取不到时（arming 未被调用）⇒ 全为 false ⇒ 仅"该探针输出丢失"，**不崩溃、不改变默认行为**。
+static bool sWantP5Readout   = false;   // -NRedP5Readout
+static bool sWantG3Node      = false;   // -NRedPluginNode
+static bool sWantTtlAsmPanic = false;   // -NRedTtlAsm
+static bool sWantR1Probe     = false;   // -NRedR1Probe
+static bool sWantSmnRead1    = false;   // -NRedSmnRead1
+static bool sWantProbePanic  = false;   // -NRedProbePanic
+static bool sWantProbePPLIB  = false;   // -NRedProbePPLIB
+
+static void armPanicGateValues()
+{
+    sWantP5Readout   = checkKernelArgument("-NRedP5Readout");
+    sWantG3Node      = checkKernelArgument("-NRedPluginNode");
+    sWantTtlAsmPanic = checkKernelArgument("-NRedTtlAsm");
+    sWantR1Probe     = checkKernelArgument("-NRedR1Probe");
+    sWantSmnRead1    = checkKernelArgument("-NRedSmnRead1");
+    sWantProbePanic  = checkKernelArgument("-NRedProbePanic");
+    sWantProbePPLIB  = checkKernelArgument("-NRedProbePPLIB");
+}
 // ─── P3P14 复读通道（乙线 R1，S1；与 P5 的 panic 文本通道**同形但独立**）────────────
 //  立论与 P5 相同：PP 时刻（≈45–50 s）**写文件通道历代零命中**（151 归档）；
 //  故复读值只存**文件静态量**（无落盘、无 msgbuf、无跨 TU 符号），由
@@ -528,6 +553,9 @@ void X6000FB::processKext(KernelPatcher& patcher, size_t id, mach_vm_address_t s
     DBGLOG("X6000FB", "processKext: X6000Framebuffer matched, hwLateInit begin (id=%zu slide=0x%llX size=0x%zX)",
            id, slide, size);
 
+    // A-60（类 A）：在**正常上下文**（kext 加载回调期，早于任何 start/configureDevice/powerUp）
+    //  预存 panic 路径所需的门控值 ⇒ `wrapHandleCriticalError` 内只读静态量、不调解析函数。
+    armPanicGateValues();
     NRed::singleton().hwLateInit();
 
     // T16（2026-10-10）：早期直通探针 `-NRedEarlyDirect`（默认关）。
@@ -1369,7 +1397,9 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             //  `com.apple.kext.AMDRadeonX5000.xml` 亦然）⇒ **provider 上该属性为真**是
             //  加速器被匹配、start、进而写 `controller+0x7960` 的必要条件。
             //  安全：只调用 IOKit 的只读访问器（getProvider/getProperty），不调用 Apple 虚方法。
-            if ((wantAccelProbe || wantAccelLog) && isKernelPtr(o20)) {
+            // A-60（类 B）：再加一道 **vptr 内核区间判定**（`vt20` 已在 `:1354` 由 `isKernelPtr(o20)`
+            //  分支内读出 ⇒ **零新增读**）⇒ 只有"控制器对象及其 vtable 都可读"时才调 `getProvider()`。
+            if ((wantAccelProbe || wantAccelLog) && isKernelPtr(o20) && isKernelPtr(vt20)) {
                 auto* prov = OSDynamicCast(IOService, reinterpret_cast<IOService*>(o20)->getProvider());
                 if (prov != nullptr) {
                     pci = reinterpret_cast<UInt64>(prov);
@@ -1491,7 +1521,12 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         UInt64 dProv = 0, bDecl = 0, bIsData = 0, bLen = 0, bInRange = 0;
         if (dSelf >= 0xffffff7f80000000ULL) {
             const UInt64 dCtl = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(dSelf) + 0x20);
-            if (dCtl >= 0xffffff7f80000000ULL) {
+            // A-60（类 B）：裸内存读出的指针进虚方法（`getProvider()`）前，**加一次 vptr 读 + 内核区间判定**
+            //  （零行为差异：`vtCtl` 有效时与改动前逐字同路径；仅在对象/vtable 不可读时跳过原本会崩的调用）。
+            const UInt64 vtCtl = (dCtl >= 0xffffff7f80000000ULL)
+                                     ? *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(dCtl))
+                                     : 0;
+            if (dCtl >= 0xffffff7f80000000ULL && vtCtl >= 0xffffff7f80000000ULL) {
                 auto* const prov = OSDynamicCast(IOService, reinterpret_cast<IOService*>(dCtl)->getProvider());
                 if (prov != nullptr) {
                     dProv = reinterpret_cast<UInt64>(prov);
@@ -2199,20 +2234,20 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //    `sP5ReadoutValid`，而该标志由 `-NRedAccelLog` 等**固定集常带**的门控间接置位
     //    ⇒ 第 89 轮真机上 P5 块抢先 panic ⇒ 新增的两条探针**零产出**。
     //  ⇒ 现在三个块各自有独立门控，可单独启用（P3P14 / NBIO 已有自己的块内门控形态）。
-    //  ⚠️ **必须在本函数入口的正常上下文**调用（与 `:1158` 的 `wantProbe` 同形）：
-    //    `checkKernelArgument` 内部是 Apple `PE_parse_boot_argn`，**panic 路径禁调**
+    //  ⚠️ A-60（类 A）：门控值一律由**正常上下文**（`X6000FB::processKext` 里的 `armPanicGateValues()`）预存：
+    //    门控解析函数（Lilu 的 boot-arg 解析，内部 Apple `PE_parse_boot_argn`）**panic 路径禁调**
     //    （见 `:2094` 与 iron rule：在崩溃流程中调用会导致"不自动重启"）。
-    const bool wantP5 = checkKernelArgument("-NRedP5Readout");
+    const bool wantP5 = sWantP5Readout;   // A-60 类 A：正常上下文预存（panic 路径只读）
     // ★ G3 探针门控（新，`-NRedPluginNode`，默认关）：HWServices 插件节点就绪度。
-    //  与 `wantP5` **同法**在本函数**入口的正常上下文**取值——panic 路径禁调
-    //  `checkKernelArgument`（其内部是 Apple `PE_parse_boot_argn`，在崩溃流程中调用
+    //  与 `wantP5` **同法**由正常上下文预存（panic 路径禁调
+    //  门控解析函数（内部是 Apple `PE_parse_boot_argn`，在崩溃流程中调用
     //  会导致"不自动重启"）。捕获侧（`X5000.cpp` 的 `wrapConfigureDevice`）自行判同一门控。
-    const bool wantG3 = checkKernelArgument("-NRedPluginNode");
+    const bool wantG3 = sWantG3Node;      // A-60 类 A：正常上下文预存
     // ★ TtlAsm 探针门控（新，`-NRedTtlAsm`，默认关）：TTL 接口对象四字段读数。
-    //  与 `wantP5`/`wantG3` **同法**在本函数**入口的正常上下文**取值——panic 路径禁调
-    //  `checkKernelArgument`（其内部是 Apple `PE_parse_boot_argn`，崩溃流程中调用会导致"不自动重启"）。
+    //  与 `wantP5`/`wantG3` **同法**由正常上下文预存（panic 路径禁调
+    //  门控解析函数（内部是 Apple `PE_parse_boot_argn`，崩溃流程中调用会导致"不自动重启"）。
     //  捕获侧（`wrapPpHelperPowerUp`）自行判同一门控。
-    const bool wantTtlAsm = checkKernelArgument("-NRedTtlAsm");
+    const bool wantTtlAsm = sWantTtlAsmPanic;   // A-60 类 A：正常上下文预存
 
     // ★ PP 后端对象落盘（2026-09-28）：`powerUp` 自身在返回前就 panic，其"调用后读字段"的探针块
     //  永不执行 ⇒ 把读取搬到这里（panic 前的最后出口）。只读内存，不调用任何 Apple 方法。
@@ -2251,11 +2286,11 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //   `R1B30`/`R1Cwi`/`EngTbl`/`SmnRead1` 等既有串**互不为子串**）⇒ 检索判定不会互相误命中。
     //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**
     //   （铁律：禁止在 `panic()` 实参里调 `singleton()` 等可能加锁者 —— 崩溃上下文不得取锁）；
-    //   门控判定只用文件静态量，**不调 `checkKernelArgument`**（它内部是 Apple `PE_parse_boot_argn`，
+    //   门控判定只用文件静态量，**不调门控解析函数**（它内部是 Apple `PE_parse_boot_argn`，
     //   在 panic 流程里调用会导致"不自动重启"）。
     //  门控（2026-10-02，第 89 轮判读修复）：`sP5ReadoutValid && wantP5` —— **两个条件都要**
     //    `sP5ReadoutValid` = 采集侧确实装填过；`wantP5` = 本轮显式带了 `-NRedP5Readout`
-    //    （`wantP5` 在本函数入口求值，见上方；**不在此处**调 `checkKernelArgument`）。
+    //    （`wantP5` 由正常上下文预存的静态量给出，见上方；**不在此处**调门控解析函数）。
     //    为什么必须加 `wantP5`：本函数三个 panic 块 `P5 → P3P14 → NBIO` 中 `panic()` 不返回
     //    ⇒ 若 P5 仅凭 `sP5ReadoutValid` 触发（它可由 `-NRedAccelLog` 等**固定集常带**门控间接置位），
     //    就会**永久挡住**后两块 ⇒ 第 89 轮 P3P14/NBIO 零产出。加门控后三者可独立启用。
@@ -2275,7 +2310,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //  与 `P5 panic readout:` 同形但**独立**（新探针位、新格式串、新静态量）；
     //  判别段 `P3P14 panic re:` 与 `P5 panic readout:` 的字符不同（`3`≠`5`）⇒ 互不误命中。
     //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
-    //   门控判定只用文件静态量，**不调 `checkKernelArgument`**（panic 流程中调用会导致"不自动重启"）。
+    //   门控判定只用文件静态量，**不调门控解析函数**（panic 流程中调用会导致"不自动重启"）。
     //  未启用（`sP3P14ReValid == 0`）⇒ 零输出、**不 panic**（不改变 Apple 的原失败语义）。
     if (sP3P14ReValid) {
         const UInt64 rHw     = sP3P14ReHw;
@@ -2300,7 +2335,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //    若 S1 未启用（`sP3P14ReValid == 0`）⇒ `sP3P14ReCalled == 0` ⇒ `p3Fail` 恒 0 且 `called=0`
     //    如实表明"P3 未复读"，**不得**读成"P3 通过"。
     //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
-    //   门控判定只用文件静态量，**不调 `checkKernelArgument`**（panic 流程中调用会导致"不自动重启"）。
+    //   门控判定只用文件静态量，**不调门控解析函数**（panic 流程中调用会导致"不自动重启"）。
     if (sNbioWrValid) {
         const UInt64 wArmed   = sNbioWrReadings.armed;
         const UInt64 wRmmio   = sNbioWrReadings.hasRmmio;
@@ -2339,7 +2374,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //   `NRed HwSvc`/`HwSvc node` 零命中；与 `P5 panic readout:`/`P3P14 panic re:`/
     //   `NBIO write re:`/`R1PDiag`/`R1 probe`/`R1P3P14`/`pp-in`/`pp-ttl`/`SmnRead1`/`EngTbl` 均不互相包含）。
     //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
-    //   门控用入口取好的 `wantG3`（**不在此处**调 `checkKernelArgument`）。
+    //   门控用正常上下文预存的 `sWantG3Node`（**不在此处**调门控解析函数）。
     //  ⚠️ 排在最后 ⇒ 若同轮还带了 `-NRedP5Readout`/`-NRedP3P14Mark`/`-NRedNbioFbEn`，
     //    仍会被前序块抢先（`panic()` 不返回）⇒ 规格 §4.3 要求**与 NBIO 分轮**。
     if (gPluginNodeValid != 0 && wantG3) {
@@ -2362,7 +2397,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //  权威规格照办；数据来源 = `wrapPpHelperPowerUp` 内捕获块写入的 `sTtlAsm*`（纯内存）。
     //  判别段 `NRed TtlAsm:` 与既有全部已投产串**互不为子串**（全库 grep 复核：`TtlAsm` 零命中）。
     //  ⛔ 本路径**绝不写文件**（手册 §5.1）；实参一律是**已求值的局部标量**；
-    //   门控用入口取好的 `wantTtlAsm`（**不在此处**调 `checkKernelArgument`）。
+    //   门控用正常上下文预存的 `sWantTtlAsmPanic`（**不在此处**调门控解析函数）。
     //  ⚠️ 排在最后 ⇒ 若同轮还带了前四块的门控，仍会被前序块抢先（`panic()` 不返回）⇒ 须分轮。
     if (sTtlAsmValid != 0 && wantTtlAsm) {
         const UInt64 tTtl = sTtlAsmTtl;
@@ -2377,7 +2412,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
     //  判据见 X5000.cpp 全局量处的说明（失败出口 ↔ 特征字段的对应表）。
     //  预读所有标量为局部变量（panic 实参禁调 singleton() 等可能加锁的函数）。
-    if (checkKernelArgument("-NRedR1Probe") && gR1bProbeEnabled) {
+    if (sWantR1Probe && gR1bProbeEnabled) {
         const UInt64 calls   = gR1bCfgDevCalls;
         const UInt64 retNZ   = gR1bCfgDevRetNZ;
         const UInt64 cfgSelf = gR1bCfgDevSelf;
@@ -2409,7 +2444,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     }
     // ─── R1'-B30 身份探针（`-NRedR1B30Probe`，默认关）─────────────────────────
     //  判据与设计见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
-    //  门控：`gR1b30ProbeArmed` 已含 `checkKernelArgument("-NRedR1B30Probe")` 的判定结果
+    //  门控：`gR1b30ProbeArmed` 已含门控 `-NRedR1B30Probe` 的判定结果（正常上下文预存）
     //  格式串为本探针专属（新开探针位），与既有 R1 探针的冻结串**互不相关**。
     //  本探针 panic 首行的前缀刻意选为 `NRed R1B30 probe:`（"R1B30" 与既有串的"R1 probe"
     //  之间**没有空格分隔**）⇒ `decoded.txt` 的自动断言无论按 `startswith` 还是按子串
@@ -2450,7 +2485,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     }
     // ─── R1'-Cwi 探针（`-NRedR1CwiProbe`，默认关）─────────────────────────────
     //  判据与依据见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
-    //  门控：`gR1cwiProbeArmed` 已含 `checkKernelArgument("-NRedR1CwiProbe")` 的判定结果
+    //  门控：`gR1cwiProbeArmed` 已含门控 `-NRedR1CwiProbe` 的判定结果（正常上下文预存）
     //  格式串为本探针专属（新开探针位），与既有两条 R 系已投产串**互不为子串**：
     //  三条串的独有段分别是 R1 后紧跟空格、R1B30、R1Cwi，任意两者都不构成子串包含关系
     //  （已用穷举矩阵核验，见报告 §11）。
@@ -2474,7 +2509,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     }
     // ─── R1'-EngTbl 探针（`-NRedEngTblProbe`，默认关）───────────────────────────
     //  判据与依据见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
-    //  门控：`gEngTblArmed` 已含 `checkKernelArgument("-NRedEngTblProbe")` 的判定结果
+    //  门控：`gEngTblArmed` 已含门控 `-NRedEngTblProbe` 的判定结果（正常上下文预存）
     //  （捕获侧只在门控为真时才置位）⇒ 本处**不再查询 boot-arg**（默认关 ⇒ 此路径不存在）。
     //  格式串为本探针专属（新开探针位），与既有已投产串**互不为子串**（判别段 `EngTbl probe:`）。
     if (gEngTblArmed) {
@@ -2526,7 +2561,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //       （手册 §4A 纪律 3；尤其是 `-NRedR1Probe` / `-NRedProbePanic` / `-NRedProbePPLIB` 三条）；
     //    ③ 两个探针**不同时开**：本块置于所有既有探针块**之后**，且在 `-NRedProbePPLIB` 之前；
     //    ④ 门控为假时**一次 MMIO 都不发生**（以下 `if` 是第一道门）。
-    if (checkKernelArgument("-NRedSmnRead1")) {
+    if (sWantSmnRead1) {
         // 前置判据：BAR5 必须已映射（`NRed::hwLateInit` 做映射；`rmmioPtr` 是私有成员，
         //   故用公开的 `hasRmmio()` 判定，绝不触碰裸指针）。
         // 注意：`hwLateInit` 可能**尚未**执行到（本函数挂在加速器失败出口，晚于它）——
@@ -2577,7 +2612,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     // Probe D1 v2: 在真崩溃出口把 SMU13 序列累积状态注入 panic 消息（走已验证的 NVRAM -> .panic 落盘通道）
     // 必须置于 -NRedProbePPLIB 之前：二者同开时以 Panic 优先（先取数据）。
     // panic() 与 Apple doGPUPanic 终点同一原语（DebugEnabler.cpp:250），栈/寄存器照常写入，.panic 不残缺。
-    if (checkKernelArgument("-NRedProbePanic") && NRed::singleton().getAttributes().isPhoenix()) {
+    if (sWantProbePanic && NRed::singleton().getAttributes().isPhoenix()) {
         // 诊断大打包（§16.21）：panic 消息带宽足够，一次带回所有 SMU 诊断寄存器原始值
         // —— 避免反复猜地址域。全部用 NRed 直读（readReg32，dword 索引）。
         auto& nred = NRed::singleton();
@@ -2641,7 +2676,7 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     }
 
     // Probe P1 behaviour (suppress panic) only under -NRedProbePPLIB on Phoenix
-    if (checkKernelArgument("-NRedProbePPLIB") && NRed::singleton().getAttributes().isPhoenix()) {
+    if (sWantProbePPLIB && NRed::singleton().getAttributes().isPhoenix()) {
         return 0;   // suppress panic, let powerUp continue (probe P1)
     }
     // Default: call original (panic as usual, but failure detail already logged above)
