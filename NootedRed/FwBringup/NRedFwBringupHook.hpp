@@ -266,6 +266,29 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                    (unsigned long long)tmrPhys);
     }
 
+    // ⑦ Phase 2: TmrLoad（SETUP_TMR），使用真实 tmr_mc_addr。
+    //   回归恢复：A-23（c0395be）自述本文件改动为 +25/-0（在"TMR 分配后、Phase 2 前"插入读点），
+    //   但该提交实际连带删除了本 Phase 2 块与末行结构化 trace。而 A-13 的 D1′、
+    //   kb/技术草案/PAeqMC与SETUP_TMR字段语义.md:333（以 bringupRunTmrLoad 前为坐标）以及
+    //   ROADMAP 的 B 轮三出口判据（`tmrLoad: ok` / `step=12`）均以本块存在为前提 ⇒ 判为回归，予以恢复。
+    rc = fw::bringupRunTmrLoad(&ctx,
+                               false,      // boot_time_tmr
+                               false,      // autoload_supported
+                               tmrPhys,
+                               cmdBufMc,
+                               fenceMc);
+    if (rc != 0) {
+        NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
+                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);
+    }
+    // A-13 D1′：分开记录 tmrLoad resp_status
+    NRED_TRACE("bringup: tmrLoad resp_status=0x%X", ctx.last_resp_status_tmr_load);
+
+    // I10/G6/J-1：结构化逐步 trace（末行携带 last_step，供 J-1「last_step 单调不减」断言）。
+    NRED_TRACE("bringup: step=%u last_error=%d loadToc_resp=0x%X tmrLoad_resp=0x%X",
+               static_cast<unsigned>(ctx.last_step), ctx.last_error,
+               ctx.last_resp_status_load_toc, ctx.last_resp_status_tmr_load);
+
     // D3: TMR 缓冲保留至卸载（对齐 Linux"保留至卸载"契约，防提前释放）。
     // 此处不释放 tmrDesc，保留至 kext 卸载（static 持有）。
     // 释放（引导期单次执行；结束后释放，避免长期占用）。
