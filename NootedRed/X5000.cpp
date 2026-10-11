@@ -2044,7 +2044,7 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         putBit(sent[nred::SentryId::P8_bit15], 15);
         putSent(sent[nred::SentryId::P10_3B0], rd64(s, 0x3B0));
         putSent(sent[nred::SentryId::P12_530], rd64(s, 0x530));
-        putBit(sent[nred::SentryId::P13_Unreliable], 18);   // 不可靠（§8.7）⇒ 已排除出 first-false 扫描
+        putBit(sent[nred::SentryId::P13_bit18], 18);   // A-42：bit18 = `initializeTtl` 返回值的忠实位
         putSent(sent[nred::SentryId::P14_2F8], rd32(s, 0x2F8));
         putSent(sent[nred::SentryId::P16_378], rd64(s, 0x378));
         putBit(sent[nred::SentryId::P17_bit19], 19);

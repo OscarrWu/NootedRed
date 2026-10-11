@@ -137,26 +137,30 @@ static void test_mask_bit_spec_consistency() {
     printf("  PASS: n=0..31 全部与 §5.2 换算规则一致\n");
 }
 
-// ── A-41 对照 ①：P13（bit18 无忠实位）不得抢占 firstFalse ──────────────────────────
-static void test_p13_not_first_false() {
-    printf("▶ test_p13_not_first_false\n");
+// ── A-45：P13（bit18 = `initializeTtl` 返回值的忠实位）与其它哨兵**同权** ────────────
+static void test_p13_is_first_false_candidate() {
+    printf("▶ test_p13_is_first_false_candidate\n");
+    // 数组序（A-30 程序序）：P12 < P13 < P14
+    assert(nred::SentryId::P12_530 < nred::SentryId::P13_bit18 && "P13 must follow P12");
+    assert(nred::SentryId::P13_bit18 < nred::SentryId::P14_2F8 && "P13 must precede P14");
     nred::SentryVal vals[nred::SentryId::SentryCount];
     for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) {
         vals[i].id    = i;
         vals[i].value = 1;
         vals[i].valid = 1;
     }
-    vals[nred::SentryId::P13_Unreliable].value = 0;   // 唯一为 0 的项，但无忠实位 ⇒ 不得报
+    // P13 为 0（= 该条未通过；A-42 已证 bit18 忠实）、其后各项非 0 ⇒ firstFalse **必须报 P13**
+    //  （若把 A-41 的排除逻辑加回，本断言即失败——见报告 A4 的"改回即失败"演示。）
+    vals[nred::SentryId::P13_bit18].value = 0;
     const nred::WindowResult r = nred::findFirstFalseSentry(vals, nred::SentryId::SentryCount);
-    assert(r.firstFalseId != nred::SentryId::P13_Unreliable && "P13 must not be firstFalse");
-    assert(r.firstFalseId == nred::SentryId::SentryCount && "P13 excluded ⇒ no eligible false");
-    assert(r.firstFalseValid == 0 && "no eligible false ⇒ valid 0");
-    assert(r.readCount == nred::SentryId::SentryCount && "P13 still counted as read");
-    // 反面对照：P13 之后合格的项为 0 ⇒ 必须报那一项（而不是 P13）
-    vals[nred::SentryId::P17_bit19].value = 0;
+    assert(r.firstFalseId == nred::SentryId::P13_bit18 && "P13 (bit18) must be firstFalse");
+    assert(r.firstFalseValid == 1 && "P13 读数有效 ⇒ firstFalseValid=1");
+    assert(r.readCount == nred::SentryId::SentryCount && "all readable");
+    // 顺序性对照：更早的 P12 也为 0 ⇒ 报 P12（而不是 P13）
+    vals[nred::SentryId::P12_530].value = 0;
     const nred::WindowResult r2 = nred::findFirstFalseSentry(vals, nred::SentryId::SentryCount);
-    assert(r2.firstFalseId == nred::SentryId::P17_bit19 && "next eligible false must win");
-    printf("  PASS: P13 不参与 firstFalse（读数仍计入 readCount）\n");
+    assert(r2.firstFalseId == nred::SentryId::P12_530 && "earlier false must win");
+    printf("  PASS: P13（bit18）同权参与 firstFalse，顺序性正确\n");
 }
 
 // ── A-41 对照 ②：掩码读**加速器**侧（hwInterface 侧同偏移无信号）────────────────
@@ -228,7 +232,7 @@ int main() {
     test_mask_bit_read_p7_faithful();
     test_mask_bit_read_neg_control();
     test_mask_bit_spec_consistency();
-    test_p13_not_first_false();
+    test_p13_is_first_false_candidate();
     test_mask_base_is_accel_not_self();
     test_p5_sentry_verdict();
     test_p5_precedes_p6_in_scan();
