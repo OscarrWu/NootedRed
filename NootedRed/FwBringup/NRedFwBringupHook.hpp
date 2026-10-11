@@ -12,8 +12,10 @@
 //   ① SmnCallbacks：readReg/writeReg → NRed::readReg32Raw/writeReg32Raw（BAR5 直读，dword 索引；
 //      与 X6000FB.cpp `smnProbeReadReg/WriteReg` 同型）；delayUs → IODelay（延时注入抽象）；
 //      lock/unlock = nullptr（本封装在 SMU 初始化引导期、单 CPU 路径执行，不取锁）。
-//   ② RegSinkKernel(cb)：display::RegSink 实现（SEG1 基准 `smnAddr`、经 PCIE_INDEX2/DATA2 间接、
-//      不清断 SEG0 —— I13/I14）。
+//   ② RegSinkKernel(cb)：display::RegSink 实现；段基址＝**构造默认 `kMpSeg0Base`（SEG0）**
+//      （RegSinkKernel.hpp:216/288）。本封装**不**调用 `smnAddr`（其兼容默认才是 SEG1）
+//      ⇒ bringup 全链 MMIO 落 SEG0（经 PCIE_INDEX2/DATA2 间接、不清断 SEG0 —— I13/I14）。
+//      ⚠️ R6/U4 未定：SEG0/SEG1 孰为真通道无离线定论；此处只记录当前取值，不改段选语义。
 //   ③ A-2 真实固件：内嵌 `psp_13_0_4_toc.bin` / `psp_13_0_4_ta.bin`；fwAssetVerify 校验失败
 //      ⇒ trace 并跳过装载（可判失败，不静默通过）。
 //   ④ A-10：真实 MC 地址替换 0 占位 —— 用 `IOBufferMemoryDescriptor`（物理连续，PSP 可 DMA）

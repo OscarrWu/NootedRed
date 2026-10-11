@@ -17,6 +17,11 @@
 //   - 寄存器访问复用 `display::RegSink`（`display::RegAddr`/`RegValue` 均为 uint32_t）
 //   - 命名空间 `fw`；寄存器常量风格对齐 `Regs/SMU.hpp`（裸 constexpr，dword 偏移）
 //   - 寄存器字节地址由 `RegAddr.hpp::smnAddr` 统一计算（SEG1，不再走旧的 SEG0 dword 索引路径）
+//   ⚠️ 归属（2026-10-11 静态核实）：本模块当前**无生产调用者**——仅离线单测
+//      `FwBringup/tests/test_smu13_mailbox.cpp` 与 `tests/compare_msgids.sh` 消费
+//      ⇒ 其 SEG1 常量**不在** `-NRedFwBringup` 路径内。且这三个常量是"绝对字节地址、
+//      交 `NRed::readReg32` 越窗间接分支"的口径，与 `fw::RegSinkKernel`（dword 偏移 +
+//      自有段基址）**口径不同**（直接配用会重复加基址）⇒ 接入前须先统一。
 //
 // Linux 时序对照（逐行见注释）：
 //   1. 清响应寄存器（C2PMSG_90 = 0）           ← `__smu_msg_v1_send` L319

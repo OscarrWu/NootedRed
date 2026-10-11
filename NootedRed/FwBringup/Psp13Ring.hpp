@@ -16,7 +16,9 @@
 //   - header-only（内联），命名空间 fw
 //   - 寄存器访问经 display::RegSink（read/write/delayMicroseconds）
 //   - 无动态分配（固定大小缓冲区由调用方提供）
-//   - 寄存器字节地址由 `RegAddr.hpp::smnAddr` 统一计算（SEG1，等价 Linux RREG32_SOC15_EXT）
+//   - 本文件只向 display::RegSink 传 **dword 偏移**（sink.read/write），**不含**任何段选择；
+//     段基址由 sink 实现决定（kext 侧 fw::RegSinkKernel 默认 kMpSeg0Base＝SEG0；
+//     RegAddr.hpp::smnAddr 的兼容默认是 SEG1，本文件不调用它）。
 
 #pragma once
 
