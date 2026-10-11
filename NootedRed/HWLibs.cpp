@@ -1450,11 +1450,16 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             DBGLOG("HWLibs", "%s: resolved at expected offset", tag);
             return slide + offset;
         };
+        // 构建身份自证：本 kext 已成功注册的 hook 数（hookProbe 成功时 +1）
+        static unsigned nHooks = 0;
         const auto hookProbe = [&](const mach_vm_address_t from, KernelPatcher::RouteRequest&& req,
                                    const char* tag)
         {
             req.from = from;
-            if (patcher.routeMultiple(id, &req, 1, slide, size)) { DBGLOG("HWLibs", "%s: hooked", tag); }
+            if (patcher.routeMultiple(id, &req, 1, slide, size)) {
+                DBGLOG("HWLibs", "%s: hooked", tag);
+                nHooks += 1;
+            }
             else { NRED_TRACE("%s: route failed", tag); }
         };
 
@@ -1517,6 +1522,17 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                            0x9440F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9440f, this->orgMode9440f}, "mode9440f");
         }
+
+        // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
+        //  B24 疑案：ESP 部署 run304，但内核实际运行的 kext 疑似 run301（mode9440f 零命中、
+        //  hook 集合与 run301 吻合）。现有「本地/部署/ESP 三方 md5」只证明文件一致，不证明
+        //  内核加载的是它。⇒ 在此（**本 kext 的最早无条件执行点**，processKext 入口块内）打一条
+        //  编译期构建身份行：`__DATE__`/`__TIME__` 每个 CI 构建唯一 ⇒ 归档直接读出运行构建。
+        //  ⚠️ 不受 `-NRedAccelLog` 影响（构建身份始终可查；hook 集合在上一块注册后计数）。
+        //  ⚠️ 不 panic、不写文件、不调 Apple 方法；DBGLOG 经 Lilu 日志通道（-liludbgall 时可见）。
+        DBGLOG("NRed", "build: date=%s time=%s hooks=%u", __DATE__, __TIME__, nHooks);
+        // 同一目的：`-NRedFwBringup` 门控实际解析值（顺带解决「门控是否真的开了」盲区）。
+        DBGLOG("NRed", "bootarg FwBringup=%d", singleton().smu13FwBringupEnabled ? 1 : 0);
     }
 
     // ★ 落盘通道自检（2026-09-28）：`mode2-tail` 的关键读数发生在 ~34.8s，已晚于 L2 的 msgbuf 覆盖窗口，
