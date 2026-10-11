@@ -1174,6 +1174,10 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                                static_cast<unsigned>(b), static_cast<unsigned>(c),
                                static_cast<unsigned>(ret));
         if (n > 0) {
+            // ★ 内存环写入（2026-10-12）：与 panic 形态解耦——不管崩在哪/崩不崩，
+            //   L2 周期拍（NRedObserve-*）都会把本行带出（B6–B22 每轮稳定 88 文件）。
+            //   与 NRED_TRACE 同款 nredTraceLine 用法；line 已含 '\n'，n 为长度。
+            nredTraceLine(line, n);
             if (rootvnode == nullptr) {
                 NRED_TRACE("9440f-noroot");
             } else {
