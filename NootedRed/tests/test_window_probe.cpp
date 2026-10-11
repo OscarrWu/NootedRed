@@ -253,6 +253,27 @@ static void test_p5_sampling_pure_logic() {
     printf("  PASS: P5 采样纯逻辑（期望串/类型分支/sentinel/上限/有界复制）\n");
 }
 
+// ── A-51 用例（B15-R 崩点回归）：非对象指针**不得**进入类型判定路径 ────────────────────
+static void test_p5_typecheck_gate() {
+    printf("▶ test_p5_typecheck_gate\n");
+    // B15-R 实测：`vptr[0x710]()` 返回的是 `const char*`（Apple kext `__cstring`），旧实现把它当对象
+    //  送进 `safeMetaCast` ⇒ GP trap（RDI=0xffffff7f910f849a、RAX="AMDRadeo"）。该来源必须被拒。
+    const uint64_t kWantStrAddr = 0xffffff7f910f849aULL;   // B15-R 的 RDI（期望串地址，非对象）
+    assert(nred::p5TypeCheckAllowed(nred::P5SrcUnknown, kWantStrAddr) == 0
+           && "字符串/字面量指针 ⇒ 禁入类型判定");
+    assert(nred::p5TypeCheckAllowed(nred::P5SrcUnknown, 0xffffff800caa24c8ULL) == 0
+           && "来源不明的内核指针 ⇒ 一律禁入");
+    // IOKit 明确返回 + 落在内核区间 ⇒ 准入
+    assert(nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, kWantStrAddr) == 1
+           && "IOKit 返回 + 内核区间 ⇒ 准入");
+    assert(nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, 0xffffff7f80000000ULL) == 1 && "阈值边界（含）");
+    // IOKit 返回但指针非法（空/低地址/阈值下界）⇒ 仍禁入
+    assert(nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, 0) == 0 && "空指针 ⇒ 禁入");
+    assert(nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, 0x00007ffb5a98ce80ULL) == 0 && "低地址 ⇒ 禁入");
+    assert(nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, 0xffffff7f7fffffffULL) == 0 && "阈值下界 ⇒ 禁入");
+    printf("  PASS: 类型判定准入门（字符串地址被拒、IOKit 返回准入、阈值边界正确）\n");
+}
+
 int main() {
     printf("=== A-25 window probe offline tests ===\n");
     test_first_false_ordering();
@@ -269,6 +290,7 @@ int main() {
     test_p5_sentry_verdict();
     test_p5_precedes_p6_in_scan();
     test_p5_sampling_pure_logic();
+    test_p5_typecheck_gate();
     printf("=== ALL TESTS PASSED ===\n");
     return 0;
 }

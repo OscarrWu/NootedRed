@@ -173,6 +173,25 @@ inline uint32_t p5StrEq(const char* const a, const char* const b)
     return (a[i] == b[i]) ? 1u : 0u;
 }
 
+// ── A-51：**类型判定准入门**（纯逻辑，可测；B15-R 崩溃的回归防线）──
+//  只有"由 IOKit API 明确返回的对象"才允许进入元类/类型判定路径（`OSDynamicCast`／`getMetaClass`／
+//  `getClassName`／`isEqualTo` 等）；其它来源（裸内存值、**字符串常量/字面量指针**、裸槽调用返回值）
+//  一律**只做字节/数值处理**，不得调元类。
+//  背景（B15-R 实测）：`initializeExternalInterfaces` 的 `vptr[0x710]()` 返回的是 **`const char*`**；
+//  旧实现把它当对象送进 `OSMetaClassBase::safeMetaCast` ⇒ `type 13=general protection`
+//  （`RDI` = 该串地址、`RAX` = 串首 8 字节 `"AMDRadeo"`）。本判定把该路径**结构性封死**。
+//  ⚠ 局限：内核指针区间判定（阈值 `>= 0xffffff7f80000000`，沿用既有）**只给必要条件**，
+//  不保证是合法对象；故 `P5SrcIokitReturn` 也只在"IOKit 明确返回"时才允许。
+enum P5PtrSource : uint32_t {
+    P5SrcUnknown     = 0,   // 来源不明（裸内存 / 槽调用返回 / 字面量）⇒ **禁入**类型判定
+    P5SrcIokitReturn = 1,   // `getProperty` 返回 / `getClientIterator` 元素 / `copyMatchingService` 返回
+};
+inline uint32_t p5TypeCheckAllowed(const uint32_t source, const uint64_t ptr)
+{
+    if (source != static_cast<uint32_t>(P5SrcIokitReturn)) { return 0u; }
+    return (ptr >= 0xffffff7f80000000ULL) ? 1u : 0u;
+}
+
 // 哨兵名（判读输出用；与 SentryId 同序）
 inline const char* sentryName(const uint32_t id)
 {

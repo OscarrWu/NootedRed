@@ -2159,24 +2159,34 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
                (unsigned long long)prov, (unsigned long long)f320, (unsigned long long)f338,
                (unsigned long long)f340);
 
-    // ② 期望匹配类别串：`this->vptr[0x710]()`（AMDHW vtable 槽，A-46 已钉；只读、不改参数/返回值）
+    // ② 期望匹配类别串：`this->vptr[0x710]()`（AMDHW vtable 槽；Apple 在 `findHWServices` 内同槽调用）。
+    //  ⚠ **A-51（B15-R 崩溃根因）**：该 getter 返回的是 **`const char*`（Apple kext 的 `__cstring`）**，
+    //     **不是** `OSObject`。旧实现把它当对象送进 `OSDynamicCast(OSString, …)`（= `OSMetaClassBase::
+    //     safeMetaCast`）⇒ B15-R 实测 `Kernel trap … type 13=general protection`：
+    //     `RDI = 0xffffff7f910f849a`（＝该串地址）、`RAX = 0x6f65646152444d41`（＝串首 8 字节 `"AMDRadeo"`）。
+    //  ⇒ 本处**只当 `const char*` 用**（来源＝`P5SrcUnknown` ⇒ 结构上**不可能**进入类型判定路径），
+    //     只做"内核指针区间判定 + 有界字节比较"，**不调任何元类/虚方法**。
     const char* wantCStr = nullptr;
-    UInt64      wantObj  = 0;
+    UInt64      wantPtr  = 0;
     if (prov >= 0xffffff7f80000000ULL) {
         const UInt64 vptr = *reinterpret_cast<const UInt64*>(sb);   // 对象首字 = vptr（纯读）
         if (vptr >= 0xffffff7f80000000ULL) {
-            auto const wantFn = reinterpret_cast<void* (*)(void*)>(
+            auto const wantFn = reinterpret_cast<const char* (*)(void*)>(
                 *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(vptr) + 0x710));
             if (wantFn != nullptr) {
-                void* const o = wantFn(reinterpret_cast<void*>(s));
-                wantObj       = reinterpret_cast<UInt64>(o);
-                if (auto* const ws = OSDynamicCast(OSString, reinterpret_cast<OSMetaClassBase*>(o))) {
-                    wantCStr = ws->getCStringNoCopy();
+                const UInt64 o = reinterpret_cast<UInt64>(wantFn(reinterpret_cast<void*>(s)));
+                if (o >= 0xffffff7f80000000ULL) {   // 仅"落在内核区间"才当作可读 C 串
+                    wantPtr  = o;
+                    wantCStr = reinterpret_cast<const char*>(o);
                 }
             }
         }
     }
-    if (wantCStr == nullptr || wantCStr[0] == '\0') { wantCStr = nred::p5MatchCategory(); }   // 回退字面值
+    char wantBuf[41] = {0};
+    nred::p5StrCopyBounded(wantBuf, sizeof(wantBuf), wantCStr);
+    const uint32_t wantEq = nred::p5StrEq(wantBuf, nred::p5MatchCategory());   // 与 A-46 核实字面值比对
+    if (wantEq == 0) { nred::p5StrCopyBounded(wantBuf, sizeof(wantBuf), nred::p5MatchCategory()); }
+    wantCStr = wantBuf;   // 比较目标：getter 串（非空）否则字面值；二者关系由 `eq=` 行给出
 
     // ①③ 逐 client（有界）：计数 + 前 8 个出明细（元类名 / IOMatchCategory 类型与值 / 是否与期望吻合）
     UInt32 clients  = 0;
@@ -2192,14 +2202,23 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
                 ++clients;
                 if (nred::p5DetailWanted(i) == 0) { continue; }   // 上限截断：只计数、不再取明细
 
+                // A-51：iterator 元素是 IOKit 明确返回的对象 ⇒ 允许进入类型判定路径（否则跳过该项）
+                const UInt64 objU = reinterpret_cast<UInt64>(obj);
+                if (nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, objU) == 0) { continue; }
                 const char* cls = nullptr;
                 if (const OSMetaClass* const mc = obj->getMetaClass()) { cls = mc->getClassName(); }
                 IOService* const svc = OSDynamicCast(IOService, obj);
                 OSMetaClassBase* const prop =
                     (svc != nullptr) ? svc->getProperty("IOMatchCategory") : nullptr;
+                // A-51：属性对象也必须是 IOKit 返回（`getProperty`）且落在内核区间，才允许类型判定
+                const uint32_t propOk =
+                    (prop != nullptr &&
+                     nred::p5TypeCheckAllowed(nred::P5SrcIokitReturn, reinterpret_cast<UInt64>(prop)) != 0)
+                        ? 1u
+                        : 0u;
                 const uint32_t type =
-                    nred::p5PropTypeCode((prop == nullptr) ? 1u : 0u,
-                                         (prop != nullptr && OSDynamicCast(OSString, prop) != nullptr) ? 1u : 0u);
+                    nred::p5PropTypeCode((propOk == 0) ? 1u : 0u,
+                                         (propOk != 0 && OSDynamicCast(OSString, prop) != nullptr) ? 1u : 0u);
                 char     iomc[41] = {0};
                 if (nred::p5ShouldReadCString(type) != 0) {   // sentinel：仅 OSString 才继续取值
                     const char* const pc = static_cast<OSString*>(prop)->getCStringNoCopy();
@@ -2218,8 +2237,10 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
         }
     }
     NRED_TRACE("win-probe-P5: clients=%u cap=%u", (unsigned)clients, (unsigned)kP5ClientCap);
-    NRED_TRACE("win-probe-P5: want=0x%llX got=0x%llX match=0x%llX", (unsigned long long)wantObj,
+    NRED_TRACE("win-probe-P5: want=0x%llX got=0x%llX match=0x%llX", (unsigned long long)wantPtr,
                (unsigned long long)hitProp, (hitProp != 0) ? 1ULL : 0ULL);
+    // ── A-51 新增行：期望串的**内容**与 A-46 核实字面值的关系（`eq=0` ⇒ 比较用了字面值回退）──
+    NRED_TRACE("win-probe-P5: wantStr=%s exp=%s eq=%u", wantBuf, nred::p5MatchCategory(), (unsigned)wantEq);
 
     // ⑤ 命中对象的 `+0xD8`／`+0xD0`（A-42/A-46：＝ `getTtl()`／`getCail()` 的返回；纯内存读）
     UInt64 d8 = 0, d0 = 0;
