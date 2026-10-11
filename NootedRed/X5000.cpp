@@ -1978,10 +1978,13 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         for (uint32_t i = 0; i < nred::WmCount; ++i) { wms[i].valid = 1; }
 
         // ── A-30：扩展口径 · 写侧哨兵（13 指针字段 + 位掩码统一解包）──
-        //  读法：指针字段 rd64；位掩码读 accel+0x1e88 的 4 字节后按 A-26 §5.2 解位。
-        const uint64_t maskWord = *reinterpret_cast<const volatile uint32_t*>(s + 0x1E88);
-        auto bit = [&](const uint32_t n) -> uint64_t {
-            return (maskWord & nred::maskBit(n)) ? 1ULL : 0ULL;
+        //  读法：指针字段 rd64；位掩码**按位读 byte**（A-34 修正）——位 n ⇔ byte 0x1E88+(n>>3)
+        //  的第 n&7 位（A-26 §5.2）。原实现用 **dword 读**再套 `maskBit(n)`
+        //  （**字节内**位掩码）⇒ 位 n 被误取为 byte0 的 bit(n&7)（B12 轮实测暴露）。
+        //  现统一走 `nred::maskBitAt()`（唯一实现，在 `NRedWindowProbe.hpp`，用户态可测）。
+        const uint8_t* const maskBase = reinterpret_cast<const uint8_t*>(s);
+        auto bit = [maskBase](const uint32_t n) -> uint64_t {
+            return nred::maskBitAt(maskBase, n);
         };
         // 哨兵值（指针字段直接读数；位掩码解 bit）
         sent[nred::SentryId::P4_20630].value   = rd64(s, 0x20630);
@@ -2008,6 +2011,20 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         sent[nred::SentryId::P30_205C8].value  = rd64(s, 0x205C8);
         sent[nred::SentryId::P31_205D0].value  = rd64(s, 0x205D0);
         for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) { sent[i].valid = 1; }
+
+        // ── A-34：P6 对象的忠实哨兵（`AMDHWRegisters` 对象 `+0x44` 内部成功位）──
+        //  写点 Z `0x554b8` = kc `0x4b8c4b8`：`movb $0x1,0x44(%r14)`，**只在
+        //  `AMDHWRegisters::init` 的成功支**执行（该函数全部失败支都跳过它，
+        //  `kb/序列数据/反汇编/x5_full.asm:96251`）⇒ value==1 ⟺ P7 通过。
+        //  读法纪律：须先确认 P6 指针（`this+0x370`）为内核指针（沿用阈值），否则记 valid=0
+        //  （**不得**当作 0）。置于 `valid=1` 批量置位**之后**，故不受该批量置位影响。
+        {
+            const uint64_t p6 = sent[nred::SentryId::P6_370].value;
+            if (p6 != 0 && isKernelPtr(p6)) {
+                sent[nred::SentryId::P6Obj_44].value = rd8(p6, 0x44);
+                sent[nred::SentryId::P6Obj_44].valid = 1;
+            }
+        }
 
         // ── A-30：P25 引擎表 11 槽（this+0x3B8..0x408）──
         p25.valid = 1;

@@ -66,7 +66,9 @@ inline const char* wmName(const uint32_t id)
 // ── A-30：扩展口径 · 写侧指针哨兵（A-26 §4/§10，判据"字段==0 ⇒ 该条失败"）──
 //  程序序（A-26 §2）：P4<P6<P7<P8<P10<P11<P12<P13<P14<P15<P16<P17<P18<P19<P21<…<P31
 enum SentryId : uint32_t {
-    P4_20630 = 0, P6_370, P7_bit14, P8_bit15,
+    P4_20630 = 0, P6_370,
+    P6Obj_44,                        // A-34：P6 对象（`AMDHWRegisters`）`+0x44` 内部成功位（= P7 通过位）
+    P7_bit14, P8_bit15,
     P10_3B0,                         // P11 恒真，无哨兵
     P12_530,
     P13_Unreliable, P14_2F8,         // {P13,P14} 二元窗口
@@ -82,12 +84,24 @@ enum SentryId : uint32_t {
 inline uint32_t maskBit(const uint32_t n) { return 1u << (n & 7u); }
 inline uint32_t maskByteOff(const uint32_t n) { return 0x1E88 + (n >> 3); }
 
+// A-34：**唯一合法的位取样读法**——把"位号 n"严格按 §5.2 换算为
+//   位 n ⇔ byte `0x1e88+(n>>3)` 的第 `n&7` 位。
+//  ⚠ `maskBit(n)` 是**字节内**位掩码（`1u<<(n&7)`）；若与"dword 读"混用，位 n 会被误取为
+//   `byte 0x1e88`（byte0）的第 `n&7` 位 —— 即 B12 轮暴露的位掩码哨兵读法缺陷根因。
+//  ⇒ 本函数先按字节偏移读**单个 byte**（不做更宽的读），再套**字节内**掩码：位号语义同一。
+inline uint64_t maskBitAt(const uint8_t* const base, const uint32_t n)
+{
+    const uint8_t mb = *reinterpret_cast<const volatile uint8_t*>(base + maskByteOff(n));
+    return (mb & maskBit(n)) ? 1ULL : 0ULL;
+}
+
 // 哨兵名（判读输出用；与 SentryId 同序）
 inline const char* sentryName(const uint32_t id)
 {
     switch (id) {
         case SentryId::P4_20630:   return "P4+0x20630";
         case SentryId::P6_370:     return "P6+0x370";
+        case SentryId::P6Obj_44:   return "P6obj+0x44";
         case SentryId::P7_bit14:   return "P7 bit14";
         case SentryId::P8_bit15:   return "P8 bit15";
         case SentryId::P10_3B0:    return "P10+0x3B0";

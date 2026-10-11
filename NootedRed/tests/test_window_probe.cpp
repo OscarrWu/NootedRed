@@ -93,6 +93,50 @@ static void test_p5_binary_invalid() {
     printf("  PASS: P5 invalid path\n");
 }
 
+// ── A-34：位掩码读法（`nred::maskBitAt`）——端到端 + 阴性对照 + 规格一致性 ──────────
+//  合成 buffer 内的 `[0x1E88, 0x1E8C)` 4 字节即 `accel+0x1e88` 的条件结果位掩码区。
+//  换算规则（`kb/技术草案/水印与25条对齐.md` §5.2）：位 n ⇔ byte `0x1e88+(n>>3)` 的第 `n&7` 位。
+//  读法**唯一实现**在 `NRedWindowProbe.hpp`（`X5000.cpp` 快照时直接调用）⇒ 本用例与生产读法同源。
+static uint8_t gMaskBuf[0x1E90];
+
+static void test_mask_bit_read_p7_faithful() {
+    printf("▶ test_mask_bit_read_p7_faithful\n");
+    memset(gMaskBuf, 0, sizeof(gMaskBuf));
+    gMaskBuf[0x1E88] = 0xFF;   // byte0 全 1（干扰位）
+    gMaskBuf[0x1E89] = 0x40;   // byte 0x1e89 的 bit6 ⇒ 位 14（P7 → bit14）
+    assert(nred::maskBitAt(gMaskBuf, 14) == 1 && "bit14 must be byte 0x1e89 bit6");
+    printf("  PASS: bit(14)=1 from byte 0x1e89 bit6\n");
+}
+
+static void test_mask_bit_read_neg_control() {
+    printf("▶ test_mask_bit_read_neg_control\n");
+    // 阴性对照（复现 B12 轮的读法缺陷）：byte0=0xFF、byte1=0x00 ⇒ 位 14 必为 0。
+    //  若读法退回"dword 读 + maskBit(n)"：`maskBit(14)=1<<6` 落在 dword 上 ⇒ 实取 byte0 的
+    //  bit6（=1）⇒ 本断言**失败**。故本用例是"改回 bug 版即失败"的机械演示。
+    memset(gMaskBuf, 0, sizeof(gMaskBuf));
+    gMaskBuf[0x1E88] = 0xFF;
+    gMaskBuf[0x1E89] = 0x00;
+    assert(nred::maskBitAt(gMaskBuf, 14) == 0 && "byte 0x1e89==0 ⇒ bit14 must be 0 (bug 版会误报 1)");
+    printf("  PASS: bit(14)=0 (阴性对照)\n");
+}
+
+static void test_mask_bit_spec_consistency() {
+    printf("▶ test_mask_bit_spec_consistency\n");
+    // 规格一致性：n=0..31 逐位与 §5.2 的字面规则对照。字面规则在**本用例内独立写出**
+    //  （不复用 `maskBit`/`maskByteOff`）⇒ 非"自洽型假测试"。
+    memset(gMaskBuf, 0, sizeof(gMaskBuf));
+    gMaskBuf[0x1E88] = 0xA6;
+    gMaskBuf[0x1E89] = 0x5B;
+    gMaskBuf[0x1E8A] = 0xC3;
+    gMaskBuf[0x1E8B] = 0x01;
+    for (uint32_t n = 0; n < 32; ++n) {
+        const uint8_t  b    = gMaskBuf[0x1E88 + (n >> 3)];
+        const uint64_t want = (b >> (n & 7u)) & 1u;
+        assert(nred::maskBitAt(gMaskBuf, n) == want && "byte-wise read must match §5.2");
+    }
+    printf("  PASS: n=0..31 全部与 §5.2 换算规则一致\n");
+}
+
 int main() {
     printf("=== A-25 window probe offline tests ===\n");
     test_first_false_ordering();
@@ -101,6 +145,9 @@ int main() {
     test_p5_binary_both_zero();
     test_p5_binary_not_both_zero();
     test_p5_binary_invalid();
+    test_mask_bit_read_p7_faithful();
+    test_mask_bit_read_neg_control();
+    test_mask_bit_spec_consistency();
     printf("=== ALL TESTS PASSED ===\n");
     return 0;
 }
