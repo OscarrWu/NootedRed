@@ -446,6 +446,10 @@ static const UInt8 kCfgReadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41
 //  即可区分"失败在判据 ①/②"与"失败在尾段内部"。
 static const UInt8 kMode2TailPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                           0x53, 0x48, 0x83, 0xEC, 0x28, 0x45, 0x89, 0xC4, 0x49, 0x89, 0xF5, 0xC7};
+// `0x9440f`：模式 20B（全 __text 唯一命中），入口原型 `UInt32(void* a, UInt32 b, UInt32 c, void* d)`。
+//  返回 0=失败、非 0=成功。调用频率低（每槽 1 次×3-4 槽）。
+static const UInt8 kMode9440fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
+                                          0x45, 0x31, 0xE4, 0xFF, 0xCE, 0x83, 0xFE, 0x0E, 0x0F, 0x87};
 // ★ 修复（2026-09-28）：IP 发现表的 `num_base_address` 判据放宽。
 //  `0x2ab00e` 在解析 IP 表时要求 `(u8(ip+3) - 1) <= 5`（即 nba ∈ {1..6}），否则跳到失败出口
 //  `0x2ab1b5` 返回 1。RDNA3（Phoenix，780M）的 IP 表里 **hw_id 0x96 映射到 0x46 的块有 8 个基址**
@@ -1156,6 +1160,41 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
     return ret;
 }
 
+UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
+{
+    const UInt32 ret = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
+    // 只读观测：`0x9440f` 模式 20B 入口，返回 0=失败、非 0=成功。门控 `-NRedAccelLog`。
+    //  落盘复用 NRedIpProbe 同款自建文件（msgbuf ~30s 后不可用）＋ SYSLOG 双通道。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line),
+                               "9440f: slot=%llx type=%u sub=%u ret=%u\n",
+                               static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
+                               static_cast<unsigned>(b), static_cast<unsigned>(c),
+                               static_cast<unsigned>(ret));
+        if (n > 0) {
+            if (rootvnode == nullptr) {
+                NRED_TRACE("9440f-noroot");
+            } else {
+                char name[80];
+                snprintf(name, sizeof(name), "/var/log/NRedIpProbe-%llx.txt",
+                         static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
+                const int err = FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
+                if (err != 0) {
+                    snprintf(name, sizeof(name), "/var/log/NRedIpProbe-err%d.txt", err);
+                    FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
+                }
+                NvMsgBuf::dumpNow();
+            }
+        }
+        SYSLOG("HWLibs", "9440f: slot=%llx type=%u sub=%u ret=%u",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
+               static_cast<unsigned>(b), static_cast<unsigned>(c),
+               static_cast<unsigned>(ret));
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -1468,6 +1507,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode2-tail", kMode2TailPattern, nullptr, arrsize(kMode2TailPattern),
                                            0x2AB00E)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode2Tail, this->orgMode2Tail}, "mode2-tail");
+        }
+        if (const auto from = resolveProbe("mode9440f", kMode9440fPattern, nullptr, arrsize(kMode9440fPattern),
+                                           0x9440F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9440f, this->orgMode9440f}, "mode9440f");
         }
     }
 
