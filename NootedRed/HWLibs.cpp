@@ -1076,10 +1076,15 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                 pos += 8 + 4 * nba;
             }
         }
-        // ★ 自建落盘（2026-09-28 第 13 轮教训）：本函数在 ~34.8s 被调用，而 L2 的 msgbuf 环形
-        //  只覆盖到 ~26s ⇒ 关键读数根本进不了日志。这里直接把摘要写进 /var/log 下的自有文件
-        //  （每个对象一个文件，天然区分多次调用）。**必须先判 `rootvnode`**：根 FS 未挂载时写文件
-        //  会让内核线程阻塞、被 watchdog 强重启且不产生 panic 分片。
+        // ★ 深栈安全改造（2026-10-12，B25 Double fault 实证——同 wrapMode9440f）：
+        //   B25 分片栈＝`tmrInit→bringupRunToTmrInit→nredFwBringupHook→
+        //   wrapSmuInitFunctionPointerList→wrapMode9440f+0x67`；本函数（0x2ab00e，
+        //   bgm_create 模式 2 尾段）与 0x9440f 同处 TlsSwInit（FUN_000928f4）子链 ⇒
+        //   同样在 FW bringup 深栈上可达。`FileIO::writeBufferToFile`（APFS vnode 链）与
+        //   `NvMsgBuf::dumpNow`（FS 写）均为重栈耗通道（B19 根因：lilu_os_log tmp[1024]）
+        //   ⇒ 本回调内**不做任何文件系统写、不调 lilu 日志通道**。
+        //   唯一通道＝`nredTraceLine`（内存环 gTraceRing.push，零 FS、零 os_log；
+        //   由 L2 定时拍/dumpNow/panic 分片在安全时点刷盘）。
         {
             char line[256];
             const int n = snprintf(line, sizeof(line),
@@ -1094,69 +1099,26 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
                 static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
-            if (n > 0) {
-                char name[80];
-                if (rootvnode == nullptr) {
-                    // 根 FS 未挂载 ⇒ 绝不碰文件系统（会阻塞内核线程、被 watchdog 强重启）
-                    NRED_TRACE("ip-noroot");
-                } else {
-                    snprintf(name, sizeof(name), "/var/log/NRedIpProbe-%llx.txt",
-                             static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
-                    const int err = FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
-                    if (err != 0) {   // 失败 ⇒ 把错误码写进文件名，便于事后判定原因
-                        snprintf(name, sizeof(name), "/var/log/NRedIpProbe-err%d.txt", err);
-                        FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
-                    }
-                    // ★ 立即落一拍（2026-09-28 第 30 轮）：本点已验证可执行且可写盘
-                    //   （`ip:` 行与 `NRedIpProbe-*.txt` 就是证据），在此主动调用一次 NvMsgBuf
-                    //   的即时落盘，等价于"手动拍一张"，把此前累积的 msgbuf 增量（含 PP 探针
-                    //   写入的行）立刻写成文件，不依赖 1 秒周期的下一拍。
-                    NvMsgBuf::dumpNow();
-                }
-            }
+            if (n > 0) { nredTraceLine(line, n); }
         }
-        SYSLOG("HWLibs",
-               "ip: off=%x die=%x cnt=%u bad=%u b0=%x/%u b1=%x/%u ck=%04x/%04x,%04x/%04x,%04x/%04x "
-               "m=%08x,%08x ab=%llx/%llx ret=%u",
-               static_cast<unsigned>(dieOff), static_cast<unsigned>(die), static_cast<unsigned>(cnt),
-               static_cast<unsigned>(bad), static_cast<unsigned>(b0), static_cast<unsigned>(n0),
-               static_cast<unsigned>(b1), static_cast<unsigned>(n1),
-               static_cast<unsigned>(cksA), static_cast<unsigned>(u16(0x8)), static_cast<unsigned>(cksB),
-               static_cast<unsigned>(u16(0xE)), static_cast<unsigned>(cksC), static_cast<unsigned>(u16(0x1E)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o12)),
-               static_cast<unsigned>(*reinterpret_cast<const UInt32*>(p + o1C)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)), static_cast<unsigned>(ret));
-    // ─── 判据 B：64KB 表区全量转储（`-NRedAccelLog`，默认关）───────────────────────
-    //  位置：`wrapMode2Tail` 现有 IP 探针块之后，同一门控下。`b` 是 0x2ab00e 读取的 64KB 缓冲。
-    //  安全：先判 `rootvnode`（空 ⇒ 只写内存环哨兵行 `tbl-noroot`，绝不碰 FS——同 `ip-noroot` 政策）。
-    //  写入：分配 64KB 缓冲（非栈上），拷贝源数据，单次写入（FileIO 每次调用完整 open/write/close，
-    //  O_APPEND 语义在单次调用内无意义；一次性写入更可靠、也避免 16 次 vnode_open 开销）。
-    //  哨兵：无论成败输出 `tbl-dump: buf=%llx sz=65536 err=%d`（err=-1 表 rootvnode 空），
-    //   保证"门控真⇒必有 tbl-dump 行"的双向自证。成功后调 `NvMsgBuf::dumpNow()` 拍点。
-    {
-        constexpr size_t kTblSize = 65536;
-        const UInt64 aVal = reinterpret_cast<UInt64>(a);
-        int err = -1;
-        if (rootvnode != nullptr) {
-            void* buf = IOMalloc(kTblSize);
-            if (buf != nullptr) {
-                __builtin_memcpy(buf, b, kTblSize);
-                char name[80];
-                snprintf(name, sizeof(name), "/var/log/NRedTblDump-%llx.bin",
-                         static_cast<unsigned long long>(aVal));
-                err = FileIO::writeBufferToFile(name, buf, kTblSize);
-                IOFree(buf, kTblSize);
-            } else {
-                err = ENOMEM;
-            }
+        // ⚠️ SYSLOG（ip: 行）已移除（2026-10-12）：lilu_os_log 内部 `char tmp[1024]` 在
+        //   FW bringup 深栈上会栈溢出（B19 根因）；本回调只写内存环（上方 nredTraceLine）。
+        // ─── 判据 B：64KB 表区转储哨兵（`-NRedAccelLog`，默认关）──────────────────────
+        //  位置：`wrapMode2Tail` 现有 IP 探针块之后，同一门控下。`b` 是 0x2ab00e 读取的 64KB 缓冲。
+        //  ⚠️ 深栈安全改造（2026-10-12）：原实现 IOMalloc(64KB)＋`FileIO::writeBufferToFile`
+        //   （/var/log/NRedTblDump-*.bin）＋`NvMsgBuf::dumpNow()` 均为重栈耗通道，在 FW bringup
+        //   深栈上会触栈保护页（B19/B25 Double fault 同根因）⇒ 本回调**不再写盘**，只发哨兵行
+        //   （内存环）；全量表区转储如需恢复须移到安全时点（如 L2 定时拍）再落盘。
+        //  哨兵：无论成败输出 `tbl-dump: buf=%llx sz=65536 err=%d`（err=-2 表深栈安全跳过），
+        //   保证"门控真⇒必有 tbl-dump 行"的双向自证。
+        {
+            const UInt64 aVal = reinterpret_cast<UInt64>(a);
+            char tline[128];
+            const int tn = snprintf(tline, sizeof(tline),
+                                    "tbl-dump: buf=%llx sz=65536 err=-2\n",
+                                    static_cast<unsigned long long>(aVal));
+            if (tn > 0) { nredTraceLine(tline, tn); }
         }
-        NRED_TRACE("tbl-dump: buf=%llx sz=65536 err=%d",
-                   static_cast<unsigned long long>(aVal), err);
-        if (err == 0) {
-            NvMsgBuf::dumpNow();
-        }
-    }
     }
     return ret;
 }
@@ -1165,7 +1127,16 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
 {
     const UInt32 ret = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
     // 只读观测：`0x9440f` 模式 20B 入口，返回 0=失败、非 0=成功。门控 `-NRedAccelLog`。
-    //  落盘复用 NRedIpProbe 同款自建文件（msgbuf ~30s 后不可用）＋ SYSLOG 双通道。
+    //
+    // ⚠️ 深栈安全约束（2026-10-12，B25 Double fault 实证）：
+    //   B25 的 NVRAM 分片栈＝ `tmrInit→bringupRunToTmrInit→nredFwBringupHook→
+    //   wrapSmuInitFunctionPointerList→wrapMode9440f+0x67` ⇒ 崩在本回调的读数代码内。
+    //   根因同 B19（`kb/技术草案/B19-DoubleFault归因-日志通道-os_log.md`）：FW bringup 深栈上
+    //   `lilu_os_log`（内部 `char tmp[1024]`）等重栈耗通道 ⇒ 触栈保护页 ⇒ Double fault。
+    //   `78a1b25` 只门控了 `NRED_TRACE` 的 SYSLOG 子通道，**未覆盖**本回调直接调用的
+    //   `SYSLOG` / `FileIO::writeBufferToFile` / `NvMsgBuf::dumpNow`。
+    // ⇒ 本回调内**不做任何文件系统写、不调 lilu 日志通道**；唯一输出通道＝`nredTraceLine`
+    //   （内存环，仅 `gTraceRing.push`，无 FS、无 os_log；由 L2 定时拍在安全时点刷盘）。
     if (checkKernelArgument("-NRedAccelLog")) {
         char line[128];
         const int n = snprintf(line, sizeof(line),
@@ -1174,29 +1145,12 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                                static_cast<unsigned>(b), static_cast<unsigned>(c),
                                static_cast<unsigned>(ret));
         if (n > 0) {
-            // ★ 内存环写入（2026-10-12）：与 panic 形态解耦——不管崩在哪/崩不崩，
-            //   L2 周期拍（NRedObserve-*）都会把本行带出（B6–B22 每轮稳定 88 文件）。
-            //   与 NRED_TRACE 同款 nredTraceLine 用法；line 已含 '\n'，n 为长度。
+            // ★ 唯一通道：内存环写入（2026-10-12）。与 panic 形态解耦 —— 不管崩在哪/崩不崩，
+            //   L2 周期拍（NRedObserve-*）或 dumpNow/panic 分片在**安全时点**带出本行。
+            //   深栈上本调用只做 `gTraceRing.push`，零 FS、零 os_log、零大栈缓冲。
             nredTraceLine(line, n);
-            if (rootvnode == nullptr) {
-                NRED_TRACE("9440f-noroot");
-            } else {
-                char name[80];
-                snprintf(name, sizeof(name), "/var/log/NRedIpProbe-%llx.txt",
-                         static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)));
-                const int err = FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
-                if (err != 0) {
-                    snprintf(name, sizeof(name), "/var/log/NRedIpProbe-err%d.txt", err);
-                    FileIO::writeBufferToFile(name, line, static_cast<size_t>(n));
-                }
-                NvMsgBuf::dumpNow();
-            }
         }
-        SYSLOG("HWLibs", "9440f: slot=%llx type=%u sub=%u ret=%u",
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
-               static_cast<unsigned>(b), static_cast<unsigned>(c),
-               static_cast<unsigned>(ret));
-    }
+     }
     return ret;
 }
 
