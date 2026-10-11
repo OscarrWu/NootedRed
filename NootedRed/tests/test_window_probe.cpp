@@ -137,6 +137,54 @@ static void test_mask_bit_spec_consistency() {
     printf("  PASS: n=0..31 全部与 §5.2 换算规则一致\n");
 }
 
+// ── A-41 对照 ①：P13（bit18 无忠实位）不得抢占 firstFalse ──────────────────────────
+static void test_p13_not_first_false() {
+    printf("▶ test_p13_not_first_false\n");
+    nred::SentryVal vals[nred::SentryId::SentryCount];
+    for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) {
+        vals[i].id    = i;
+        vals[i].value = 1;
+        vals[i].valid = 1;
+    }
+    vals[nred::SentryId::P13_Unreliable].value = 0;   // 唯一为 0 的项，但无忠实位 ⇒ 不得报
+    const nred::WindowResult r = nred::findFirstFalseSentry(vals, nred::SentryId::SentryCount);
+    assert(r.firstFalseId != nred::SentryId::P13_Unreliable && "P13 must not be firstFalse");
+    assert(r.firstFalseId == nred::SentryId::SentryCount && "P13 excluded ⇒ no eligible false");
+    assert(r.firstFalseValid == 0 && "no eligible false ⇒ valid 0");
+    assert(r.readCount == nred::SentryId::SentryCount && "P13 still counted as read");
+    // 反面对照：P13 之后合格的项为 0 ⇒ 必须报那一项（而不是 P13）
+    vals[nred::SentryId::P17_bit19].value = 0;
+    const nred::WindowResult r2 = nred::findFirstFalseSentry(vals, nred::SentryId::SentryCount);
+    assert(r2.firstFalseId == nred::SentryId::P17_bit19 && "next eligible false must win");
+    printf("  PASS: P13 不参与 firstFalse（读数仍计入 readCount）\n");
+}
+
+// ── A-41 对照 ②：掩码读**加速器**侧（hwInterface 侧同偏移无信号）────────────────
+static uint8_t gSelfBuf[0x1E90];    // hwInterface 侧（合成：全 0）
+static uint8_t gAccelBuf[0x1E90];   // 加速器侧（合成：带目标位）
+static uint64_t gHandlerBuf[4];     // 合成 handler：+0x10 存"加速器指针"
+
+static void test_mask_base_is_accel_not_self() {
+    printf("▶ test_mask_base_is_accel_not_self\n");
+    memset(gSelfBuf, 0, sizeof(gSelfBuf));
+    memset(gAccelBuf, 0, sizeof(gAccelBuf));
+    gAccelBuf[0x1E89] = 0x40;                     // 位 14（P7 → bit14）只出现在加速器侧
+    gHandlerBuf[0] = 0; gHandlerBuf[1] = 0;
+    gHandlerBuf[2] = reinterpret_cast<uint64_t>(gAccelBuf);   // handler+0x10 ≡ accel（A-26 §5.1）
+    gHandlerBuf[3] = 0;
+    assert(nred::accelFromHandler(reinterpret_cast<uint64_t>(gHandlerBuf))
+           == reinterpret_cast<uint64_t>(gAccelBuf) && "handler+0x10 must be the accel");
+    uint64_t v = 0;
+    assert(nred::maskBitSample(gAccelBuf, 1u, 14, &v) == 1 && v == 1 && "bit must come from accel");
+    uint64_t vSelf = 0;
+    assert(nred::maskBitSample(gSelfBuf, 1u, 14, &vSelf) == 1 && vSelf == 0
+           && "hwInterface side has no signal（旧写法 maskBase=s 即读此处）");
+    // 基址非法 ⇒ 不取样（调用方须记 valid=0，不得当"读到 0"）
+    uint64_t vBad = 9;
+    assert(nred::maskBitSample(gAccelBuf, 0u, 14, &vBad) == 0 && vBad == 9 && "invalid base ⇒ no sample");
+    printf("  PASS: 位取样走 accel 侧；基址非法不出数\n");
+}
+
 int main() {
     printf("=== A-25 window probe offline tests ===\n");
     test_first_false_ordering();
@@ -148,6 +196,8 @@ int main() {
     test_mask_bit_read_p7_faithful();
     test_mask_bit_read_neg_control();
     test_mask_bit_spec_consistency();
+    test_p13_not_first_false();
+    test_mask_base_is_accel_not_self();
     printf("=== ALL TESTS PASSED ===\n");
     return 0;
 }

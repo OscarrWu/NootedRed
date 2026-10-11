@@ -97,6 +97,29 @@ inline uint64_t maskBitAt(const volatile uint8_t* const base, const uint32_t n)
     return (mb & maskBit(n)) ? 1ULL : 0ULL;
 }
 
+// ── A-41：掩码所在对象的**对象基址**取法（可用户态测试）──
+//  依据 A-26 §5.1：`AMDHWHandler::init` 把加速器对象存入 `handler+0x10`（Z `0x4bc5d`），
+//  掩码取子（kc `0x4b835d4`）返回 `*(handler+0x10) + 0x1e88` ⇒ **掩码在加速器对象上**，
+//  而 `AMDHardware::init` 的 `this`（`self`）是 **hwInterface**（另一对象，其 `0x1e88` 区无写者）。
+//  @param handler `AMDHardware::init` 第 3 参（`IAMDHWHandler*`）的数值；调用方须先判定其为内核指针
+inline uint64_t accelFromHandler(const uint64_t handler)
+{
+    const volatile uint8_t* const p = reinterpret_cast<const volatile uint8_t*>(handler);
+    return *reinterpret_cast<const volatile uint64_t*>(p + 0x10);
+}
+
+// ── A-41：位取样（**带基址有效性纪律**）──
+//  基址非法（`accelValid==0` 或基址为空）⇒ 返回 0 且**不改写** `*valueOut`
+//  ⇒ 调用方须把该哨兵记为 `valid=0`（"不可判"），**不得**当作"读到 0"（否则会被
+//  first-false 规则误判为失败）。
+inline uint32_t maskBitSample(const volatile uint8_t* const accelBase, const uint32_t accelValid,
+                              const uint32_t n, uint64_t* const valueOut)
+{
+    if (accelValid == 0 || accelBase == nullptr) { return 0; }
+    if (valueOut != nullptr) { *valueOut = maskBitAt(accelBase, n); }
+    return 1;
+}
+
 // 哨兵名（判读输出用；与 SentryId 同序）
 inline const char* sentryName(const uint32_t id)
 {
@@ -181,7 +204,12 @@ inline WindowResult findFirstFalseSentry(const SentryVal* const vals, const uint
     for (uint32_t i = 0; i < n; ++i) {
         if (vals[i].valid) {
             ++out.readCount;
-            if (vals[i].value == 0 && out.firstFalseId == SentryId::SentryCount) {
+            // A-41：`P13_Unreliable`（bit18）**无忠实语义**——A-26 §8.7 只发现"TTL 失败"诊断支的
+            //  清零写、未发现置 1 支 ⇒ 位读法修好后它恒 0，若参与扫描会长期抢占 firstFalse
+            //  （系统性假阳性）⇒ 从"第一个为假"的候选集中排除；其读数仍在逐行输出中保留，
+            //  `readCount` 亦照计。
+            const bool eligible = (vals[i].id != SentryId::P13_Unreliable);
+            if (eligible && vals[i].value == 0 && out.firstFalseId == SentryId::SentryCount) {
                 out.firstFalseId    = vals[i].id;
                 out.firstFalseValid = 1;
             }
