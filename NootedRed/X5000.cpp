@@ -1949,6 +1949,7 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
 
     const UInt64 s = reinterpret_cast<UInt64>(self);
     const bool sValid = isKernelPtr(s);
+    uint32_t mask32 = 0;   // A-38 修 3：`accel+0x1e88` 的 4 字节条件结果位掩码真值（仅 sValid 时读出）
     nred::WmVal wms[nred::WmCount];
     nred::SentryVal sent[nred::SentryId::SentryCount];
     nred::P25Slots p25{};
@@ -1963,61 +1964,74 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         wms[i].valid = 0;
     }
     if (sValid) {
-        wms[nred::WmP3_2FC].value  = rd8(s, 0x2FC);
-        wms[nred::WmP3_2FE].value  = rd8(s, 0x2FE);
-        wms[nred::WmP3_300].value  = rd8(s, 0x300);
-        wms[nred::WmP3_302].value  = rd8(s, 0x302);
-        wms[nred::WmP3_30D].value  = rd8(s, 0x30D);
-        wms[nred::WmP5_338].value  = rd64(s, 0x338);
-        wms[nred::WmP5_340].value  = rd64(s, 0x340);
-        wms[nred::WmP12_528].value = rd64(s, 0x528);
-        wms[nred::WmP12_530].value = rd64(s, 0x530);
-        wms[nred::WmP15_20810].value = rd64(s, 0x20810);
-        wms[nred::WmP25_3B8].value = rd64(s, 0x3B8);
-        wms[nred::WmAccel_1A38].value = rd64(s, 0x1A38);
-        for (uint32_t i = 0; i < nred::WmCount; ++i) { wms[i].valid = 1; }
+        const volatile uint8_t* const maskBase = reinterpret_cast<const volatile uint8_t*>(s);
+
+        // ── A-38 修 2：逐项"赋值即置 valid"（取消 `for(i) valid = 1` 批量置位）──
+        //  批量置位会把"从未赋值"的项伪装成"已读到 0"——即 A-34 上报的 `WmAccel_1E89B0` 缺陷根因。
+        auto putWm   = [](nred::WmVal& dst, const uint64_t v)     { dst.value = v; dst.valid = 1; };
+        auto putSent = [](nred::SentryVal& dst, const uint64_t v) { dst.value = v; dst.valid = 1; };
+
+        // ── A-25 水印（this 相对偏移；读法依既有 rd64/rd8 约定）──
+        putWm(wms[nred::WmP3_2FC], rd8(s, 0x2FC));
+        putWm(wms[nred::WmP3_2FE], rd8(s, 0x2FE));
+        putWm(wms[nred::WmP3_300], rd8(s, 0x300));
+        putWm(wms[nred::WmP3_302], rd8(s, 0x302));
+        putWm(wms[nred::WmP3_30D], rd8(s, 0x30D));
+        putWm(wms[nred::WmP5_338], rd64(s, 0x338));
+        putWm(wms[nred::WmP5_340], rd64(s, 0x340));
+        putWm(wms[nred::WmP12_528], rd64(s, 0x528));
+        putWm(wms[nred::WmP12_530], rd64(s, 0x530));
+        putWm(wms[nred::WmP15_20810], rd64(s, 0x20810));
+        putWm(wms[nred::WmP25_3B8], rd64(s, 0x3B8));
+        putWm(wms[nred::WmAccel_1A38], rd64(s, 0x1A38));
+        // A-38 修 1：`accel+0x1e89` bit0 = `createHWInterface` 成功印记（A-26 §4 表第 7 项：
+        //  置位 ⟺ `AMDGFX9Hardware::init` 返回真 ⟺ 31 条全过）。位 8 ⇔ byte `0x1e88+(8>>3)`
+        //  = 0x1e89 的第 `8&7` = 0 位 ⇒ 与 A-26 原文**逐字**一致（原实现漏赋值）。
+        putWm(wms[nred::WmAccel_1E89B0], nred::maskBitAt(maskBase, 8));
+
+        // ── A-38 修 3：`win-probe-E` 的真实 4 字节掩码（小端逐 byte 读，`volatile`）──
+        mask32 = (uint32_t)maskBase[0x1E88] | ((uint32_t)maskBase[0x1E89] << 8) |
+                 ((uint32_t)maskBase[0x1E8A] << 16) | ((uint32_t)maskBase[0x1E8B] << 24);
 
         // ── A-30：扩展口径 · 写侧哨兵（13 指针字段 + 位掩码统一解包）──
         //  读法：指针字段 rd64；位掩码**按位读 byte**（A-34 修正）——位 n ⇔ byte 0x1E88+(n>>3)
         //  的第 n&7 位（A-26 §5.2）。原实现用 **dword 读**再套 `maskBit(n)`
         //  （**字节内**位掩码）⇒ 位 n 被误取为 byte0 的 bit(n&7)（B12 轮实测暴露）。
         //  现统一走 `nred::maskBitAt()`（唯一实现，在 `NRedWindowProbe.hpp`，用户态可测）。
-        const uint8_t* const maskBase = reinterpret_cast<const uint8_t*>(s);
         auto bit = [maskBase](const uint32_t n) -> uint64_t {
             return nred::maskBitAt(maskBase, n);
         };
         // 哨兵值（指针字段直接读数；位掩码解 bit）
-        sent[nred::SentryId::P4_20630].value   = rd64(s, 0x20630);
-        sent[nred::SentryId::P6_370].value     = rd64(s, 0x370);
-        sent[nred::SentryId::P7_bit14].value   = bit(14);
-        sent[nred::SentryId::P8_bit15].value   = bit(15);
-        sent[nred::SentryId::P10_3B0].value    = rd64(s, 0x3B0);
-        sent[nred::SentryId::P12_530].value    = rd64(s, 0x530);
-        sent[nred::SentryId::P13_Unreliable].value = bit(18);   // 不可靠（§8.7）
-        sent[nred::SentryId::P14_2F8].value    = rd64(s, 0x2F8);
-        sent[nred::SentryId::P16_378].value    = rd64(s, 0x378);
-        sent[nred::SentryId::P17_bit19].value  = bit(19);
-        sent[nred::SentryId::P18_380].value    = rd64(s, 0x380);
-        sent[nred::SentryId::P19_bit20].value  = bit(20);
-        sent[nred::SentryId::P21_388].value    = rd64(s, 0x388);
-        sent[nred::SentryId::P22_bit21].value  = bit(21);
-        sent[nred::SentryId::P23_518].value    = rd64(s, 0x518);
-        sent[nred::SentryId::P24_205F8].value  = rd64(s, 0x205F8);
-        sent[nred::SentryId::P25_bit22].value  = bit(22);
-        sent[nred::SentryId::P26_bit23].value  = bit(23);
-        sent[nred::SentryId::P27_3A0].value    = rd64(s, 0x3A0);
-        sent[nred::SentryId::P28_bit24].value  = bit(24);
-        sent[nred::SentryId::P29_368].value    = rd64(s, 0x368);
-        sent[nred::SentryId::P30_205C8].value  = rd64(s, 0x205C8);
-        sent[nred::SentryId::P31_205D0].value  = rd64(s, 0x205D0);
-        for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) { sent[i].valid = 1; }
+        putSent(sent[nred::SentryId::P4_20630], rd64(s, 0x20630));
+        putSent(sent[nred::SentryId::P6_370], rd64(s, 0x370));
+        putSent(sent[nred::SentryId::P7_bit14], bit(14));
+        putSent(sent[nred::SentryId::P8_bit15], bit(15));
+        putSent(sent[nred::SentryId::P10_3B0], rd64(s, 0x3B0));
+        putSent(sent[nred::SentryId::P12_530], rd64(s, 0x530));
+        putSent(sent[nred::SentryId::P13_Unreliable], bit(18));   // 不可靠（§8.7）
+        putSent(sent[nred::SentryId::P14_2F8], rd64(s, 0x2F8));
+        putSent(sent[nred::SentryId::P16_378], rd64(s, 0x378));
+        putSent(sent[nred::SentryId::P17_bit19], bit(19));
+        putSent(sent[nred::SentryId::P18_380], rd64(s, 0x380));
+        putSent(sent[nred::SentryId::P19_bit20], bit(20));
+        putSent(sent[nred::SentryId::P21_388], rd64(s, 0x388));
+        putSent(sent[nred::SentryId::P22_bit21], bit(21));
+        putSent(sent[nred::SentryId::P23_518], rd64(s, 0x518));
+        putSent(sent[nred::SentryId::P24_205F8], rd64(s, 0x205F8));
+        putSent(sent[nred::SentryId::P25_bit22], bit(22));
+        putSent(sent[nred::SentryId::P26_bit23], bit(23));
+        putSent(sent[nred::SentryId::P27_3A0], rd64(s, 0x3A0));
+        putSent(sent[nred::SentryId::P28_bit24], bit(24));
+        putSent(sent[nred::SentryId::P29_368], rd64(s, 0x368));
+        putSent(sent[nred::SentryId::P30_205C8], rd64(s, 0x205C8));
+        putSent(sent[nred::SentryId::P31_205D0], rd64(s, 0x205D0));
 
         // ── A-34：P6 对象的忠实哨兵（`AMDHWRegisters` 对象 `+0x44` 内部成功位）──
         //  写点 Z `0x554b8` = kc `0x4b8c4b8`：`movb $0x1,0x44(%r14)`，**只在
         //  `AMDHWRegisters::init` 的成功支**执行（该函数全部失败支都跳过它，
         //  `kb/序列数据/反汇编/x5_full.asm:96251`）⇒ value==1 ⟺ P7 通过。
         //  读法纪律：须先确认 P6 指针（`this+0x370`）为内核指针（沿用阈值），否则记 valid=0
-        //  （**不得**当作 0）。置于 `valid=1` 批量置位**之后**，故不受该批量置位影响。
+        //  （**不得**当作 0）；本项自置 valid，不经 `putSent`（A-38 修 2 同口径）。
         {
             const uint64_t p6 = sent[nred::SentryId::P6_370].value;
             if (p6 != 0 && isKernelPtr(p6)) {
@@ -2037,7 +2051,9 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
     const uint32_t p25verdict = nred::evalP25Slots(p25, static_cast<uint32_t>(sent[nred::SentryId::P25_bit22].value));
 
     // ── A-30 输出（条级判据）──
-    NRED_TRACE("win-probe-E: mask32=0x%08X", (unsigned)0);   // 占位（掩码在逐行输出）
+    // A-38 修 3：`mask32` = `accel+0x1e88` 的 4 字节真实掩码（`sValid` 时小端逐 byte 读出；
+    //  `self` 非法 ⇒ 保持 0，其"是否读到"由 `win-probe:` 各行的 valid 承担）。
+    NRED_TRACE("win-probe-E: mask32=0x%08X", (unsigned)mask32);
     NRED_TRACE("win-probe-S: firstFalse=%u(%s) read=%u unknown=%u",
                ws.firstFalseId, nred::sentryName(ws.firstFalseId), ws.readCount, ws.unknownCount);
     for (uint32_t i = 0; i < nred::SentryId::SentryCount; ++i) {

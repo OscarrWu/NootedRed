@@ -88,10 +88,12 @@ inline uint32_t maskByteOff(const uint32_t n) { return 0x1E88 + (n >> 3); }
 //   位 n ⇔ byte `0x1e88+(n>>3)` 的第 `n&7` 位。
 //  ⚠ `maskBit(n)` 是**字节内**位掩码（`1u<<(n&7)`）；若与"dword 读"混用，位 n 会被误取为
 //   `byte 0x1e88`（byte0）的第 `n&7` 位 —— 即 B12 轮暴露的位掩码哨兵读法缺陷根因。
-//  ⇒ 本函数先按字节偏移读**单个 byte**（不做更宽的读），再套**字节内**掩码：位号语义同一。
-inline uint64_t maskBitAt(const uint8_t* const base, const uint32_t n)
+//  ⇒ 本函数先按字节偏移读**单个 byte**（不做更宽的读，`volatile` 读 —— A-38 起参数即
+//  `const volatile uint8_t*`，故经本函数的每一次取样都是 volatile 读），再套**字节内**掩码：
+//  位号语义同一。
+inline uint64_t maskBitAt(const volatile uint8_t* const base, const uint32_t n)
 {
-    const uint8_t mb = *reinterpret_cast<const volatile uint8_t*>(base + maskByteOff(n));
+    const uint8_t mb = base[maskByteOff(n)];
     return (mb & maskBit(n)) ? 1ULL : 0ULL;
 }
 
