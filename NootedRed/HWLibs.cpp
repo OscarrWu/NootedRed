@@ -2582,10 +2582,15 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     // ─── A-1（2026-10-10）：固件层第一增量（C2 挂点＝本函数出口；门控 `-NRedFwBringup` 默认关）──
     //  门控假 ⇒ 零 MMIO、零 bringup 调用（本块不执行）。
     //  门控真 ⇒ 早于 S4（AMDGFX9DCN314Display::init 显示时钟）执行 fw::nredFwBringupHook(ctx)：
-    //    构造 BringupCtx/RegSinkKernel（SEG1 基准、RegSink 抽象、IODelay 注入）→ bringupRun → NRED_TRACE；
+    //    构造 BringupCtx/RegSinkKernel（SEG0 基准、RegSink 抽象、IODelay 注入）→ bringupRun → NRED_TRACE；
     //    并置有效 smuCtxCache（I12）⇒ makeSmuChannel 在 S4 不再因 smuContext()==null 返 false。
+    //  段基址语义（G4/C-1）：本 bringup 的 MP0/MP1 邮箱取 **SEG0**（`kMpSeg0Base`；A-2 依真机实证
+    //    「SEG0 三条有效／SEG1 三条全超时」选定），与 `RegAddr.hpp::smnAddr` 的 SEG1 兼容默认**语义
+    //    不同**（SEG1 是 Linux BASE_IDX=1 的理论通道，受 `mc_access_enable` 未使能所限）；SEG0/SEG1
+    //    孰为真通道（R6/U4）仍无定论 ⇒ 此处只记录当前取值，不断言哪条正确。
     if (singleton().smu13FwBringupEnabled) {
         fw::nredFwBringupHook(ctx);
+        singleton().smuCtxCache = ctx;   // I12：置有效 Apple SMU ctx（早于 S4；门控真才执行）
     }
     // D-3 只读仪表（门控 `-NRedSegReadout`，默认关）：C2 出口执行只读仪表（早于 S4、不写、不发送）。
     if (singleton().smu13SegReadoutEnabled) {
