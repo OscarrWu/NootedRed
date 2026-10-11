@@ -57,6 +57,9 @@ extern UInt64 gNRedPpSmuOverlayCalls;
 nred::TraceSafe gTraceSafe;
 // A-22：早期 trace 内存环形缓冲（静态，无分配；早期路径只 push，不写文件）
 nred::TraceRing gTraceRing;
+// B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
+//  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
+bool gNredTraceSyslogMuted = false;
 
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的

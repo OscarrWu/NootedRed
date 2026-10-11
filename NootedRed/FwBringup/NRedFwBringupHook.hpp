@@ -71,8 +71,19 @@ static inline void hookDelayUs(void* /*ctx*/, const uint32_t us)
 
 // ── 薄封装本体 ─────────────────────────────────────────────────────────────────────
 // @param appleCtx Apple SMU 上下文（I12 的 `smuCtxCache` 置值由**挂点**完成；本函数只做 bringup）。
+// B19：bringup 期间静音 `NRED_TRACE` 的 SYSLOG 通道（深栈 + `lilu_os_log` 1KB 栈缓冲 ⇒ Double fault，
+//  见 HWLibs.hpp 中 `gNredTraceSyslogMuted` 声明处根因注释）。RAII ⇒ 覆盖**所有** return 分支；
+//  退出时恢复进入前的值（嵌套安全）。trace 行仍入内存环，由既有安全时点刷盘 ⇒ 无诊断损失。
+struct NredSyslogMuteGuard {
+    bool prev;
+    NredSyslogMuteGuard() : prev(gNredTraceSyslogMuted) { gNredTraceSyslogMuted = true; }
+    ~NredSyslogMuteGuard() { gNredTraceSyslogMuted = prev; }
+};
+
 inline void nredFwBringupHook(void* const /*appleCtx*/)
 {
+    const NredSyslogMuteGuard _syslogMute;   // B19：本 hook 作用域内静音 SYSLOG（RAII，随各 return 复位）
+
     // I3：RMMIO 前置判据（hwLateInit 映射 BAR5；未映射则跳过，不写任何寄存器）。
     if (!NRed::singleton().hasRmmio()) {
         NRED_TRACE("bringup: skipped (rmmio not mapped)");

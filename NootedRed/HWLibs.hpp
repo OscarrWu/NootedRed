@@ -28,9 +28,18 @@ void nredTraceLine(char* const buf, const int n);
 int nredTraceFlush();
 // A-28：秒级标签版本（由 L2 周期拍 `dumpTick` 在 stBusy 保护区内调用；文件名与首行带 `sec=`）
 int nredTraceFlush(int secTag);
+// B19（2026-10-11）：早期 bringup 期间**静音** `NRED_TRACE` 的 SYSLOG（内核日志）通道。
+//  根因（B19 Double-fault 归因）：bringup 挂在深栈上执行，而 `NRED_TRACE` 每条都先调 SYSLOG ⇒
+//  `lilu_os_log`（内含 1 KB 栈缓冲）→ `IOLog` → `__os_log_internal` ⇒ 深栈 + 大栈耗 ⇒ 触栈保护页
+//  ⇒ Double fault（CR2 = RSP−8）。A-22 当时只把**落盘通道**改为内存环，SYSLOG 通道未门控，
+//  本标志补上这一遗留通道。置位时 `NRED_TRACE` **跳过 SYSLOG**、只写内存环 ⇒ 由既有安全时点
+//  `nredTraceFlush`（NvMsgBuf 周期拍 `dumpTick` / `dumpNow` / panic 分片路径）刷盘 ⇒ 无诊断损失。
+//  置位/复位点＝`fw::nredFwBringupHook` 入口 RAII 守卫（仅 `-NRedFwBringup` 打开时进入该函数）。
+//  **默认 false ⇒ 非 bringup 路径行为逐字不变**（门控关时该分支永不成立）。
+extern bool gNredTraceSyslogMuted;
 #define NRED_TRACE(fmt, ...)                                                                        \
     do {                                                                                            \
-        SYSLOG("HWLibs", fmt, ##__VA_ARGS__);                                                       \
+        if (!gNredTraceSyslogMuted) { SYSLOG("HWLibs", fmt, ##__VA_ARGS__); }                       \
         char _tb[256];                                                                              \
         const int _tn = snprintf(_tb, sizeof(_tb), fmt "\n", ##__VA_ARGS__);                        \
         nredTraceLine(_tb, _tn);                                                                    \
