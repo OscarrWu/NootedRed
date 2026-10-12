@@ -450,6 +450,11 @@ static const UInt8 kMode2TailPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  返回 0=失败、非 0=成功。调用频率低（每槽 1 次×3-4 槽）。
 static const UInt8 kMode9440fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
                                           0x45, 0x31, 0xE4, 0xFF, 0xCE, 0x83, 0xFE, 0x0E, 0x0F, 0x87};
+// `0x96c4c`：回退路径（type3 槽 +0x30 虚槽 callee；发现块填充的**回退成败**——F0/F1 直接上游）。
+//  模式/wrapper 均为历史实现（commit 0b70bb2，B31 memdump 已证真机模式一致），本卡单变量恢复。
+static const UInt8 kMode96c4cPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
+                                          0x48, 0x81, 0xEC, 0x80, 0x02, 0x00, 0x00, 0x49, 0x89, 0xD4, 0x49,
+                                          0x89, 0xFF, 0x89, 0x75, 0xDC};
 // ★ 修复（2026-09-28）：IP 发现表的 `num_base_address` 判据放宽。
 //  `0x2ab00e` 在解析 IP 表时要求 `(u8(ip+3) - 1) <= 5`（即 nba ∈ {1..6}），否则跳到失败出口
 //  `0x2ab1b5` 返回 1。RDNA3（Phoenix，780M）的 IP 表里 **hw_id 0x96 映射到 0x46 的块有 8 个基址**
@@ -1154,6 +1159,24 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     return ret;
 }
 
+// ─── (8,0) 失败点读点（2026-10-12 技术经理终审；深栈安全——只走 nredTraceLine）────────
+//  ⚠️ 本卡单变量＝仅恢复 H-96c4c 一个读点（B31 memdump 已证真机模式一致；其余读点
+//  9e505/6430f/6720b/956b8/9e757 本轮不加，后续逐轮单变量）。
+
+// H-96c4c：回退路径读点（type3 槽 +0x30 虚槽 callee）。行 `96c4c: hw=%X ret=%u`。
+//  hw = 入参 hw_id（发现块块 hw_id，0x956b8 循环传入）；ret = 返回值（1=填充成功/0=失败）。
+//  覆盖函数两个 return 出口（成功填表 return 1 / 失败 return 0，统一在出口读）。
+UInt32 X5000HWLibs::wrapMode96c4c(void* const obj, UInt32 const hw, void* const out)
+{
+    const UInt32 ret = FunctionCast(wrapMode96c4c, singleton().orgMode96c4c)(obj, hw, out);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "96c4c: hw=%X ret=%u\n", hw, ret);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -1510,6 +1533,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode9440f", kMode9440fPattern, nullptr, arrsize(kMode9440fPattern),
                                            0x9440F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9440f, this->orgMode9440f}, "mode9440f");
+        }
+        if (const auto from = resolveProbe("mode96c4c", kMode96c4cPattern, nullptr, arrsize(kMode96c4cPattern),
+                                           0x96C4C)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode96c4c, this->orgMode96c4c}, "mode96c4c");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────

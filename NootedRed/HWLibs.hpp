@@ -108,6 +108,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgCfgRead{0};      // 0x2ab398（写后读回，回填结构）
     mach_vm_address_t                                            orgMode2Tail{0};    // 0x2ab00e（模式 2 的尾段；二值判定它是否被调用/返回什么）
     mach_vm_address_t                                            orgMode9440f{0};    // 0x9440f（模式 20B 入口；返回 0=失败/非 0=成功）
+    mach_vm_address_t                                            orgMode96c4c{0};    // 0x96c4c（发现块回退路径；F0/F1 上游）
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
     CAILResult (*smuCosWaitFor)(void* ctx, CosWaitForFunc* func, void* handle, UInt32 duration){nullptr};
@@ -159,6 +160,7 @@ private:
     static UInt32 wrapCfgRead(void* obj, UInt32 id, UInt64* out, UInt32* flag);
     static UInt32 wrapMode2Tail(void* a, void* b, void* c, void* d, void* e);
     static UInt32 wrapMode9440f(void* a, UInt32 b, UInt32 c, void* d);
+    static UInt32 wrapMode96c4c(void* obj, UInt32 hw, void* out);
     CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
     static CAILResult smuInternalSwInit(void* ctx, void* input, AMDSMUSWInitOutput* output);
