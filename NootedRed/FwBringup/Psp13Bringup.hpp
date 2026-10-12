@@ -465,9 +465,10 @@ inline void prepTmrCmd(GfxCmdResp* cmd,
     cmd->buf_size        = kCmdBufSize;
     cmd->buf_version     = 1;
     cmd->cmd_id          = GFX_CMD_ID_SETUP_TMR;
-    // buf_phy_addr_lo/hi
-    cmd->cmd_payload[0]  = static_cast<uint32_t>(tmr_mc_addr & 0xFFFFFFFF);
-    cmd->cmd_payload[1]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
+    // buf_phy_addr_lo/hi —— β-1 单变量：借用 Linux 同机实测 PSP TMR 地址（固件预留 carve-out）
+    constexpr uint64_t kPspTmrBorrowedAddr = 0x80f8000000ULL;
+    cmd->cmd_payload[0]  = static_cast<uint32_t>(kPspTmrBorrowedAddr & 0xFFFFFFFF);
+    cmd->cmd_payload[1]  = static_cast<uint32_t>((kPspTmrBorrowedAddr >> 32) & 0xFFFFFFFF);
     // buf_size
     cmd->cmd_payload[2]  = tmr_size;
     // flags: virt_phy_addr = 1
