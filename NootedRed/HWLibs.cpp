@@ -1191,6 +1191,18 @@ UInt32 X5000HWLibs::wrapMode96c4c(void* const obj, UInt32 const hw, void* const 
 //  深栈纪律：只走 nredTraceLine。
 UInt32 X5000HWLibs::wrapMode9e505(void* const slot)
 {
+    // B40 对照标记：`witness: 9e505-enter build=%s %s`（纯观测、零副作用、不改控制流）。
+    //  用途：本包装在最近各轮（B35–B39）**确有命中** ⇒ 必然执行，可作"新包是否在跑"的对照：
+    //    · 若本行也不出现 ⇒ 新包未被加载（部署/注入面问题），与三条入口标记 0 命中同因；
+    //    · 若本行出现而三条标记不出现 ⇒ 包在跑，但那三条标记所在路径确实未执行。
+    //  带 __DATE__/__TIME__：即使 CI 增量编译使旧 `build:` 行不变，本行编译时间仍可证新包。
+    //  深栈纪律：只走 nredTraceLine（内存环），不调 SYSLOG/文件写。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[96];
+        const int n = snprintf(line, sizeof(line), "witness: 9e505-enter build=%s %s\n",
+                               __DATE__, __TIME__);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
     const UInt32 ret = FunctionCast(wrapMode9e505, singleton().orgMode9e505)(slot);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt64 m = 0;
