@@ -113,7 +113,9 @@ static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t
         NRED_TRACE("tmr-dma: withSpecification failed -> fallback");
         return 0;
     }
-    if (dma->setMemoryDescriptor(desc) != kIOReturnSuccess) {
+    // autoPrepare=false：不依赖"setMemoryDescriptor 默认已 prepare"这一未文档化行为，
+    //   使 prepare 状态转移唯一、可判（下一条显式 prepare）。
+    if (dma->setMemoryDescriptor(desc, false) != kIOReturnSuccess) {
         NRED_TRACE("tmr-dma: setMemoryDescriptor failed -> fallback");
         dma->release();
         return 0;
