@@ -1294,7 +1294,7 @@ UInt32 X5000HWLibs::wrapMode96c4c(void* const obj, UInt32 const hw, void* const 
     const UInt32 ret = FunctionCast(wrapMode96c4c, singleton().orgMode96c4c)(obj, hw, out);
     if (checkKernelArgument("-NRedAccelLog")) {
         char line[128];
-        const int n = snprintf(line, sizeof(line), "96c4c: hw=%X ret=%u\n", hw, ret);
+        const int n = snprintf(line, sizeof(line), "96c4c: hw=0x%X ret=%u\n", hw, ret);
         if (n > 0) { nredTraceLine(line, n); }
     }
     return ret;
@@ -1320,7 +1320,7 @@ UInt32 X5000HWLibs::wrapMode956b8(void* const obj, UInt32 const hwId, void* cons
     const UInt32 ret = FunctionCast(wrapMode956b8, singleton().orgMode956b8)(obj, hwId, out, a4);
     if (checkKernelArgument("-NRedAccelLog")) {
         char line[128];
-        const int n = snprintf(line, sizeof(line), "hwdisc: ret=%X\n", ret);
+        const int n = snprintf(line, sizeof(line), "hwdisc: ret=0x%X\n", ret);
         if (n > 0) { nredTraceLine(line, n); }
     }
     return ret;
