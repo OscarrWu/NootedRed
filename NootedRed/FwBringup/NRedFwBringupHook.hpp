@@ -166,6 +166,17 @@ static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t
 
 inline void nredFwBringupHook(void* const /*appleCtx*/)
 {
+    // B39 三层入口标记 ②：`bringup: enter`（纯观测、零副作用、置于**所有 early-return 之前**）。
+    //  用途：与 ①`smu-init-list: enter` 配对，分辨 bringup 是"未被调用"还是"调用了但早退"；
+    //  与 ③`tmr-alloc:*` 配对可分到 TMR 分配之前/之后。
+    //  ⚠️ 本行在 NredSyslogMuteGuard **之前**：此时 `gNredTraceSyslogMuted` 仍为假，若用
+    //     `NRED_TRACE` 会走 SYSLOG（`lilu_os_log` 内含 1 KB 栈缓冲）⇒ B19 Double fault 同根因。
+    //     故此处**不走 NRED_TRACE**，直连 `nredTraceLine`（内存环，零 FS、零 os_log）。
+    {
+        char line[64];
+        const int n = snprintf(line, sizeof(line), "bringup: enter\n");
+        if (n > 0) { nredTraceLine(line, n); }
+    }
     const NredSyslogMuteGuard _syslogMute;   // B19：本 hook 作用域内静音 SYSLOG（RAII，随各 return 复位）
 
     // I3：RMMIO 前置判据（hwLateInit 映射 BAR5；未映射则跳过，不写任何寄存器）。
@@ -308,6 +319,8 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     // ⑥ A-11：TMR 物理连续缓冲分配（PSP 可 DMA）。tmrInit 计算 tmr_size 后，在此分配。
     // 依据：Linux psp_tmr_init (amdgpu_psp.c:881-923) 先 loadToc 取 tmr_size，再分配 TMR。
     // 分配失败 ⇒ trace 并跳过（可判、不静默）。
+    // B39 三层入口标记 ③-a：`tmr-alloc: enter`（进入分配段，早于任何分配/判据）。
+    NRED_TRACE("tmr-alloc: enter");
     constexpr UInt32 kTmrAlign = 0x100000;
     IOBufferMemoryDescriptor* tmrDesc = nullptr;
     addr64_t tmrPhys = 0;
@@ -327,6 +340,9 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
         }
     }
     if (!tmrOk) {
+        // B39 三层入口标记 ③-c：`tmr-alloc: fail`（纯观测；不新增状态、不改控制流。
+        //  rc 取既有判定：0=desc 为空/未 prepare，1=段址为 0 或段长不足 —— 由 !tmrOk 的成因直接给出）
+        NRED_TRACE("tmr-alloc: fail rc=%d", (tmrDesc == nullptr) ? 0 : 1);
         NRED_TRACE("bringup: tmr alloc failed size=0x%X", ctx.tmr_size);
         if (tmrDesc) { tmrDesc->complete(); tmrDesc->release(); }
         ringDesc->complete(); ringDesc->release();
@@ -336,6 +352,8 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
         return;
     }
     ctx.tmr_buf = tmrVa;
+    // B39 三层入口标记 ③-b：`tmr-alloc: ok size=0x%X`（分配成功；纯观测，不改控制流）
+    NRED_TRACE("tmr-alloc: ok size=0x%X", ctx.tmr_size);
 
     // ── Path B：TMR 缓冲 DMA 映射（buf_phy_addr 按语义填 GPU 可寻址地址 / IOVA）──
     // 失败 ⇒ iova=0 ⇒ prepTmrCmd 降级为"两字段都填 CPU PA"（原行为），不改变崩溃形态。

@@ -2697,6 +2697,15 @@ CAILResult X5000HWLibs::smuFullScreenEvent(void* const ctx, const TTLFullScreenE
 
 CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SWIPIPVersion ipVersion)
 {
+    // B39 三层入口标记 ①：`smu-init-list: enter`（纯观测、零副作用、不改控制流）。
+    //  用途：确认 0x6720b（smu_init_function_pointer_list）包装是否被调用；
+    //  与 ②`bringup: enter` 配对即可分辨 0x6430f 的 ret=2 来自"未进 bringup"还是"进了但早退"。
+    //  深栈纪律：只走 nredTraceLine（内存环），不调 SYSLOG/文件写。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[64];
+        const int n = snprintf(line, sizeof(line), "smu-init-list: enter\n");
+        if (n > 0) { nredTraceLine(line, n); }
+    }
     const auto ret =
         FunctionCast(wrapSmuInitFunctionPointerList, singleton().orgSmuInitFunctionPointerList)(ctx, ipVersion);
     if (ret == kCAILResultOK && !NRed::singleton().getAttributes().isPhoenix()) { return ret; }
