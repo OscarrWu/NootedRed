@@ -1356,6 +1356,39 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     PANIC_COND(!patcher.routeMultiple(id, dmcuFwRequests, slide, size), "HWLibs",
                "Failed to route DMCU FW-related functions");
 
+    // ─── 纯只读「内存字节转储」诊断（2026-10-12）：终结「真机 HWLibs 是否与本地提取件一致」──
+    //  背景：B30 真机日志 `mode6720b: expected-offset bytes mismatch`＋`pattern not found`，
+    //  而本地提取件 0x6720b 处与模式逐字节一致 ⇒ 矛盾，需直接看真机内存里的字节。
+    //  ⚠️ 纯读＋打印：不写任何内存、不 patch、不调 Apple 方法；只走 nredTraceLine（内存环，
+    //  禁 SYSLOG/FileIO/dumpNow——深栈/早期安全，B25/B19 纪律）。门控 -NRedAccelLog（默认关）。
+    //  对照组：0x2ab00e（mode2-tail）/0x9440f（mode9440f）为真机已证命中偏移，
+    //  用于判读「读法/基址是否正确」。基址自证行（slide/size）供判读映像归属。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        const auto* const base = reinterpret_cast<const UInt8*>(slide);
+        char line[160];
+        int n = snprintf(line, sizeof(line), "probe-base: slide=%llx size=%zx\n",
+                         static_cast<unsigned long long>(slide), size);
+        if (n > 0) { nredTraceLine(line, n); }
+        static constexpr mach_vm_address_t kDumpOffs[] = {
+            0x6720B, 0x9E505, 0x6430F, 0x96C4C, 0x956B8, 0x9E757,
+            0x2AB00E, 0x9440F,
+        };
+        for (const mach_vm_address_t off : kDumpOffs) {
+            if (off + 32 > size || off + 32 < off) {
+                n = snprintf(line, sizeof(line), "memdump: off=%llx oob\n",
+                             static_cast<unsigned long long>(off));
+            } else {
+                char hex[65];
+                for (size_t k = 0; k < 32; k += 1) {
+                    snprintf(hex + k * 2, 3, "%02x", base[off + k]);
+                }
+                n = snprintf(line, sizeof(line), "memdump: off=%llx b=%s\n",
+                             static_cast<unsigned long long>(off), hex);
+            }
+            if (n > 0) { nredTraceLine(line, n); }
+        }
+    }
+
     // 第八步观测（2026-09-28）：route TTL 的跨 kext 查询函数（无符号名 ⇒ 用 pattern）。
     //  ⚠️ 失败**不 panic**（只记 SYSLOG）：pattern 失配不应打断启动。
     {
