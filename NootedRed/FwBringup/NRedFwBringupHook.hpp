@@ -37,6 +37,7 @@
 #include <IOKit/IOMemoryDescriptor.h>       // A-10：addr64_t / IOByteCount
 #include <IOKit/IOBufferMemoryDescriptor.h> // A-10：kIOMemoryPhysicallyContiguous / withOptions
 #include <IOKit/IODMACommand.h>   // Path B：TMR 缓冲的 DMA 映射（取 IOVA 作 buf_phy_addr）
+#include <IOKit/IOMapper.h>       // Path B 护栏：IOMapper::gSystem 过渡态自检
 #include "Psp13Bringup.hpp"       // BringupCtx / bringupRun / BringupStep
 #include "Psp13Ring.hpp"          // RingState / ringInit / 缓冲尺寸
 #include "RegSinkKernel.hpp"      // SmnCallbacks / RegSinkKernel
@@ -105,6 +106,15 @@ static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t
         NRED_TRACE("tmr-dma: skip (desc=%p size=0x%llX)", desc, (unsigned long long)size);
         return 0;
     }
+    // 【高·挂死护栏】系统 mapper 过渡态自检：`kUnknown(1)`/`kHasMapper(2)` 时
+    //   `IODMACommand::prepare` 链上的 `IOMapper::checkForSystemMapper()`（IOMapper.h:87-93）
+    //   会调 `waitForSystemMapper()`（:76，无超时参数）⇒ 可能挂死。故在此**先判**，
+    //   过渡态直接降级，不调用可能阻塞的映射 API。`gSystem` 为 public static（IOMapper.h:85）。
+    if ((uintptr_t)IOMapper::gSystem & 3) {
+        NRED_TRACE("tmr-dma: system mapper transitional (gSystem=%#llX) -> fallback",
+                   (unsigned long long)(uintptr_t)IOMapper::gSystem);
+        return 0;
+    }
 
     // kMapped：走系统 mapper（IOMMU/DART）拿 I/O 总线地址；64 位地址，不限段长。
     IODMACommand* dma = IODMACommand::withSpecification(kIODMACommandOutputHost64, 64, 0,
@@ -117,6 +127,7 @@ static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t
     //   使 prepare 状态转移唯一、可判（下一条显式 prepare）。
     if (dma->setMemoryDescriptor(desc, false) != kIOReturnSuccess) {
         NRED_TRACE("tmr-dma: setMemoryDescriptor failed -> fallback");
+        dma->clearMemoryDescriptor();   // 与另两支 cleanup 对称（防残留描述符引用）
         dma->release();
         return 0;
     }
@@ -132,6 +143,15 @@ static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t
     if (dma->gen64IOVMSegments(&off, &seg, &segCount) != kIOReturnSuccess || segCount != 1 ||
         seg.fIOVMAddr == 0) {
         NRED_TRACE("tmr-dma: genIOVMSegments failed segs=%u -> fallback", segCount);
+        dma->complete();
+        dma->clearMemoryDescriptor();
+        dma->release();
+        return 0;
+    }
+    // 【低·段长防御】单段长不足 TMR 尺寸 ⇒ 映射不完整（防半覆盖 IOVA 进帧），视同失败。
+    if (seg.fLength < size) {
+        NRED_TRACE("tmr-dma: seg len=0x%llX < size=0x%llX -> fallback",
+                   (unsigned long long)seg.fLength, (unsigned long long)size);
         dma->complete();
         dma->clearMemoryDescriptor();
         dma->release();
