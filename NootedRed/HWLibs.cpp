@@ -472,6 +472,20 @@ static const UInt8 kMode6720bPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 static const UInt8 kMode9e757Pattern[] = {0x48, 0x83, 0xC6, 0x04, 0x8B, 0x00, 0x48, 0x69,
                                           0xD0, 0x60, 0x02, 0x00, 0x00, 0xB9, 0xBC, 0x02,
                                           0x00, 0x00, 0xE8};
+// `0x96c4c`：回退路径（type3 槽 +0x30 虚槽 callee；发现块填充的**回退成败**——F0/F1 直接上游）。
+static const UInt8 kMode96c4cPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
+                                          0x48, 0x81, 0xEC, 0x80, 0x02, 0x00, 0x00, 0x49, 0x89, 0xD4, 0x49,
+                                          0x89, 0xFF, 0x89, 0x75, 0xDC};
+// `0xa22b0`：主发现门（检查 interface#3 服务 `+0xe8` 解引 `*p==0x8d && p[1]==2`；预期本机返 0 ⇒ 走回退）。
+//  第 5 字节起 `E8 2E 96 FE FF`＝call 0x8b8e7（本构建内固定偏移）；尾 `74`＝JZ opcode（不含 rel8）。
+static const UInt8 kModea22b0Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0xE8, 0x2E, 0x96, 0xFE, 0xFF,
+                                          0x48, 0x85, 0xC0, 0x74, 0x1F, 0x48, 0x8B, 0x80, 0xE8,
+                                          0x00, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x74};
+// `0x956b8`：整链总闸（ipi_perform_hw_discovery；ret=0 ⇒ 某块未填/填充层失败）。
+static const UInt8 kMode956b8Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41,
+                                          0x54, 0x53, 0x48, 0x81, 0xEC, 0x78, 0x02, 0x00, 0x00, 0x49, 0x89,
+                                          0xD4, 0x41, 0x89, 0xF7};
+// ★ 修复（2026-09-28）：IP 发现表的 `num_base_address` 判据放宽。
 //  `0x2ab00e` 在解析 IP 表时要求 `(u8(ip+3) - 1) <= 5`（即 nba ∈ {1..6}），否则跳到失败出口
 //  `0x2ab1b5` 返回 1。RDNA3（Phoenix，780M）的 IP 表里 **hw_id 0x96 映射到 0x46 的块有 8 个基址**
 //  （真机取证：`kb/sequences/raw/observe-20260928-1046-ipt5/`），于是 `0x2ab00e` 恒返回 1 ⇒
@@ -1175,11 +1189,14 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     return ret;
 }
 
-// ─── (8,0) 失败点三读点（2026-10-12，区分 F0/F1/F4；深栈安全——只走 nredTraceLine）──────
-//  B27/B28 实证失败槽＝(8,0)（0x9440f 分发表 ret=0）。三候选：
-//   F0＝0x9e505 "NULL SMU discovery info!"（发现块缺，方法未被调用）；
-//   F1＝0x6430f 入参形状门（in[2]≠1 等）；
-//   F4＝0x6720b 版本不识别（switch 缺该 hw_version id）。
+// ─── (8,0) 失败点读点（2026-10-12 技术经理终审；深栈安全——只走 nredTraceLine）────────
+//  判据链（附录二终审）：F0＝0x9e505 "NULL SMU discovery info!"（disc=0，interface#7 空）；
+//   F1＝0x6430f 入参形状门（in[2]=发现块条目数，≠1 ⇒ 判据不过）；F4＝0x6720b 版本不识别
+//   （id ∉ {0,1,3..10}）；F8＝out1==0（0x9e505 失败出口，与 0x6430f 出口行同簇冗余）。
+//  ⚠️ 勘误登记（2026-10-12）：此前「out1=[RBP-0x88] 全函数唯一写点=0x9e54d 清零 ⇒ out1 恒 0」
+//   结论**错误**——0x6430f 经指针间接写 `*(long*)(param_2+2)=local_28`＝out+8（分配成功后立即写）。
+//   砍掉 0x9e790 独立读点的决策碰巧成立，正确理由＝与 0x6430f 出口行同簇冗余（mret/out1 与
+//   0x6430f 行同源），防错误结论进知识库。
 //  ⚠️ 三者均在 TTL/bringup 深栈链上（0x9e505/0x6430f/0x6720b 同链）⇒ 沿 B25 纪律：
 //   回调内**禁止任何重沉 I/O**（SYSLOG/FileIO/dumpNow/IOMalloc/DBGLOG），只用 nredTraceLine。
 
@@ -1261,6 +1278,49 @@ UInt32 X5000HWLibs::wrapMode6720b(void* const obj, void* const a2, void* const a
                                static_cast<unsigned long long>(verHi),
                                static_cast<unsigned long long>(verLo),
                                static_cast<unsigned>(id), static_cast<unsigned>(ret));
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
+// ─── 发现块填充链三读点（2026-10-12 技术经理终审；判"回退路径"是否被走/是否成功）──────
+//  ⚠️ 同深栈安全纪律：只走 nredTraceLine（B25 教训——本链在 TTL/bringup 深栈上）。
+
+// H-96c4c：回退路径读点（type3 槽 +0x30 虚槽 callee）。行 `96c4c: hw=%X ret=%u`。
+//  hw = 入参 hw_id（发现块块 hw_id，0x956b8 循环传入）；ret = 返回值（1=填充成功/0=失败）。
+//  覆盖函数两个 return 出口（成功填表 return 1 / 失败 return 0，统一在出口读）。
+UInt32 X5000HWLibs::wrapMode96c4c(void* const obj, UInt32 const hw, void* const out)
+{
+    const UInt32 ret = FunctionCast(wrapMode96c4c, singleton().orgMode96c4c)(obj, hw, out);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "96c4c: hw=%X ret=%u\n", hw, ret);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
+// H-a22b0：主发现门读点。行 `a22b0: ret=%u`。
+//  ret = 0 ⇒ 主发现不命中（本机伪装 Renoir 预期）⇒ 走回退（H-96c4c 行联动判读）。
+UInt32 X5000HWLibs::wrapModea22b0()
+{
+    const UInt32 ret = FunctionCast(wrapModea22b0, singleton().orgModea22b0)();
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "a22b0: ret=%u\n", ret);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
+// H-956b8：整链总闸读点。行 `hwdisc: ret=%X`。
+//  ret = 0 ⇒ 某发现块未填（填充层失败，HwipList/回退上游）；非 0 ⇒ 填充完成（bit0=成功标志）。
+UInt32 X5000HWLibs::wrapMode956b8(void* const obj, UInt32 const hwId, void* const out, void* const a4)
+{
+    const UInt32 ret = FunctionCast(wrapMode956b8, singleton().orgMode956b8)(obj, hwId, out, a4);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "hwdisc: ret=%X\n", ret);
         if (n > 0) { nredTraceLine(line, n); }
     }
     return ret;
@@ -1593,6 +1653,18 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode9e757", kMode9e757Pattern, nullptr, arrsize(kMode9e757Pattern),
                                            0x9E757)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9e757, this->orgMode9e757}, "mode9e757");
+        }
+        if (const auto from = resolveProbe("mode96c4c", kMode96c4cPattern, nullptr, arrsize(kMode96c4cPattern),
+                                           0x96C4C)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode96c4c, this->orgMode96c4c}, "mode96c4c");
+        }
+        if (const auto from = resolveProbe("modea22b0", kModea22b0Pattern, nullptr, arrsize(kModea22b0Pattern),
+                                           0xA22B0)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapModea22b0, this->orgModea22b0}, "modea22b0");
+        }
+        if (const auto from = resolveProbe("mode956b8", kMode956b8Pattern, nullptr, arrsize(kMode956b8Pattern),
+                                           0x956B8)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode956b8, this->orgMode956b8}, "mode956b8");
         }
         if (const auto from = resolveProbe("mode9e505", kMode9e505Pattern, nullptr, arrsize(kMode9e505Pattern),
                                            0x9E505)) {
