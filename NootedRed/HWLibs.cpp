@@ -1180,17 +1180,25 @@ UInt32 X5000HWLibs::wrapMode96c4c(void* const obj, UInt32 const hw, void* const 
     return ret;
 }
 
-// H-9e505：(8,0) 链的 SMU 槽 sw_init 包装入口。行 `9e505: slot=%llx ret=%u`。
-//  slot＝入参槽对象指针值（= *(X+0x48)），**只打印指针值、禁止解引用**（避免 guard fault）；
-//  ret＝0x9e505 返回值（两个 return 出口统一在出口读）。深栈纪律：只走 nredTraceLine。
+// H-9e505：(8,0) 链的 SMU 槽 sw_init 包装入口。行 `9e505: slot=%llx m=%llx ret=%u`。
+//  slot＝入参槽对象指针值（= *(X+0x48)）；m＝*(slot+8) 槽方法指针（区分 B1/B2 返 0 路径用）。
+//  ⚠️ 健全性门：仅当 slot!=0 且高 16 位==0xFFFF（内核态典型高位）才解引用，否则 m=0
+//   （避免野指针 panic）。ret＝0x9e505 返回值（两个 return 出口统一在出口读）。
+//  深栈纪律：只走 nredTraceLine。
 UInt32 X5000HWLibs::wrapMode9e505(void* const slot)
 {
     const UInt32 ret = FunctionCast(wrapMode9e505, singleton().orgMode9e505)(slot);
     if (checkKernelArgument("-NRedAccelLog")) {
+        UInt64 m = 0;
+        const UInt64 sv = reinterpret_cast<UInt64>(slot);
+        if (sv != 0 && (sv >> 48) == 0xFFFF) {
+            m = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(slot) + 8);
+        }
         char line[128];
         const int n = snprintf(line, sizeof(line),
-                               "9e505: slot=%llx ret=%u\n",
-                               static_cast<unsigned long long>(reinterpret_cast<UInt64>(slot)),
+                               "9e505: slot=%llx m=%llx ret=%u\n",
+                               static_cast<unsigned long long>(sv),
+                               static_cast<unsigned long long>(m),
                                ret);
         if (n > 0) { nredTraceLine(line, n); }
     }
