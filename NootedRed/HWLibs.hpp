@@ -110,6 +110,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgMode9440f{0};    // 0x9440f（模式 20B 入口；返回 0=失败/非 0=成功）
     mach_vm_address_t                                            orgMode96c4c{0};    // 0x96c4c（发现块回退路径；F0/F1 上游）
     mach_vm_address_t                                            orgMode9e505{0};    // 0x9e505（(8,0) SMU 槽 sw_init 包装入口；B33 读点）
+    mach_vm_address_t                                            orgMode6430f{0};    // 0x6430f（smu_sw_init 槽方法本体；B35 读点）
     mach_vm_address_t                                            orgSdmaInitFunctionPointerList{0};
     CAILResult (*smu90SendMessageWithParameter)(void* ctx, UInt32 message, UInt32 param){nullptr};
     CAILResult (*smuCosWaitFor)(void* ctx, CosWaitForFunc* func, void* handle, UInt32 duration){nullptr};
@@ -163,6 +164,7 @@ private:
     static UInt32 wrapMode9440f(void* a, UInt32 b, UInt32 c, void* d);
     static UInt32 wrapMode96c4c(void* obj, UInt32 hw, void* out);
     static UInt32 wrapMode9e505(void* slot);
+    static SInt32 wrapMode6430f(void* in, void* out);
     CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
     static CAILResult smuInternalSwInit(void* ctx, void* input, AMDSMUSWInitOutput* output);

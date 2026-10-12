@@ -458,6 +458,10 @@ static const UInt8 kMode96c4cPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  模式＝函数头序言 21B（历史实现 0b70bb2 同款，已 PASS）。
 static const UInt8 kMode9e505Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
                                           0x48, 0x81, 0xEC, 0x60, 0x03, 0x00, 0x00, 0x49, 0x89, 0xFF};
+// `0x6430f`：smu_sw_init（槽方法本体＝B34 实测 m−slide=0x6430f）。模式＝函数头序言 19B
+//  （历史实现 0b70bb2 同款，已 PASS；B31 memdump 已证真机逐字节一致）。
+static const UInt8 kMode6430fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53,
+                                          0x48, 0x81, 0xEC, 0xB8, 0x07, 0x00, 0x00, 0x49, 0x89, 0xF6};
 // ★ 修复（2026-09-28）：IP 发现表的 `num_base_address` 判据放宽。
 //  `0x2ab00e` 在解析 IP 表时要求 `(u8(ip+3) - 1) <= 5`（即 nba ∈ {1..6}），否则跳到失败出口
 //  `0x2ab1b5` 返回 1。RDNA3（Phoenix，780M）的 IP 表里 **hw_id 0x96 映射到 0x46 的块有 8 个基址**
@@ -1205,6 +1209,25 @@ UInt32 X5000HWLibs::wrapMode9e505(void* const slot)
     return ret;
 }
 
+// H-6430f：smu_sw_init（槽方法本体＝B34 实测 m−slide=0x6430f）入口。
+//  行 `6430f: in2=%X ret=%u`：in2＝入参结构 in[2]（入口读，字节偏移 8）；
+//  ret＝0x6430f 返回值（两个 return 出口统一在出口读）。深栈纪律：只走 nredTraceLine。
+SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
+{
+    UInt32 in2 = 0;
+    if (in != nullptr) {
+        in2 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(in) + 8);
+    }
+    const SInt32 ret = FunctionCast(wrapMode6430f, singleton().orgMode6430f)(in, out);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "6430f: in2=%X ret=%u\n", in2,
+                               static_cast<unsigned>(ret));
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -1569,6 +1592,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode9e505", kMode9e505Pattern, nullptr, arrsize(kMode9e505Pattern),
                                            0x9E505)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9e505, this->orgMode9e505}, "mode9e505");
+        }
+        if (const auto from = resolveProbe("mode6430f", kMode6430fPattern, nullptr, arrsize(kMode6430fPattern),
+                                           0x6430F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode6430f, this->orgMode6430f}, "mode6430f");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
