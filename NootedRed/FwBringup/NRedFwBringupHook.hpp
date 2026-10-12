@@ -36,6 +36,7 @@
 #include <IOKit/IOLib.h>          // IODelay
 #include <IOKit/IOMemoryDescriptor.h>       // A-10：addr64_t / IOByteCount
 #include <IOKit/IOBufferMemoryDescriptor.h> // A-10：kIOMemoryPhysicallyContiguous / withOptions
+#include <IOKit/IODMACommand.h>   // Path B：TMR 缓冲的 DMA 映射（取 IOVA 作 buf_phy_addr）
 #include "Psp13Bringup.hpp"       // BringupCtx / bringupRun / BringupStep
 #include "Psp13Ring.hpp"          // RingState / ringInit / 缓冲尺寸
 #include "RegSinkKernel.hpp"      // SmnCallbacks / RegSinkKernel
@@ -79,6 +80,67 @@ struct NredSyslogMuteGuard {
     NredSyslogMuteGuard() : prev(gNredTraceSyslogMuted) { gNredTraceSyslogMuted = true; }
     ~NredSyslogMuteGuard() { gNredTraceSyslogMuted = prev; }
 };
+
+// ── Path B：TMR 缓冲的 DMA 映射（取 GPU 可寻址地址 / IOVA）────────────────────────────
+// 依据：外部考证定论 —— `psp_gfx_if.h` 明示 SETUP_TMR 的 `buf_phy_addr` 实为 **GPU 虚拟地址**，
+//  Linux `psp_prep_tmr_cmd_buf` 里 `buf=tmr_mc`(MC/IOVA)、`system=amdgpu_gmc_vram_pa`(CPU PA)。
+//  本仓库的 IOKit 对应做法参考 `srcs/mac-amdgpu-ref/gmc_v12_0.cpp:alloc_dma_block`
+//  （`IODMACommand` → `PrepareForDMA` → `seg.address`），但那是 **DriverKit** 版 API；
+//  本机是 **kernel kext**，故用内核版 `IODMACommand::withSpecification` + `gen64IOVMSegments`。
+//
+// 深栈纪律（B19/B25）：本函数只走 `NRED_TRACE`，**不**用 SYSLOG/FileIO/dumpNow/IOMalloc/DBGLOG。
+//
+// 优雅降级（本卡第 2.5 条）：任何一步失败（IOMMU/GART 未就绪、API 报错、段数≠1）⇒ 返回 0，
+//  调用方据此回退到"两字段都填 CPU PA"的原行为，**不改变崩溃形态**。
+// 注：映射**不**在函数末尾释放 —— TMR 缓冲按 D3 契约保留至 kext 卸载（PSP 仍引用该 DRAM 区），
+//      提前 complete() 会让 PSP 侧拿到的地址失效 ⇒ 本函数不返回可释放句柄。
+//
+// @param desc  已 prepare() 过的 TMR 缓冲（物理连续）
+// @param size  TMR 大小
+// @return GPU 可寻址地址（IOVA）；0 ⇒ 映射不可用，走降级路径
+static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t size)
+{
+
+    if (desc == nullptr || size == 0) {
+        NRED_TRACE("tmr-dma: skip (desc=%p size=0x%llX)", desc, (unsigned long long)size);
+        return 0;
+    }
+
+    // kMapped：走系统 mapper（IOMMU/DART）拿 I/O 总线地址；64 位地址，不限段长。
+    IODMACommand* dma = IODMACommand::withSpecification(kIODMACommandOutputHost64, 64, 0,
+                                                        IODMACommand::kMapped, 0, 1, NULL, NULL);
+    if (dma == nullptr) {
+        NRED_TRACE("tmr-dma: withSpecification failed -> fallback");
+        return 0;
+    }
+    if (dma->setMemoryDescriptor(desc) != kIOReturnSuccess) {
+        NRED_TRACE("tmr-dma: setMemoryDescriptor failed -> fallback");
+        dma->release();
+        return 0;
+    }
+    if (dma->prepare(0, size) != kIOReturnSuccess) {
+        NRED_TRACE("tmr-dma: prepare failed -> fallback");
+        dma->clearMemoryDescriptor();
+        dma->release();
+        return 0;
+    }
+    uint64_t off = 0;
+    IODMACommand::Segment64 seg = {};
+    uint32_t segCount = 1;
+    if (dma->gen64IOVMSegments(&off, &seg, &segCount) != kIOReturnSuccess || segCount != 1 ||
+        seg.fIOVMAddr == 0) {
+        NRED_TRACE("tmr-dma: genIOVMSegments failed segs=%u -> fallback", segCount);
+        dma->complete();
+        dma->clearMemoryDescriptor();
+        dma->release();
+        return 0;
+    }
+
+    // 映射保留（不 complete）：见本函数头注（D3：TMR 缓冲保留至卸载）。
+    NRED_TRACE("tmr-dma: iova=0x%llX len=0x%llX", (unsigned long long)seg.fIOVMAddr,
+               (unsigned long long)seg.fLength);
+    return seg.fIOVMAddr;
+}
 
 inline void nredFwBringupHook(void* const /*appleCtx*/)
 {
@@ -253,6 +315,10 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     }
     ctx.tmr_buf = tmrVa;
 
+    // ── Path B：TMR 缓冲 DMA 映射（buf_phy_addr 按语义填 GPU 可寻址地址 / IOVA）──
+    // 失败 ⇒ iova=0 ⇒ prepTmrCmd 降级为"两字段都填 CPU PA"（原行为），不改变崩溃形态。
+    const uint64_t tmrIova = nredMapTmrForDma(tmrDesc, ctx.tmr_size);
+
     // A-23：三个只读仪表（门控 `-NRedTmrAddrReadout`，默认关、仅观测）。
     //  通道：NRED_TRACE（A-22 内存优先，安全时点刷盘）⇒ 绝不调任何写文件接口。
     //  第 ③ 项用 NRed 既有内存字段（`fbLocationBase`/`fbLocationSize`），**零寄存器探针**。
@@ -289,7 +355,8 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                                false,      // autoload_supported
                                tmrPhys,
                                cmdBufMc,
-                               fenceMc);
+                               fenceMc,
+                               tmrIova);
     if (rc != 0) {
         NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
                    static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);

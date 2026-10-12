@@ -884,12 +884,18 @@ static void testSetupTmrFrame() {
     }
     fw::prepTmrCmd(&cmd, 0x12345678ULL, 0x400000);
     assert(cmd.cmd_id == GFX_CMD_ID_SETUP_TMR);
-    assert(cmd.cmd_payload[0] == 0x12345678u);          // lo 地址
+    assert(cmd.cmd_payload[0] == 0x12345678u);          // lo 地址（降级：buf=cpu_pa）
     assert(cmd.cmd_payload[1] == 0);                    // hi 地址
     assert(cmd.cmd_payload[2] == 0x400000u);            // size
     assert(cmd.cmd_payload[3] == 0x00000002u);          // flags: virt_phy_addr=1
-    printf("PASS (cmd_id=0x%X payload lo=0x%X size=0x%X)\n",
-           cmd.cmd_id, cmd.cmd_payload[0], cmd.cmd_payload[2]);
+    assert(cmd.cmd_payload[4] == 0x12345678u);          // sys = CPU PA
+    assert(cmd.cmd_payload[5] == 0);
+    // Path B：传入 IOVA 时两字段按语义拆分（buf=IOVA，sys=CPU PA）
+    fw::prepTmrCmd(&cmd, 0x12345678ULL, 0x400000, 0xABCD0000ULL);
+    assert(cmd.cmd_payload[0] == 0xABCD0000u);          // buf = IOVA
+    assert(cmd.cmd_payload[1] == 0);
+    assert(cmd.cmd_payload[4] == 0x12345678u);          // sys = CPU PA（不变）
+    assert(cmd.cmd_payload[5] == 0);
 }
 
 static void testCorruptTocFailure();
