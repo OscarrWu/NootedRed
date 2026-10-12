@@ -2728,6 +2728,18 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     //  `orgRet`：org 的**原始**返回值，专供下方既有观测行 `smu fp list: ret=%d` 使用
     //    （该行规格要求打印 org 原值以判"Apple 原路径报的什么码"）⇒ 不因放行而丢失诊断。
     const CAILResult orgRet = ret;
+    // B44 org-ret 观测（零行为改动、无条件，紧邻既有返回处理）：B43 实测 bypass 行未出现而
+    //  `smu-init-list: enter` 有 2 条 ⇒ 包装确实执行过 ⇒ 矛盾收窄为"org 原返回值到底是不是 2"。
+    //  本行把 org 的**真实返回值**（orgRet）打出来供三分叉定因（enum 值 2=InvalidParameters）。
+    //  ipver＝函数形参（Apple 上报的 SMU IP 版本），同函数现成可用，无需新增解引用；
+    //  ⚠️ 注：org 内部版本识别读的是 obj 侧字段（FUN_00066d84 入参），与形参 ipver 未必相等，
+    //     本行 ipver 仅作参考（判"Apple 认识什么版本"），定因以 org-ret 为准。深栈纪律：nredTraceLine。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[96];
+        const int n = snprintf(line, sizeof(line), "smu-init-list: org-ret=%d ipver=%d.%d\n",
+                               static_cast<int>(orgRet), ipVersion.major, ipVersion.minor);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
     if (ret == 2) {
         if (checkKernelArgument("-NRedAccelLog")) {
             char line[96];
