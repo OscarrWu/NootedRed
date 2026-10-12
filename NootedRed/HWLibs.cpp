@@ -464,14 +464,7 @@ static const UInt8 kMode6430fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  分派用的 hw_version id 由原函数写入 `obj+0x2c8`（反编译 `*(int*)(param_1+0x2c8)=iVar1` 已证）。
 static const UInt8 kMode6720bPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50,
                                           0x49, 0x89, 0xFF, 0x48, 0x89, 0xF7, 0x48, 0x89, 0xD6};
-// `0x9e757`：0x9e505 内 `add rsi,4`（0x958d8 返回之后）。此时 RSI 已由 0x9e754 `mov rsi,rax`
-//  装入 disc（发现块指针）⇒ wrapper 形参 2 可捕获。行 `9e505: disc=%llx`：F0（disc==0 ⇒
-//  "NULL SMU discovery info!"）。挂点比卡片 0x9e744 后移 3 条指令：0x9e744 处 disc 在 RAX
-//  （非形参寄存器，C++ 不可取），0x9e757 处已入 RSI 且未被修改（0x9e74d 只动 RDI、0x9e754
-//  是 mov 复制）⇒ 语义等价。
-static const UInt8 kMode9e757Pattern[] = {0x48, 0x83, 0xC6, 0x04, 0x8B, 0x00, 0x48, 0x69,
-                                          0xD0, 0x60, 0x02, 0x00, 0x00, 0xB9, 0xBC, 0x02,
-                                          0x00, 0x00, 0xE8};
+// ★ 修复（2026-09-28）：IP 发现表的 `num_base_address` 判据放宽。
 //  `0x2ab00e` 在解析 IP 表时要求 `(u8(ip+3) - 1) <= 5`（即 nba ∈ {1..6}），否则跳到失败出口
 //  `0x2ab1b5` 返回 1。RDNA3（Phoenix，780M）的 IP 表里 **hw_id 0x96 映射到 0x46 的块有 8 个基址**
 //  （真机取证：`kb/sequences/raw/observe-20260928-1046-ipt5/`），于是 `0x2ab00e` 恒返回 1 ⇒
@@ -1205,23 +1198,6 @@ UInt32 X5000HWLibs::wrapMode9e505(void* const slot)
     return ret;
 }
 
-// H-9e757（读点 1·disc）：0x9e757（0x958d8 返回之后，`add rsi,4` 处）。行 `9e505: disc=%llx`。
-//  disc（发现块指针）已由 0x9e754 `mov rsi,rax` 装入 RSI ⇒ wrapper 形参 2 可捕获（F0：disc==0）。
-//  挂点 0x9e744 的 RAX 非形参寄存器、C++ 不可取，故后移至 RSI 已装载处（语义等价）。
-//  ⚠️ 深栈安全同前：只走 nredTraceLine。
-UInt32 X5000HWLibs::wrapMode9e757(void* const a, void* const disc)
-{
-    const UInt32 ret = FunctionCast(wrapMode9e757, singleton().orgMode9e757)(a, disc);
-    if (checkKernelArgument("-NRedAccelLog")) {
-        char line[128];
-        const int n = snprintf(line, sizeof(line),
-                               "9e505: disc=%llx\n",
-                               static_cast<unsigned long long>(reinterpret_cast<UInt64>(disc)));
-        if (n > 0) { nredTraceLine(line, n); }
-    }
-    return ret;
-}
-
 // H-6430f：0x6430f 入口。行 `6430f: in2=%u feat=%x ret=%d`。
 //  in2 = in[2]（形状门：非 1 ⇒ 判据不过，返 2/1）；feat = in[0x99]（字节偏移 0x264，能力位）；
 //  ret = 0x6430f 返回值（0=成功；1/2=形状门或分配失败）。
@@ -1242,14 +1218,11 @@ SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
     return ret;
 }
 
-// H-6720b：0x6720b 入口与出口。行 `6720b: ver=%llx_%llx id=%u ret=%u`。
-//  ver = 入口两 u64（a2/a3 = hw_version 原始值，0x66d84 的输入）；
-//  id = 分派用 hw_version id，由原函数写入 obj+0x2c8（org 返回后读出；id ∉ {0,1,3,4,5,7,6,8,9,10}
+// H-6720b：0x6720b 入口。行 `6720b: id=%d ret=%d`。
+//  id = hw_version 分派 id，由原函数写入 obj+0x2c8（org 返回后读出；id ∉ {0,1,3,4,5,7,6,8,9,10}
 //  ⇒ F4 版本不识别，ret=2）；ret = 0x6720b 返回值。
 UInt32 X5000HWLibs::wrapMode6720b(void* const obj, void* const a2, void* const a3)
 {
-    const UInt64 verHi = reinterpret_cast<UInt64>(a2);
-    const UInt64 verLo = reinterpret_cast<UInt64>(a3);
     const UInt32 ret = FunctionCast(wrapMode6720b, singleton().orgMode6720b)(obj, a2, a3);
     int id = 0;
     if (obj != nullptr) {
@@ -1257,10 +1230,7 @@ UInt32 X5000HWLibs::wrapMode6720b(void* const obj, void* const a2, void* const a
     }
     if (checkKernelArgument("-NRedAccelLog")) {
         char line[128];
-        const int n = snprintf(line, sizeof(line), "6720b: ver=%llx_%llx id=%u ret=%u\n",
-                               static_cast<unsigned long long>(verHi),
-                               static_cast<unsigned long long>(verLo),
-                               static_cast<unsigned>(id), static_cast<unsigned>(ret));
+        const int n = snprintf(line, sizeof(line), "6720b: id=%d ret=%d\n", id, static_cast<int>(ret));
         if (n > 0) { nredTraceLine(line, n); }
     }
     return ret;
@@ -1589,10 +1559,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode9440f", kMode9440fPattern, nullptr, arrsize(kMode9440fPattern),
                                            0x9440F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9440f, this->orgMode9440f}, "mode9440f");
-        }
-        if (const auto from = resolveProbe("mode9e757", kMode9e757Pattern, nullptr, arrsize(kMode9e757Pattern),
-                                           0x9E757)) {
-            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9e757, this->orgMode9e757}, "mode9e757");
         }
         if (const auto from = resolveProbe("mode9e505", kMode9e505Pattern, nullptr, arrsize(kMode9e505Pattern),
                                            0x9E505)) {
