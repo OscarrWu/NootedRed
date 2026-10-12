@@ -2718,8 +2718,24 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
         const int n = snprintf(line, sizeof(line), "smu-init-list: enter\n");
         if (n > 0) { nredTraceLine(line, n); }
     }
-    const auto ret =
+    CAILResult ret =
         FunctionCast(wrapSmuInitFunctionPointerList, singleton().orgSmuInitFunctionPointerList)(ctx, ipVersion);
+    // B43 版本门放行（单变量）：0x6720b 对 id=2（0xa0000，本机）落 default 返 2 ⇒
+    //  0x6430f 因 iVar7!=0 不调 0x67328 ⇒ (8,0) 判失败。反编译已证：改写 2→0 后
+    //  0x6430f 继续 → 0x67328 → 0x6c0==0 → 返 0 ⇒ (8,0) 放行、暴露下一缺口。
+    //  只改"门"的返回值；obj+0x2c8（真实版本 id）仍是 org 写下的原值，未被改写。
+    //  其余返回值（0/1/其它）原样透传。深栈纪律：只走 nredTraceLine。
+    //  `orgRet`：org 的**原始**返回值，专供下方既有观测行 `smu fp list: ret=%d` 使用
+    //    （该行规格要求打印 org 原值以判"Apple 原路径报的什么码"）⇒ 不因放行而丢失诊断。
+    const CAILResult orgRet = ret;
+    if (ret == 2) {
+        if (checkKernelArgument("-NRedAccelLog")) {
+            char line[96];
+            const int n = snprintf(line, sizeof(line), "smu-init: version-gate bypass ret=2->0\n");
+            if (n > 0) { nredTraceLine(line, n); }
+        }
+        ret = static_cast<CAILResult>(0);   // CAILResult 为枚举 ⇒ 需显式转换
+    }
     if (ret == kCAILResultOK && !NRed::singleton().getAttributes().isPhoenix()) { return ret; }
 
     const auto effectiveMajor = NRed::singleton().getAttributes().isPhoenix() ? 13 : ipVersion.major;
@@ -2773,7 +2789,9 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
     //  ⛔ 亦**不**为"消除日志/绕过检查"而改任何判定（治症状属禁止项）。
     //  ⚠️ 规格的逐字代码块用 `%d`，其上方注释又建议 `ret` 用 `%#x`——两者冲突；
     //    本实现**照逐字代码块**（`%d`）定稿（以"逐字规格"为准），已在交付中报告该分歧。
-    SYSLOG_COND(ADDPR(debugEnabled), "HWLibs", "smu fp list: ret=%d ipVer=%d.%d effMajor=%d phoenix=%d", ret,
+    //  ⚠️ B43：下行打印改用 `orgRet`（**放行前**的 org 原值）而非 `ret`，以免 `ret=2->0` 的放行
+    //     把"Apple 原路径报的什么码"这一诊断信息抹掉（本行规格：判 Apple 是否报 unsupported 及何码）。
+    SYSLOG_COND(ADDPR(debugEnabled), "HWLibs", "smu fp list: ret=%d ipVer=%d.%d effMajor=%d phoenix=%d", orgRet,
                 ipVersion.major, ipVersion.minor, effectiveMajor,
                 NRed::singleton().getAttributes().isPhoenix() ? 1 : 0);
     // ─── A-1（2026-10-10）：固件层第一增量（C2 挂点＝本函数出口；门控 `-NRedFwBringup` 默认关）──
