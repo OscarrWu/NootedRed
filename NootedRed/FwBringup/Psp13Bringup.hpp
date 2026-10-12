@@ -473,9 +473,10 @@ inline void prepTmrCmd(GfxCmdResp* cmd,
     cmd->cmd_payload[2]  = tmr_size;
     // flags: virt_phy_addr = 1
     cmd->cmd_payload[3]  = 0x00000002;
-    // D1: system_phy_addr_lo/hi (同值起步，依据 G-6 Q2/Q4)
-    cmd->cmd_payload[4]  = static_cast<uint32_t>(tmr_mc_addr & 0xFFFFFFFF);
-    cmd->cmd_payload[5]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
+    // D1: system_phy_addr_lo/hi —— β-2 单变量实验：两地址域同为借用值（原填 tmr_mc_addr）
+    cmd->cmd_payload[4]  = static_cast<uint32_t>(kPspTmrBorrowedAddr & 0xFFFFFFFF);
+    cmd->cmd_payload[5]  = static_cast<uint32_t>((kPspTmrBorrowedAddr >> 32) & 0xFFFFFFFF);
+    // 注：tmr_mc_addr 形参自 β-2 起仅由调用方仪表/日志使用，本帧不再引用。
 }
 
 inline int tmrLoad(display::RegSink& sink,
@@ -490,6 +491,13 @@ inline int tmrLoad(display::RegSink& sink,
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
     prepTmrCmd(&cmd, tmr_mc_addr, tmr_size);
+
+    // β-2 帧值可观测：从帧 payload 拼回 buf/system 地址（打帧里的真实内容，非局部变量）
+    NRED_TRACE("tmrLoad: frame buf=0x%llX sys=0x%llX",
+               (unsigned long long)cmd.cmd_payload[0] |
+                   ((unsigned long long)cmd.cmd_payload[1] << 32),
+               (unsigned long long)cmd.cmd_payload[4] |
+                   ((unsigned long long)cmd.cmd_payload[5] << 32));
 
     cmdBufCopy(ring, &cmd);
 
