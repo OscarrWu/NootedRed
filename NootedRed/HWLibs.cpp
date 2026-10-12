@@ -450,6 +450,20 @@ static const UInt8 kMode2TailPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  返回 0=失败、非 0=成功。调用频率低（每槽 1 次×3-4 槽）。
 static const UInt8 kMode9440fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
                                           0x45, 0x31, 0xE4, 0xFF, 0xCE, 0x83, 0xFE, 0x0E, 0x0F, 0x87};
+// `0x9e505`：SMU 槽 sw_init 包装（(8,0) 分发表 case），原型 `UInt32(void* slot)`。
+//  内部 `0x9e785 callq *%r14`（r14=*(slot+8)=槽方法）。挂**函数入口**而非 call 返回点：
+//  call 点寄存器全是栈局部（&local_380/&local_98），C++ 侧取不到 r14/槽对象；
+//  入口形参即槽对象，`*(slot+8)` 正是将装入 r14 的方法指针（反编译 `pcVar9=param_1[1]` 已证）。
+static const UInt8 kMode9e505Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
+                                          0x48, 0x81, 0xEC, 0x60, 0x03, 0x00, 0x00, 0x49, 0x89, 0xFF};
+// `0x6430f`：smu_sw_init（槽方法本体，type8 槽 +8），原型 `SInt32(void* in, void* out)`。
+//  入参形状门 `in[2]==1`、能力位 `in[0x99]`（= 字节偏移 0x264）。
+static const UInt8 kMode6430fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53,
+                                          0x48, 0x81, 0xEC, 0xB8, 0x07, 0x00, 0x00, 0x49, 0x89, 0xF6};
+// `0x6720b`：smu_init_function_pointer_list（按 hw_version 分派），原型 `UInt32(void*, void*, void*)`。
+//  分派用的 hw_version id 由原函数写入 `obj+0x2c8`（反编译 `*(int*)(param_1+0x2c8)=iVar1` 已证）。
+static const UInt8 kMode6720bPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50,
+                                          0x49, 0x89, 0xFF, 0x48, 0x89, 0xF7, 0x48, 0x89, 0xD6};
 // ★ 修复（2026-09-28）：IP 发现表的 `num_base_address` 判据放宽。
 //  `0x2ab00e` 在解析 IP 表时要求 `(u8(ip+3) - 1) <= 5`（即 nba ∈ {1..6}），否则跳到失败出口
 //  `0x2ab1b5` 返回 1。RDNA3（Phoenix，780M）的 IP 表里 **hw_id 0x96 映射到 0x46 的块有 8 个基址**
@@ -1154,6 +1168,74 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     return ret;
 }
 
+// ─── (8,0) 失败点三读点（2026-10-12，区分 F0/F1/F4；深栈安全——只走 nredTraceLine）──────
+//  B27/B28 实证失败槽＝(8,0)（0x9440f 分发表 ret=0）。三候选：
+//   F0＝0x9e505 "NULL SMU discovery info!"（发现块缺，方法未被调用）；
+//   F1＝0x6430f 入参形状门（in[2]≠1 等）；
+//   F4＝0x6720b 版本不识别（switch 缺该 hw_version id）。
+//  ⚠️ 三者均在 TTL/bringup 深栈链上（0x9e505/0x6430f/0x6720b 同链）⇒ 沿 B25 纪律：
+//   回调内**禁止任何重沉 I/O**（SYSLOG/FileIO/dumpNow/IOMalloc/DBGLOG），只用 nredTraceLine。
+
+// H-9e785：0x9e505 入口。行 `9e785: r14=%llx ret=%d`。
+//  r14 = *(slot+8)（方法表首项，即将装入 r14 的方法指针；纯内存读自槽对象——call 返回点
+//  的寄存器 r14 在 C++ 侧不可取，故读点前移到函数入口，语义等价且深栈安全）。
+//  ret = 0x9e505 返回值（0=失败）。判读：ret=0 且 6430f 行未出现 ⇒ F0；6430f 行出现 ⇒ 联动定 F1/F4。
+UInt32 X5000HWLibs::wrapMode9e505(void* const slot)
+{
+    const UInt32 ret = FunctionCast(wrapMode9e505, singleton().orgMode9e505)(slot);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        UInt64 r14cand = 0;
+        if (slot != nullptr) {
+            r14cand = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(slot) + 8);
+        }
+        char line[128];
+        const int n = snprintf(line, sizeof(line),
+                               "9e785: r14=%llx ret=%d\n",
+                               static_cast<unsigned long long>(r14cand),
+                               static_cast<int>(ret));
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
+// H-6430f：0x6430f 入口。行 `6430f: in2=%u feat=%x ret=%d`。
+//  in2 = in[2]（形状门：非 1 ⇒ 判据不过，返 2/1）；feat = in[0x99]（字节偏移 0x264，能力位）；
+//  ret = 0x6430f 返回值（0=成功；1/2=形状门或分配失败）。
+SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
+{
+    UInt32 in2 = 0, feat = 0;
+    if (in != nullptr) {
+        in2  = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(in) + 8);
+        feat = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(in) + 0x264);
+    }
+    const SInt32 ret = FunctionCast(wrapMode6430f, singleton().orgMode6430f)(in, out);
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line),
+                               "6430f: in2=%u feat=%x ret=%d\n", in2, feat, static_cast<int>(ret));
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
+// H-6720b：0x6720b 入口。行 `6720b: id=%d ret=%d`。
+//  id = hw_version 分派 id，由原函数写入 obj+0x2c8（org 返回后读出；id ∉ {0,1,3,4,5,7,6,8,9,10}
+//  ⇒ F4 版本不识别，ret=2）；ret = 0x6720b 返回值。
+UInt32 X5000HWLibs::wrapMode6720b(void* const obj, void* const a2, void* const a3)
+{
+    const UInt32 ret = FunctionCast(wrapMode6720b, singleton().orgMode6720b)(obj, a2, a3);
+    int id = 0;
+    if (obj != nullptr) {
+        id = *reinterpret_cast<const int*>(static_cast<const UInt8*>(obj) + 0x2C8);
+    }
+    if (checkKernelArgument("-NRedAccelLog")) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "6720b: id=%d ret=%d\n", id, static_cast<int>(ret));
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
+}
+
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
@@ -1477,6 +1559,18 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode9440f", kMode9440fPattern, nullptr, arrsize(kMode9440fPattern),
                                            0x9440F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9440f, this->orgMode9440f}, "mode9440f");
+        }
+        if (const auto from = resolveProbe("mode9e505", kMode9e505Pattern, nullptr, arrsize(kMode9e505Pattern),
+                                           0x9E505)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9e505, this->orgMode9e505}, "mode9e505");
+        }
+        if (const auto from = resolveProbe("mode6430f", kMode6430fPattern, nullptr, arrsize(kMode6430fPattern),
+                                           0x6430F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode6430f, this->orgMode6430f}, "mode6430f");
+        }
+        if (const auto from = resolveProbe("mode6720b", kMode6720bPattern, nullptr, arrsize(kMode6720bPattern),
+                                           0x6720B)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode6720b, this->orgMode6720b}, "mode6720b");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
