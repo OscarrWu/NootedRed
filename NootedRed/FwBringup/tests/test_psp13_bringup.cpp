@@ -884,17 +884,18 @@ static void testSetupTmrFrame() {
     }
     fw::prepTmrCmd(&cmd, 0x12345678ULL, 0x400000);
     assert(cmd.cmd_id == GFX_CMD_ID_SETUP_TMR);
-    assert(cmd.cmd_payload[0] == 0x12345678u);          // lo 地址（降级：buf=cpu_pa）
-    assert(cmd.cmd_payload[1] == 0);                    // hi 地址
+    // β-1 重跑：buf = 借用 MC 常量 0x80f8000000（不随 CPU PA 变）
+    assert(cmd.cmd_payload[0] == 0xF8000000u);          // buf lo
+    assert(cmd.cmd_payload[1] == 0x00000080u);          // buf hi（0x80f8000000 >> 32）
     assert(cmd.cmd_payload[2] == 0x400000u);            // size
     assert(cmd.cmd_payload[3] == 0x00000002u);          // flags: virt_phy_addr=1
     assert(cmd.cmd_payload[4] == 0x12345678u);          // sys = CPU PA
     assert(cmd.cmd_payload[5] == 0);
-    // Path B：传入 IOVA 时两字段按语义拆分（buf=IOVA，sys=CPU PA）
-    fw::prepTmrCmd(&cmd, 0x12345678ULL, 0x400000, 0xABCD0000ULL);
-    assert(cmd.cmd_payload[0] == 0xABCD0000u);          // buf = IOVA
-    assert(cmd.cmd_payload[1] == 0);
-    assert(cmd.cmd_payload[4] == 0x12345678u);          // sys = CPU PA（不变）
+    // sys 随 CPU PA 变化、buf 恒定（单变量：只有 sys 是变量）
+    fw::prepTmrCmd(&cmd, 0xABCD1234ULL, 0x400000);
+    assert(cmd.cmd_payload[0] == 0xF8000000u);          // buf 仍为借用常量
+    assert(cmd.cmd_payload[1] == 0x00000080u);
+    assert(cmd.cmd_payload[4] == 0xABCD1234u);          // sys = 新 CPU PA
     assert(cmd.cmd_payload[5] == 0);
 }
 

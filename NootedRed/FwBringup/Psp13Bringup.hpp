@@ -460,56 +460,46 @@ inline int tmrInit(display::RegSink& sink,
 /// 等 Linux psp_prep_tmr_cmd_buf (amdgpu_psp.c:820-843) 非 SRIOV 分支
 /// cmd_payload: buf_phy_addr_lo/hi, buf_size, flags, sys_phy_addr_lo/hi (6 dword)
 ///
-/// **Path B（本卡）：两地址字段按语义拆分** —— 外部考证定论（`psp_gfx_if.h` 明示"本接口的物理
-/// 地址实为 GPU 虚拟地址"；Linux 侧 `buf=tmr_mc`(MC/IOVA)、`system=amdgpu_gmc_vram_pa`(VRAM PA)）：
-///   · `buf_phy_addr` ＝ **GPU 可寻址地址（MC/IOVA）**，由调用方对 TMR 缓冲建立 DMA 映射后传入；
-///   · `system_phy_addr` ＝ **该缓冲的 CPU 物理地址**（`tmr_mc_addr`）。
-/// β-1/β-2 曾把借用常量 `0x80f8000000` 填进两个字段（语义混淆）⇒ PSP 返回
-/// `0xFFFF0006`(TEE_ERROR_BAD_PARAMETERS)。本卡予以纠正。
-///
-/// 优雅降级：`buf_iova == 0` 表示调用方在此 hook 时机无法建立 DMA 映射（IOMMU/GART 未就绪、
-/// API 失败）⇒ 回退到"两字段都填 CPU PA"的原行为，并打一行 trace 说明走了降级路径。
-/// @param buf_iova     TMR 缓冲的 GPU 可寻址地址（IOVA/MC）；0 ⇒ 降级为 CPU PA
-/// @param tmr_mc_addr  TMR 缓冲的 CPU 物理地址（永远填进 `system_phy_addr`）
+/// **β-1 重跑（本卡）：`buf_phy_addr` 按单变量实验填借用 MC 常量 `0x80f8000000`**
+///  —— B40 实证 DMA 映射退化为恒等（IOVA==CPU PA，buf==sys ⇒ 未测到 GPU 可寻址域），
+///     故本卡重跑 β-1：`buf` 直填 Linux 同机实测的 PSP TMR MC 地址（固件 carve-out），
+///     `system_phy_addr` 保持该缓冲的 CPU 物理地址（`tmr_mc_addr`）。
+///     有 `tmrLoad: frame buf=... sys=...` 自证行 ⇒ 本轮必然可判读。
+/// kPspTmrBorrowedMcAddr ＝ kFirmwareCarveOutBase(0x8000000000) + 0xF8000000
+///    【外部·高／本机未实测】，仅 β-1 重跑单变量实验用。
+/// 注：上一版 `buf_iova`（Path B DMA 映射返回值）参数已整体移除；DMA 映射路径
+///   `nredMapTmrForDma()` 保留在 NRedFwBringupHook.hpp 但不再参与帧构造（见该处注释）。
 inline void prepTmrCmd(GfxCmdResp* cmd,
                        uint64_t tmr_mc_addr,
-                       uint32_t tmr_size,
-                       uint64_t buf_iova = 0) {
+                       uint32_t tmr_size) {
+    constexpr uint64_t kPspTmrBorrowedMcAddr = 0x80f8000000ULL; // β-1 重跑借用值
     cmd->buf_size        = kCmdBufSize;
     cmd->buf_version     = 1;
     cmd->cmd_id          = GFX_CMD_ID_SETUP_TMR;
-    // buf_phy_addr_lo/hi —— GPU 可寻址地址（IOVA/MC）。
-    // β-1/β-2 的借用常量 kPspTmrBorrowedAddr(0x80f8000000) 在语义上已被本卡取代：它既非本机
-    // IOVA，也非本机 TMR 的 CPU PA（只是 Linux 同机实测的固件 carve-out 值）⇒ 本帧不再使用。
-    const uint64_t buf_addr = (buf_iova != 0) ? buf_iova : tmr_mc_addr;
-    if (buf_iova == 0) {
-        NRED_TRACE("tmrLoad: iova=0 -> fallback buf=cpu_pa (dma map unavailable)");
-    }
-    cmd->cmd_payload[0]  = static_cast<uint32_t>(buf_addr & 0xFFFFFFFF);
-    cmd->cmd_payload[1]  = static_cast<uint32_t>((buf_addr >> 32) & 0xFFFFFFFF);
+    // buf_phy_addr_lo/hi —— β-1 重跑：借用 Linux 同机实测 PSP TMR 的 MC 地址（单变量实验）
+    cmd->cmd_payload[0]  = static_cast<uint32_t>(kPspTmrBorrowedMcAddr & 0xFFFFFFFF);
+    cmd->cmd_payload[1]  = static_cast<uint32_t>((kPspTmrBorrowedMcAddr >> 32) & 0xFFFFFFFF);
     // buf_size
     cmd->cmd_payload[2]  = tmr_size;
     // flags: virt_phy_addr = 1
     cmd->cmd_payload[3]  = 0x00000002;
-    // system_phy_addr_lo/hi —— CPU 物理地址（本卡修正：不再是借用常量，也不再与 buf 同值）
+    // system_phy_addr_lo/hi —— CPU 物理地址（保持现状，与 buf 不同值）
     cmd->cmd_payload[4]  = static_cast<uint32_t>(tmr_mc_addr & 0xFFFFFFFF);
     cmd->cmd_payload[5]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
 }
 
-/// @param buf_iova     TMR 缓冲的 GPU 可寻址地址（IOVA/MC）；0 ⇒ 降级为 CPU PA（见 prepTmrCmd）
 inline int tmrLoad(display::RegSink& sink,
                    RingState* ring,
                    uint64_t tmr_mc_addr,
                    uint32_t tmr_size,
                    uint64_t cmd_buf_mc_addr,
                    uint64_t fence_mc_addr,
-                   uint32_t* out_resp_status = nullptr,
-                   uint64_t buf_iova = 0) {
+                   uint32_t* out_resp_status = nullptr) {
     GfxCmdResp cmd;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
-    prepTmrCmd(&cmd, tmr_mc_addr, tmr_size, buf_iova);
+    prepTmrCmd(&cmd, tmr_mc_addr, tmr_size);
 
     // β-2 帧值可观测：从帧 payload 拼回 buf/system 地址（打帧里的真实内容，非局部变量）
     NRED_TRACE("tmrLoad: frame buf=0x%llX sys=0x%llX",
@@ -869,15 +859,13 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
 
 /// Phase 2: 运行 TmrLoad (SETUP_TMR)，需 ctx->tmr_buf 已分配
 /// @param tmr_mc_addr TMR 物理地址（由调用方分配后填入）
-/// @param buf_iova    TMR 缓冲的 GPU 可寻址地址（IOVA/MC，Path B）；0 ⇒ 降级为 CPU PA
 /// @return 0 成功，否则失败
 inline int bringupRunTmrLoad(BringupCtx* ctx,
                              bool boot_time_tmr,
                              bool autoload_supported,
                              uint64_t tmr_mc_addr,
                              uint64_t cmd_buf_mc_addr,
-                             uint64_t fence_mc_addr,
-                             uint64_t buf_iova = 0) {
+                             uint64_t fence_mc_addr) {
     display::RegSink& sink = *ctx->sink;
     ctx->last_error = 0;
 
@@ -891,8 +879,8 @@ inline int bringupRunTmrLoad(BringupCtx* ctx,
                                   tmr_mc_addr, ctx->tmr_size,
                                   cmd_buf_mc_addr,
                                   fence_mc_addr,
-                                  &ctx->last_resp_status,
-                                  buf_iova);
+                                  &ctx->last_resp_status);
+
         if (ctx->last_error != 0) {
             NRED_TRACE("tmrLoad: failed ret=%d", ctx->last_error);
             return ctx->last_error;

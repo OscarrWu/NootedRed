@@ -82,6 +82,12 @@ struct NredSyslogMuteGuard {
     ~NredSyslogMuteGuard() { gNredTraceSyslogMuted = prev; }
 };
 
+// ⚠️ β-1 重跑（本卡）：**本函数当前未被调用**（帧的 buf 已改填借用 MC 常量，见 prepTmrCmd）。
+//   B40 实证：本函数返回的 IOVA 在本机退化为恒等（== CPU PA）⇒ 未测到 GPU 可寻址域，故本轮绕开。
+//   **保留**理由：① 内含挂死护栏（IOMapper 过渡态自检），删除即失去该防御的可复用实现；
+//   ② β-1 重跑出结论后大概率回切 Path B ⇒ 保留可最小化回切 diff（恢复只需接回调用）。
+//   ⚠️ 副作用登记：保留即接受一处"当前未调用的 static inline 函数"（无编译告警风险：
+//      `static inline` 未使用不触发 -Wunused-function；precheck 已实测无新增告警）。
 // ── Path B：TMR 缓冲的 DMA 映射（取 GPU 可寻址地址 / IOVA）────────────────────────────
 // 依据：外部考证定论 —— `psp_gfx_if.h` 明示 SETUP_TMR 的 `buf_phy_addr` 实为 **GPU 虚拟地址**，
 //  Linux `psp_prep_tmr_cmd_buf` 里 `buf=tmr_mc`(MC/IOVA)、`system=amdgpu_gmc_vram_pa`(CPU PA)。
@@ -355,9 +361,9 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     // B39 三层入口标记 ③-b：`tmr-alloc: ok size=0x%X`（分配成功；纯观测，不改控制流）
     NRED_TRACE("tmr-alloc: ok size=0x%X", ctx.tmr_size);
 
-    // ── Path B：TMR 缓冲 DMA 映射（buf_phy_addr 按语义填 GPU 可寻址地址 / IOVA）──
-    // 失败 ⇒ iova=0 ⇒ prepTmrCmd 降级为"两字段都填 CPU PA"（原行为），不改变崩溃形态。
-    const uint64_t tmrIova = nredMapTmrForDma(tmrDesc, ctx.tmr_size);
+    // ── β-1 重跑：buf_phy_addr 已改填借用 MC 常量（prepTmrCmd 内），此处**不再**调用
+    //   `nredMapTmrForDma()`（B40 实证 DMA 映射退化为恒等 IOVA==CPU PA，未测到 GPU 可寻址域）。
+    //   该函数与挂死护栏**保留**（上方定义）：β-1 重跑结论后大概率回切 Path B，最小化回切 diff。
 
     // A-23：三个只读仪表（门控 `-NRedTmrAddrReadout`，默认关、仅观测）。
     //  通道：NRED_TRACE（A-22 内存优先，安全时点刷盘）⇒ 绝不调任何写文件接口。
@@ -395,8 +401,7 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                                false,      // autoload_supported
                                tmrPhys,
                                cmdBufMc,
-                               fenceMc,
-                               tmrIova);
+                               fenceMc);
     if (rc != 0) {
         NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
                    static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);
