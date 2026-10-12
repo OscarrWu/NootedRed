@@ -476,11 +476,10 @@ static const UInt8 kMode9e757Pattern[] = {0x48, 0x83, 0xC6, 0x04, 0x8B, 0x00, 0x
 static const UInt8 kMode96c4cPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
                                           0x48, 0x81, 0xEC, 0x80, 0x02, 0x00, 0x00, 0x49, 0x89, 0xD4, 0x49,
                                           0x89, 0xFF, 0x89, 0x75, 0xDC};
-// `0xa22b0`：主发现门（检查 interface#3 服务 `+0xe8` 解引 `*p==0x8d && p[1]==2`；预期本机返 0 ⇒ 走回退）。
-//  第 5 字节起 `E8 2E 96 FE FF`＝call 0x8b8e7（本构建内固定偏移）；尾 `74`＝JZ opcode（不含 rel8）。
-static const UInt8 kModea22b0Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0xE8, 0x2E, 0x96, 0xFE, 0xFF,
-                                          0x48, 0x85, 0xC0, 0x74, 0x1F, 0x48, 0x8B, 0x80, 0xE8,
-                                          0x00, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x74};
+// ⚠️ H-a22b0 已移除（2026-10-12，B29 回归确诊）：其模式中段含 rel32（`E8 2E 96 FE FF`），
+//   Lilu trampoline 复制/重定位该 prologue 产生无效编码 ⇒ invalid opcode @29.73s（见
+//   `tmp/tech/B29回归三查-2026-10-12.md`）。主发现门判据（预期本机返 0 ⇒ 走回退）由
+//   H-96c4c 回退成败行联动覆盖（回退被走且成败可观测），信息无损。其余 5 读点不受影响。
 // `0x956b8`：整链总闸（ipi_perform_hw_discovery；ret=0 ⇒ 某块未填/填充层失败）。
 static const UInt8 kMode956b8Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41,
                                           0x54, 0x53, 0x48, 0x81, 0xEC, 0x78, 0x02, 0x00, 0x00, 0x49, 0x89,
@@ -1300,19 +1299,8 @@ UInt32 X5000HWLibs::wrapMode96c4c(void* const obj, UInt32 const hw, void* const 
     return ret;
 }
 
-// H-a22b0：主发现门读点。行 `a22b0: ret=%u`。
-//  ret = 0 ⇒ 主发现不命中（本机伪装 Renoir 预期）⇒ 走回退（H-96c4c 行联动判读）。
-UInt32 X5000HWLibs::wrapModea22b0()
-{
-    const UInt32 ret = FunctionCast(wrapModea22b0, singleton().orgModea22b0)();
-    if (checkKernelArgument("-NRedAccelLog")) {
-        char line[128];
-        const int n = snprintf(line, sizeof(line), "a22b0: ret=%u\n", ret);
-        if (n > 0) { nredTraceLine(line, n); }
-    }
-    return ret;
-}
-
+// ⚠️ H-a22b0 读点已移除（2026-10-12，B29 回归确诊：模式中段含 rel32 ⇒ Lilu trampoline
+//  重定位产生无效编码）。主发现门判据由 H-96c4c 回退成败行联动覆盖（信息无损）。
 // H-956b8：整链总闸读点。行 `hwdisc: ret=%X`。
 //  ret = 0 ⇒ 某发现块未填（填充层失败，HwipList/回退上游）；非 0 ⇒ 填充完成（bit0=成功标志）。
 UInt32 X5000HWLibs::wrapMode956b8(void* const obj, UInt32 const hwId, void* const out, void* const a4)
@@ -1658,10 +1646,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                            0x96C4C)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode96c4c, this->orgMode96c4c}, "mode96c4c");
         }
-        if (const auto from = resolveProbe("modea22b0", kModea22b0Pattern, nullptr, arrsize(kModea22b0Pattern),
-                                           0xA22B0)) {
-            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapModea22b0, this->orgModea22b0}, "modea22b0");
-        }
+        // ⚠️ H-a22b0 注册块已移除（2026-10-12，B29 回归确诊：模式中段含 rel32 ⇒ Lilu
+        //  trampoline 重定位产生无效编码）。主发现门判据由 H-96c4c 回退成败行联动覆盖。
         if (const auto from = resolveProbe("mode956b8", kMode956b8Pattern, nullptr, arrsize(kMode956b8Pattern),
                                            0x956B8)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode956b8, this->orgMode956b8}, "mode956b8");

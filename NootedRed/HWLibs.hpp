@@ -111,7 +111,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgMode9e505{0};    // 0x9e505（(8,0) SMU 槽 sw_init 包装；判 F0）
     mach_vm_address_t                                            orgMode9e757{0};    // 0x9e757（0x9e505 内 disc 读点；F0）
     mach_vm_address_t                                            orgMode96c4c{0};    // 0x96c4c（发现块回退路径；F0/F1 上游）
-    mach_vm_address_t                                            orgModea22b0{0};    // 0xa22b0（主发现门）
+    // ⚠️ orgModea22b0 已移除（2026-10-12，B29 回归确诊：模式中段含 rel32 ⇒ trampoline 无效编码）
     mach_vm_address_t                                            orgMode956b8{0};    // 0x956b8（发现链总闸）
     mach_vm_address_t                                            orgMode6430f{0};    // 0x6430f（smu_sw_init 槽方法本体；判 F1）
     mach_vm_address_t                                            orgMode6720b{0};    // 0x6720b（smu_init_function_pointer_list；判 F4）
@@ -173,7 +173,7 @@ private:
     static UInt32 wrapMode6720b(void* obj, void* a2, void* a3);
     // 发现块填充链三读点（回退路径/主发现门/整链总闸）
     static UInt32 wrapMode96c4c(void* obj, UInt32 hw, void* out);
-    static UInt32 wrapModea22b0();
+    // ⚠️ wrapModea22b0 已移除（2026-10-12，B29 回归确诊：模式中段含 rel32 ⇒ trampoline 无效编码）
     static UInt32 wrapMode956b8(void* obj, UInt32 hwId, void* out, void* a4);
     CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
