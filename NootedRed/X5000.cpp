@@ -1105,6 +1105,12 @@ void X5000::fixedGetSurfaceInfo(AMDRadeonX5000_AMDHWAlignManager* const self, AM
 //  安全：只读对象字段，不调用任何 Apple 方法；门控 `-NRedAccelProbe`（默认不安装本 hook）。
 bool X5000::wrapAccelStart(void* const self, void* const provider)
 {
+    // B60 入口自证（**零解引用**：只打参数值）——早于 :1112 起的解引用与 :1130 的 Apple 调用，
+    //  用于"由前到后"看哪一条第一处缺失 ⇒ 确定性定位崩溃段（不依赖栈解码）。
+    NRED_TRACE("accelStart-enter: self=%llx prov=%llx",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
+
     // 入口读数（before）：`start` 会自行设置 `0x368`/`0x1e88` ⇒ 与出口对比可区分
     //  "从未设置"与"设置了又被清零"（真机出口 f368=0、f1e88 含 bit6 ⇒ 需 before 判定）。
     const UInt64 sBefore = reinterpret_cast<UInt64>(self);
@@ -1209,6 +1215,12 @@ static IOReturn ttlStubCallback(void* ctx, void* in, void** out)
 
 void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 {
+    // B60 入口自证（**零解引用**：只打参数值）——早于本函数任何解引用与 Apple 调用；
+    //  该阶段（TTL 初始化）若本行出现而后段缺失 ⇒ 崩溃在 TTL 初始化内部。
+    NRED_TRACE("initTtl-enter: self=%llx gart=%llx",
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(gartParams)));
+
     auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
         return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
     };
