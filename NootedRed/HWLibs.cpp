@@ -862,13 +862,15 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
     //    接口表 stride 0x18：index@+idx*0x18、data@+idx*0x18+8、obj@+idx*0x18+0x10。
     //    B48 coll-dump 实测 *#(ret)=lVar1 的 +0=1（#1 index）✓、+0x58=0（#3 未注册）✓
     //    ⇒ 死因字段＝**`*ret` 的 +0x58**（非 ret 本体的 +0x58——0x8b8e7 消费的是 *p 的接口表）。
-    //  本块把 #3 槽（lVar1+0x48/0x50/0x58）从 (0,0,0) seed 为 (3,0,obj3=**lVar1 自身**)，
-    //  与 0x8b9a5(idx<0x17) 的写址语义一致（补上 Apple 序列缺的 idx=3）。
-    //  注：obj3 取 tbl+0x10——该处是 0x8b969 写的**自引用字段**（*(puVar1+4)=puVar1）⇒
-    //  obj3=收集器自身（自引用 seed，同 Q4 建议）；0x8b8e7 只判非 0 ⇒ seed 后 rcx 非 0 ⇒ 门过。
-    //  ⚠️ 非空门：ret/*ret 任一为空 ⇒ 跳过（不 seed、不打成功行、打 skip 哨兵）。深栈：nredTraceLine。
-    //  ⚠️ 风险登记：obj3 自引用/复用可能被 0x8bbc4 递归消费（Q5①）；index+data 联动未解（Q5②）；
-    //     介入面可能滚到版本数据服务（Q5④）；不破坏 0x910e1/0x93e4c 回退链（不同线，低风险）。
+    //  本块把 #3 槽（lVar1+0x48/0x50/0x58）从 (0,0,0) seed 为 (3,0,obj3=**查询 800 对象**)。
+    //  【c1 修正（B54）】obj3 取 tbl+0x28——0x8b9a5(lVar1,1,lVar2,local_30) 写
+    //  lVar1+0x10+1*0x18＝lVar1+0x28＝lVar2（查询 id=800 的返回对象）；反编译亲见。
+    //  判据链（0x93f76→0xa3138→0x8b8e7/0x8bbc4）要求 #3 obj 的 **+0xe8** 指向 base SWIP
+    //  seq 表（+0x28/0x30）且表[0]≠0——自引用（B52 版）在第二跳即失败（lVar1+0xe8=0）；
+    //  查询 800 对象是候选载体（若其 +0xe8 仍为 0 ⇒ 转 c2 造两级链）。
+    //  ⚠️ 非空门：ret/*ret 任一为空 ⇒ 跳过（不 seed、打 skip 哨兵）。深栈：nredTraceLine。
+    //  ⚠️ 风险登记：obj3（查询 800 对象）的 +0xe8 若仍为 0 ⇒ 判据仍失败（c2 备选）；
+    //     0x95bda 逐项校验需真实 SWIP 拓扑数据；介入面可能滚到版本数据服务。
     if (checkKernelArgument("-NRedAccelLog")) {
         void* const tbl = (ret != nullptr) ? *reinterpret_cast<void**>(ret) : nullptr;
         if (ret == nullptr || tbl == nullptr) {
@@ -877,7 +879,7 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)));
         } else {
             uintptr_t* const slots = static_cast<uintptr_t*>(tbl);
-            const uintptr_t obj3 = slots[0x10 / sizeof(uintptr_t)];   // +0x10 = #1 obj（查询 800 对象）
+            const uintptr_t obj3 = slots[0x28 / sizeof(uintptr_t)];   // +0x28 = #1 obj（查询 800 对象）
             slots[0x48 / sizeof(uintptr_t)] = 3;                      // #3 index
             slots[0x50 / sizeof(uintptr_t)] = 0;                      // #3 data
             slots[0x58 / sizeof(uintptr_t)] = obj3;                   // #3 obj
