@@ -1385,10 +1385,18 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
             //   自建落盘在此刻不可靠（PP 探针无产出、IP 探针却成功）。本函数每启动至多被调用
             //   3 次 ⇒ 不挤日志缓冲。**故意不挂在任何 boot-arg 门控下**：门控判定在本文件里
             //   曾观察到与 HWLibs 侧不一致的行为，而这条读数只有 5 个字段，成本可忽略。
-            SYSLOG("X6000FB", "pp-ttl: ttl=%llx vt=%llx [0]=%llx [8]=%llx [10]=%llx",
+            // B59：并入上游"加速器对象位"与绑定/IRI 槽（B1/B2/B3/B6）——这些值本函数**已读出**
+            //   （o20=controller、c7960=加速器位、o50=HWServices、s670=绑定、s6b8=IRI），
+            //   原先只在 wantProbe 的 panic 行/wantRegister 行出现 ⇒ 本处**并入既有输出行**，
+            //   **零新增读、零新增门、不改既有语义**（仅扩打印字段）。
+            SYSLOG("X6000FB", "pp-ttl: ttl=%llx vt=%llx [0]=%llx [8]=%llx [10]=%llx"
+                   " ctl=%llx acc7960=%llx hws=%llx bind670=%llx iri6b8=%llx",
                    static_cast<unsigned long long>(hsD8), static_cast<unsigned long long>(ttlVt),
                    static_cast<unsigned long long>(ttl_0), static_cast<unsigned long long>(ttl_8),
-                   static_cast<unsigned long long>(ttl_10));
+                   static_cast<unsigned long long>(ttl_10),
+                   static_cast<unsigned long long>(o20), static_cast<unsigned long long>(c7960),
+                   static_cast<unsigned long long>(o50), static_cast<unsigned long long>(s670),
+                   static_cast<unsigned long long>(s6b8));
             // ─── 加速器加载前置判据（门控 `-NRedAccelProbe`）────────────────────
             //  依据（2026-09-26 离线取证）：Apple 的 `AmdGpuWrangler::vendor_doDeviceAttribute`
             //  （Framebuffer VM 0x44b0c）把三个属性写到 provider 上：LoadHWServices /

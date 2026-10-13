@@ -1013,6 +1013,55 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                            static_cast<unsigned long long>(t30_0));
             }
         }
+        // B59 c3dump3：判据链**修正读址**后的完整四跳读点（只读；逐跳门）。
+        //  【反汇编·确凿·逐指令依据】
+        //   0x93f76: movq %rdi,%r15 ; movq (%r15),%rbx        ⇒ A2 o1 = *(obj)
+        //   0x93faf: movq %rbx,%rdi ; 0x93fb4 callq 0xa3138   ⇒ 0xa3138 的 arg0 = *obj
+        //   0xa314a: callq 0x8b8e7                            ⇒ rdi 仍 = *obj（未被改写）
+        //   0x8b8e7: movq (%rdi),%rdi                         ⇒ A3 B  = *(*obj)   ← 早前漏掉的一跳
+        //   0x8bbc4: movq 16(%rdi,%rax,8),%rax（rax=3*3）      ⇒ A4 E  = *(B+0x58)
+        //   0xa315e: movq 232(%rcx),%rax（232=0xe8）           ⇒ A6 Ee8= *(E+0xe8)
+        //   0xa3173/a3182: addq $40 / $48                      ⇒ 表基址 = Ee8+0x28 / +0x30
+        //   0xa3186: movq (%rax),%rcx                          ⇒ 表首项
+        //   0xa3154: cmpl $1,%ebx ; ja ⇒ 失败                  ⇒ A5 arg1（>1 直接失败，必打）
+        //  ⚠️ R2：每一跳先 nredKernelPtrOk；任一不过 ⇒ 后续字段保持 0（不打哨兵行——
+        //     同一行已含各跳值，0 即"该跳未过"的可机读判据）；不解引用不合法指针。
+        if (checkKernelArgument("-NRedAccelLog")) {
+            void* const o1 = (nredKernelPtrOk(p1)) ? *reinterpret_cast<void**>(p1) : nullptr;
+            void* const B  = (nredKernelPtrOk(o1)) ? *reinterpret_cast<void**>(o1) : nullptr;
+            UInt64 E = 0, Ee8 = 0, base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0, Em0 = 0;
+            if (nredKernelPtrOk(B)) {
+                E   = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(B) + 0x58);
+                Em0 = *reinterpret_cast<UInt64*>(B);
+            }
+            void* const Ep = reinterpret_cast<void*>(E);
+            if (nredKernelPtrOk(Ep)) {
+                Ee8 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(Ep) + 0xe8);
+            }
+            void* const f = reinterpret_cast<void*>(Ee8);
+            if (nredKernelPtrOk(f)) {
+                base28 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(f) + 0x28);
+                base30 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(f) + 0x30);
+            }
+            if (nredKernelPtrOk(reinterpret_cast<void*>(base28))) {
+                t28_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base28));
+            }
+            if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
+                t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
+            }
+            NRED_TRACE("c3dump3: obj=%llx o1=%llx B=%llx E=%llx arg1=%llx Ee8=%llx base28=%llx t28_0=%llx base30=%llx t30_0=%llx Em0=%llx",
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(p1)),
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(o1)),
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(B)),
+                       static_cast<unsigned long long>(E),
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)),
+                       static_cast<unsigned long long>(Ee8),
+                       static_cast<unsigned long long>(base28),
+                       static_cast<unsigned long long>(t28_0),
+                       static_cast<unsigned long long>(base30),
+                       static_cast<unsigned long long>(t30_0),
+                       static_cast<unsigned long long>(Em0));
+        }
     }
     return ret;
 }
