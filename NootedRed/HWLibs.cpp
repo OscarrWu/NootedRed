@@ -979,7 +979,9 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
             t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
         }
-        char line[112];
+        // 实测：栈缓冲使本函数栈帧 1944→2168 B（+224 B）⇒ 改 static（不占栈）；
+        //  仅作 snprintf 复用、写完立即 nredTraceLine；上电单线程路径、无并发复用风险。
+        static char line[112];
         int n = snprintf(line, sizeof(line), "memdump: off=%04x b=%016llx%016llx%016llx%016llx\n",
                          0xE001, reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
                          reinterpret_cast<UInt64>(B), E);
