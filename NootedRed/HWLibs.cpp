@@ -856,6 +856,34 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
             }
         }
     }
+    // B52 补注册 interface#3（侦察式、单变量；介入内存：仅写 ret+0x48/0x50/0x58 三字段）。
+    //  ⚠️ 层级判定（反编译 + B48 真机双证据）：`ret`＝查询 3(id=8)对象（0x8b5de 返回 plVar3），
+    //    `*ret`＝lVar1（id=552 对象＝接口表载体，0x8b969 构造 +0x8b9a5 注册 #1/#2）。
+    //    接口表 stride 0x18：index@+idx*0x18、data@+idx*0x18+8、obj@+idx*0x18+0x10。
+    //    B48 coll-dump 实测 *#(ret)=lVar1 的 +0=1（#1 index）✓、+0x58=0（#3 未注册）✓
+    //    ⇒ 死因字段＝**`*ret` 的 +0x58**（非 ret 本体的 +0x58——0x8b8e7 消费的是 *p 的接口表）。
+    //  本块把 #3 槽（lVar1+0x48/0x50/0x58）从 (0,0,0) seed 为 (3,0,obj3=lVar1+0x10 的现有 #1 obj)，
+    //  与 0x8b9a5(idx<0x17) 的写址语义一致（补上 Apple 序列缺的 idx=3）。obj3 取 #1 obj（查询 800
+    //  对象）；0x8b8e7 只判非 0（`if(p&&*p) 0x8bbc4(*p,3)`），seed 后 rcx 非 0 ⇒ D 出口门过。
+    //  ⚠️ 非空门：ret/*ret 任一为空 ⇒ 跳过（不 seed、不打成功行、打 skip 哨兵）。深栈：nredTraceLine。
+    //  ⚠️ 风险登记：obj3 自引用/复用可能被 0x8bbc4 递归消费（Q5①）；index+data 联动未解（Q5②）；
+    //     介入面可能滚到版本数据服务（Q5④）；不破坏 0x910e1/0x93e4c 回退链（不同线，低风险）。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        void* const tbl = (ret != nullptr) ? *reinterpret_cast<void**>(ret) : nullptr;
+        if (ret == nullptr || tbl == nullptr) {
+            NRED_TRACE("pool: iface3 skip (ret=%llx tbl=%llx)",
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)));
+        } else {
+            uintptr_t* const slots = static_cast<uintptr_t*>(tbl);
+            const uintptr_t obj3 = slots[0x10 / sizeof(uintptr_t)];   // +0x10 = #1 obj（查询 800 对象）
+            slots[0x48 / sizeof(uintptr_t)] = 3;                      // #3 index
+            slots[0x50 / sizeof(uintptr_t)] = 0;                      // #3 data
+            slots[0x58 / sizeof(uintptr_t)] = obj3;                   // #3 obj
+            NRED_TRACE("pool: iface3 seeded index=3 obj=%llx",
+                       static_cast<unsigned long long>(obj3));
+        }
+    }
     return ret;
 }
 
