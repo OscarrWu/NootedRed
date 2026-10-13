@@ -946,6 +946,51 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)));
     }
+    // B63：把"四跳真链"读值**编码进 memdump 通道**（B55 判读：memdump 是崩溃前后
+    //  唯一活着的通道；写文件通道自 ~16s 起失败 ⇒ 不依赖入口 flush）。
+    //  ⚠️ **无条件执行**（不新增 boot-arg 门）——否则基线轮取不到值。
+    //  编码规则（固定长度、自含可解读，详见报告）：
+    //    行 `memdump: off=%04x b=%016llx%016llx%016llx%016llx`（off＝标签号，b＝4×64 位 hex）
+    //    0xE001: obj, o1=*(obj), B=*(o1),   E=*(B+0x58)
+    //    0xE002: param(第2参), Ee8=*(E+0xe8), Em0=*(E), 0(保留)
+    //    0xE003: base28=*(Ee8+0x28), t28_0=*(base28), base30=*(Ee8+0x30), t30_0=*(base30)
+    //  每跳先 nredKernelPtrOk；不合法 ⇒ 该字段按 0 编码（**不解引用**）。
+    //  栈占用：局部 `line[112]`（远小于既有 1 KB 行缓冲）+ 标量，无大缓冲、无循环展开。
+    {
+        void* const o1 = (nredKernelPtrOk(obj)) ? *reinterpret_cast<void**>(obj) : nullptr;
+        void* const B  = (nredKernelPtrOk(o1))  ? *reinterpret_cast<void**>(o1)  : nullptr;
+        UInt64 E = 0, Ee8 = 0, Em0 = 0, base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0;
+        if (nredKernelPtrOk(B)) {
+            E   = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(B) + 0x58);
+            Em0 = *reinterpret_cast<UInt64*>(B);
+        }
+        void* const Ep = reinterpret_cast<void*>(E);
+        if (nredKernelPtrOk(Ep)) {
+            Ee8 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(Ep) + 0xe8);
+        }
+        void* const f = reinterpret_cast<void*>(Ee8);
+        if (nredKernelPtrOk(f)) {
+            base28 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(f) + 0x28);
+            base30 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(f) + 0x30);
+        }
+        if (nredKernelPtrOk(reinterpret_cast<void*>(base28))) {
+            t28_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base28));
+        }
+        if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
+            t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
+        }
+        char line[112];
+        int n = snprintf(line, sizeof(line), "memdump: off=%04x b=%016llx%016llx%016llx%016llx\n",
+                         0xE001, reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
+                         reinterpret_cast<UInt64>(B), E);
+        if (n > 0) { nredTraceLine(line, n); }
+        n = snprintf(line, sizeof(line), "memdump: off=%04x b=%016llx%016llx%016llx%016llx\n",
+                     0xE002, reinterpret_cast<UInt64>(param), Ee8, Em0, 0ULL);
+        if (n > 0) { nredTraceLine(line, n); }
+        n = snprintf(line, sizeof(line), "memdump: off=%04x b=%016llx%016llx%016llx%016llx\n",
+                     0xE003, base28, t28_0, base30, t30_0);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
     if (checkKernelArgument("-NRedAccelLog")) {
         // `obj` 此处即收集器（`0x8b10e` 的 r14）；同时读出它的接口表快照，判断 idx=4 是否已注册。
