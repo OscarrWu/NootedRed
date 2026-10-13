@@ -862,9 +862,10 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
     //    接口表 stride 0x18：index@+idx*0x18、data@+idx*0x18+8、obj@+idx*0x18+0x10。
     //    B48 coll-dump 实测 *#(ret)=lVar1 的 +0=1（#1 index）✓、+0x58=0（#3 未注册）✓
     //    ⇒ 死因字段＝**`*ret` 的 +0x58**（非 ret 本体的 +0x58——0x8b8e7 消费的是 *p 的接口表）。
-    //  本块把 #3 槽（lVar1+0x48/0x50/0x58）从 (0,0,0) seed 为 (3,0,obj3=lVar1+0x10 的现有 #1 obj)，
-    //  与 0x8b9a5(idx<0x17) 的写址语义一致（补上 Apple 序列缺的 idx=3）。obj3 取 #1 obj（查询 800
-    //  对象）；0x8b8e7 只判非 0（`if(p&&*p) 0x8bbc4(*p,3)`），seed 后 rcx 非 0 ⇒ D 出口门过。
+    //  本块把 #3 槽（lVar1+0x48/0x50/0x58）从 (0,0,0) seed 为 (3,0,obj3=**lVar1 自身**)，
+    //  与 0x8b9a5(idx<0x17) 的写址语义一致（补上 Apple 序列缺的 idx=3）。
+    //  注：obj3 取 tbl+0x10——该处是 0x8b969 写的**自引用字段**（*(puVar1+4)=puVar1）⇒
+    //  obj3=收集器自身（自引用 seed，同 Q4 建议）；0x8b8e7 只判非 0 ⇒ seed 后 rcx 非 0 ⇒ 门过。
     //  ⚠️ 非空门：ret/*ret 任一为空 ⇒ 跳过（不 seed、不打成功行、打 skip 哨兵）。深栈：nredTraceLine。
     //  ⚠️ 风险登记：obj3 自引用/复用可能被 0x8bbc4 递归消费（Q5①）；index+data 联动未解（Q5②）；
     //     介入面可能滚到版本数据服务（Q5④）；不破坏 0x910e1/0x93e4c 回退链（不同线，低风险）。
