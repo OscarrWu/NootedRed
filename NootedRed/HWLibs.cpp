@@ -977,10 +977,35 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                    static_cast<unsigned long long>(e8),
                    static_cast<unsigned long long>(t28),
                    static_cast<unsigned long long>(t30));
+        // B58 c3dump2：判据真正读址的第二/三跳补测（零行为改动，pp58 非空门）。
+        //  【指令级依据】判据链＝0x8b8e7(p1)=*(rbx+0x58)=pp58（B50 实测非 0，第一跳已过）→
+        //    0xa315e MOV RAX,[RCX+0xe8] 读 ***(pp58+0xe8)***（本行 pp58e8，B50 未测的核心字段）→
+        //    0xa316a.. 分支取 +0x28/0x30 表基址（本行 base28/base30）→ 表首项 [0]（本行 t28_0/t30_0，
+        //    两个基址都打、标签写明来源）⇒ 一次判“表是否为空/哪一层断”。
+        //  ⚠️ 非空门：pp58==0 只打哨兵行；解引用均先判非空。深栈：nredTraceLine。
+        if (checkKernelArgument("-NRedAccelLog")) {
+            void* const q = (rbx != nullptr) ? reinterpret_cast<void*>(pp58) : nullptr;
+            if (q == nullptr) {
+                NRED_TRACE("c3dump2: skip (pp58=0)");
+            } else {
+                const UInt64 pp58e8 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(q) + 0xe8);
+                const UInt64 base28 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(q) + 0x28);
+                const UInt64 base30 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(q) + 0x30);
+                const UInt64 t28_0 = (base28 != 0)
+                    ? *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base28)) : 0;
+                const UInt64 t30_0 = (base30 != 0)
+                    ? *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30)) : 0;
+                NRED_TRACE("c3dump2: pp58e8=%llx base28=%llx base30=%llx t28_0=%llx t30_0=%llx",
+                           static_cast<unsigned long long>(pp58e8),
+                           static_cast<unsigned long long>(base28),
+                           static_cast<unsigned long long>(base30),
+                           static_cast<unsigned long long>(t28_0),
+                           static_cast<unsigned long long>(t30_0));
+            }
+        }
     }
     return ret;
 }
-
 // 第八步观测（2026-09-28 第二十一轮）：接口表注册 `0x8b9a5(table, idx, obj, val)`（只读，仅记录索引与值）。
 void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* const obj, void* const val)
 {
@@ -991,7 +1016,6 @@ void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* con
     }
     FunctionCast(wrapTtlRegIface, singleton().orgTtlRegIface)(table, idx, obj, val);
 }
-
 
 // 第八步观测（2026-09-28 第二十三轮）：`TlsCreateInstance`(0x93f76) 与 `TlsSwInit` 内部创建(0x95e9f)（只读）。
 bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
