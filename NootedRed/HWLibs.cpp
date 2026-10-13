@@ -81,6 +81,16 @@ void nredTraceLine(char* const buf, const int n)
     gTraceRing.push(buf, n);
 }
 
+// A4（2026-10-13）：探针解引用的"合法内核指针门"——非空 且 高位形如内核指针（0xFFFF）。
+//  口径沿用 wrapMode9e505 的既有判定（`(sv >> 48) == 0xFFFF`，A4 前唯一先例）；防"表内容
+//  残留的低位垃圾值"被当指针解引用（B50/B51 实证：base28/base30/t28_0 等字段确实可能为
+//  垃圾/0——垃圾指针解引用是 panic 源）。
+//  ⚠️ 不防"悬空栈指针"（内核栈地址高半区同为 0xFFFF——但悬空栈读不 panic，只读旧数据）。
+static inline bool nredKernelPtrOk(const void* const p)
+{
+    return p != nullptr && (reinterpret_cast<UInt64>(p) >> 48) == 0xFFFF;
+}
+
 // A-22/A-28：把内存环里的早期 trace 行**刷盘**（仅在**既有安全时点**调用）。
 //  安全时点（A-28 起）：
 //    ① L2 周期拍 `dumpTick` 的 **stBusy 保护区**内（**本卡新增**，每拍都刷 ⇒ 死亡时点可读到秒）；
@@ -796,7 +806,7 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
     void* const ret = FunctionCast(wrapTtlQuery, singleton().orgTtlQuery)(buf, id, flags, out);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt64 v0 = 0, v1 = 0;
-        if (out != nullptr) { v0 = out[0]; v1 = out[1]; }   // 实测各调用点的缓冲区间隔 0xE8 字节，读 16 字节安全
+        if (nredKernelPtrOk(out)) { v0 = out[0]; v1 = out[1]; }   // 实测各调用点的缓冲区间隔 0xE8 字节，读 16 字节安全
         NRED_TRACE("ttl query: id=%u flags=%u ret=%llx out=%llx v0=%llx v1=%llx", static_cast<unsigned>(id),
                static_cast<unsigned>(flags), static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(out)), static_cast<unsigned long long>(v0),
@@ -840,7 +850,7 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
     //  ⇒ 按方案文档 §5 拆两条防截断）。⚠️ 非空门：ret 与 *(void**)ret 任一为空即只打哨兵行。
     //  深栈纪律：只走 nredTraceLine（禁 SYSLOG/FileIO/dumpNow）。
     if (checkKernelArgument("-NRedAccelLog")) {
-        void* const q1obj = (ret != nullptr) ? *reinterpret_cast<void**>(ret) : nullptr;
+        void* const q1obj = (nredKernelPtrOk(ret)) ? *reinterpret_cast<void**>(ret) : nullptr;
         if (ret == nullptr || q1obj == nullptr) {
             NRED_TRACE("coll-dump: skip (coll=%llx q1=%llx)",
                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
@@ -872,7 +882,7 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
     //  ⚠️ 风险登记：obj3（查询 800 对象）的 +0xe8 若仍为 0 ⇒ 判据仍失败（c2 备选）；
     //     0x95bda 逐项校验需真实 SWIP 拓扑数据；介入面可能滚到版本数据服务。
     if (checkKernelArgument("-NRedAccelLog")) {
-        void* const tbl = (ret != nullptr) ? *reinterpret_cast<void**>(ret) : nullptr;
+        void* const tbl = (nredKernelPtrOk(ret)) ? *reinterpret_cast<void**>(ret) : nullptr;
         if (ret == nullptr || tbl == nullptr) {
             NRED_TRACE("pool: iface3 skip (ret=%llx tbl=%llx)",
                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
@@ -908,9 +918,9 @@ void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
         // 直接读"接口表"：`0x8bb9f(pool, idx)` = `*(pool)` 作表、表项 stride 0x18、字段 +0x10 = 对象。
         UInt64 e4 = 0, e1 = 0, e2 = 0;
         void*     tbl = nullptr;
-        if (ctx != nullptr) {
+        if (nredKernelPtrOk(ctx)) {
             tbl = *reinterpret_cast<void**>(ctx);
-            if (tbl != nullptr) {
+            if (nredKernelPtrOk(tbl)) {
                 e4 = reinterpret_cast<UInt64*>(tbl)[4 * 3 + 2];
                 e1 = reinterpret_cast<UInt64*>(tbl)[1 * 3 + 2];
                 e2 = reinterpret_cast<UInt64*>(tbl)[2 * 3 + 2];
@@ -933,9 +943,9 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         // `obj` 此处即收集器（`0x8b10e` 的 r14）；同时读出它的接口表快照，判断 idx=4 是否已注册。
         UInt64 e4 = 0, e1 = 0;
         void*  tbl = nullptr;
-        if (obj != nullptr) {
+        if (nredKernelPtrOk(obj)) {
             tbl = *reinterpret_cast<void**>(obj);
-            if (tbl != nullptr) {
+            if (nredKernelPtrOk(tbl)) {
                 e4 = reinterpret_cast<UInt64*>(tbl)[4 * 3 + 2];
                 e1 = reinterpret_cast<UInt64*>(tbl)[1 * 3 + 2];
             }
@@ -958,15 +968,15 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
     //  ⚠️ 非空门：每层先判非空，避免野指针 panic。深栈：nredTraceLine。
     if (checkKernelArgument("-NRedAccelLog")) {
         void* const p1 = obj;
-        void* const rbx = (p1 != nullptr) ? *reinterpret_cast<void**>(p1) : nullptr;
+        void* const rbx = (nredKernelPtrOk(p1)) ? *reinterpret_cast<void**>(p1) : nullptr;
         UInt64 p58 = 0, pp58 = 0, e8 = 0, t28 = 0, t30 = 0;
-        if (p1 != nullptr) {
+        if (nredKernelPtrOk(p1)) {
             p58 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(p1) + 0x58);
             e8  = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(p1) + 0xe8);
             t28 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(p1) + 0x28);
             t30 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(p1) + 0x30);
         }
-        if (rbx != nullptr) {
+        if (nredKernelPtrOk(rbx)) {
             pp58 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(rbx) + 0x58);
         }
         NRED_TRACE("c3dump: p1=%llx rbx=%llx p58=%llx pp58=%llx e8=%llx t28=%llx t30=%llx",
@@ -984,7 +994,7 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         //    两个基址都打、标签写明来源）⇒ 一次判“表是否为空/哪一层断”。
         //  ⚠️ 非空门：pp58==0 只打哨兵行；解引用均先判非空。深栈：nredTraceLine。
         if (checkKernelArgument("-NRedAccelLog")) {
-            void* const q = (rbx != nullptr) ? reinterpret_cast<void*>(pp58) : nullptr;
+            void* const q = (nredKernelPtrOk(reinterpret_cast<void*>(pp58))) ? reinterpret_cast<void*>(pp58) : nullptr;
             if (q == nullptr) {
                 NRED_TRACE("c3dump2: skip (pp58=0)");
             } else {
@@ -1023,7 +1033,7 @@ bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
     const bool ret = FunctionCast(wrapTlsCreate, singleton().orgTlsCreate)(obj, slots);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt32 s0 = 0, s1 = 0, s2 = 0;
-        if (slots != nullptr) {
+        if (nredKernelPtrOk(slots)) {
             s0 = reinterpret_cast<UInt32*>(slots)[0];
             s1 = reinterpret_cast<UInt32*>(slots)[1];
             s2 = reinterpret_cast<UInt32*>(slots)[2];
@@ -1041,7 +1051,7 @@ void* X5000HWLibs::wrapTlsSwInit(void* const obj)
     void* const ret = FunctionCast(wrapTlsSwInit, singleton().orgTlsSwInit)(obj);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt64 f0 = 0, f8 = 0;
-        if (obj != nullptr) {
+        if (nredKernelPtrOk(obj)) {
             f0 = reinterpret_cast<UInt64*>(obj)[0];
             f8 = reinterpret_cast<UInt64*>(obj)[1];
         }
@@ -1089,7 +1099,7 @@ UInt32 X5000HWLibs::wrapBgmStep1(void* const a, void* const b, void* const c, vo
     if (checkKernelArgument("-NRedAccelLog")) {
         // `d` = 输出结构（`0x2aacbb` 的判据 ② 读它的 +4，要求为 1；判据 ① 读 +0）
         UInt64 o0 = 0, o8 = 0;
-        if (d != nullptr) {
+        if (nredKernelPtrOk(d)) {
             o0 = reinterpret_cast<UInt64*>(d)[0];
             o8 = reinterpret_cast<UInt64*>(d)[1];
         }
@@ -1117,7 +1127,7 @@ UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
         // `0x2aa5bc` 的判据：读 `*(UInt32*)(obj+0x14)` 作为"模式"，只接受 1/2/3，否则返回 1（失败）。
         UInt32 mode = 0;
         UInt64 inner = 0, f2fa8 = 0, f2fb8 = 0;
-        if (a != nullptr) {
+        if (nredKernelPtrOk(a)) {
             mode = *reinterpret_cast<UInt32*>(reinterpret_cast<UInt8*>(a) + 0x14);
             inner = *reinterpret_cast<UInt64*>(a);
             f2fa8 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(a) + 0x2fa8);
@@ -1149,7 +1159,7 @@ UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 
 
 UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const out, UInt32* const flag)
 {
-    const UInt64 before = (out != nullptr) ? *out : 0;
+    const UInt64 before = (nredKernelPtrOk(out)) ? *out : 0;
     const UInt32 ret = FunctionCast(wrapCfgRead, singleton().orgCfgRead)(obj, id, out, flag);
     // ⚠️ 已静音（2026-09-28）：本函数是热路径（单轮 ~1800 次调用），其输出会把 L2 环形缓冲挤满，
     //  导致真正关键的观测行（`mode2-tail`/`ip`）落不了盘。信息已收集完毕，需要时再临时打开。
@@ -1169,7 +1179,7 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
     //  导致失败调用的关键行反被挤掉；而成功调用的内容已知固定。
     // ⚠️ 无论成功失败都落盘（2026-09-28 第 16 轮教训）：自检证明落盘通道可用，但"失败才落盘"
     //  一直没产出 ⇒ 与其猜，不如每次都写（每轮仅 3–4 次调用，文件极小）。
-    if (checkKernelArgument("-NRedAccelLog") && b != nullptr) {
+    if (checkKernelArgument("-NRedAccelLog") && nredKernelPtrOk(b)) {
         const auto* const p = static_cast<const UInt8*>(b);
         const UInt32 o12 = *reinterpret_cast<const UInt16*>(p + 0xC);   // IPDS 子表偏移（相对缓冲起点）
         const UInt32 o1C = *reinterpret_cast<const UInt16*>(p + 0x1C);  // HARV 子表偏移
@@ -1355,7 +1365,7 @@ UInt32 X5000HWLibs::wrapMode9e505(void* const slot)
 SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
 {
     UInt32 in2 = 0;
-    if (in != nullptr) {
+    if (nredKernelPtrOk(in)) {
         in2 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(in) + 8);
     }
     // B47 入口参数观测（零行为改动、无条件于 ret 值，置于任何 early-return 之前）：
@@ -1365,9 +1375,9 @@ SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
     //  深栈纪律：只走 nredTraceLine，-NRedAccelLog 门控。
     if (checkKernelArgument("-NRedAccelLog")) {
         const UInt64 p2 = reinterpret_cast<UInt64>(out);
-        const UInt64 v1 = (in != nullptr) ? *reinterpret_cast<const UInt64*>(in) : 0;
-        const UInt64 v2 = (out != nullptr) ? *reinterpret_cast<const UInt64*>(out) : 0;
-        const int in2v = (in != nullptr) ? static_cast<const int*>(in)[2] : -1;
+        const UInt64 v1 = (nredKernelPtrOk(in)) ? *reinterpret_cast<const UInt64*>(in) : 0;
+        const UInt64 v2 = (nredKernelPtrOk(out)) ? *reinterpret_cast<const UInt64*>(out) : 0;
+        const int in2v = (nredKernelPtrOk(in)) ? static_cast<const int*>(in)[2] : -1;
         char line[128];
         const int n = snprintf(line, sizeof(line),
                                "6430f: enter p2=%llx v1=%llx v2=%llx in2=%d\n",
