@@ -979,17 +979,20 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
             t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
         }
-        // 实测：栈缓冲使栈帧 1944→2168 B ⇒ 改 **static**（不占栈，回落 2056 B）。
-        //  ★ 合并为**单行一次输出**：B55 判读＝**我方打印本身会扰动该链** ⇒ 打印次数
-        //     越少越好（3 次 → 1 次）。static 缓冲 224 B（不占栈，无栈风险）；并发
-        //     仅可能致内容交错（写完立即 nredTraceLine，窗口极小），不崩溃。
-        static char line[224];
+        // B64 修截断：真因＝**TraceRing::kLineBytes＝192**（NRedTraceRing.hpp:33）
+        //  ⇒ push() 截断到 191 字符+'\n'（:47）。单行需 21+12×16+1＝214 字符 ⇒ 必被截断
+        //  （B56 实测 hex 仅 170）；且上版格式串只有 **11** 个 %016llx（字段数≠12，末字段漏打）。
+        //  修法＝**拆 2 行、每行 6 字段**（21+96+1＝118 ≤ 192，完整）＋修正字段数。
+        //  仍 static（不占栈）；仍无条件、仍在 Apple 调用之前；字段序不变。
+        static char line[128];
         int n = snprintf(line, sizeof(line),
-                         "memdump: off=%04x b=%016llx%016llx%016llx%016llx%016llx%016llx"
-                         "%016llx%016llx%016llx%016llx%016llx\n",
-                         0xE001, reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
-                         reinterpret_cast<UInt64>(B), E, reinterpret_cast<UInt64>(param),
-                         Ee8, Em0, 0ULL, base28, t28_0, base30, t30_0);
+                         "memdump: off=e001 b=%016llx%016llx%016llx%016llx%016llx%016llx\n",
+                         reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
+                         reinterpret_cast<UInt64>(B), E, reinterpret_cast<UInt64>(param), Ee8);
+        if (n > 0) { nredTraceLine(line, n); }
+        n = snprintf(line, sizeof(line),
+                     "memdump: off=e002 b=%016llx%016llx%016llx%016llx%016llx%016llx\n",
+                     Em0, 0ULL, base28, t28_0, base30, t30_0);
         if (n > 0) { nredTraceLine(line, n); }
     }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
