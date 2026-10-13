@@ -979,18 +979,17 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
             t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
         }
-        // 实测：栈缓冲使本函数栈帧 1944→2168 B（+224 B）⇒ 改 static（不占栈）；
-        //  仅作 snprintf 复用、写完立即 nredTraceLine；上电单线程路径、无并发复用风险。
-        static char line[112];
-        int n = snprintf(line, sizeof(line), "memdump: off=%04x b=%016llx%016llx%016llx%016llx\n",
+        // 实测：栈缓冲使栈帧 1944→2168 B ⇒ 改 **static**（不占栈，回落 2056 B）。
+        //  ★ 合并为**单行一次输出**：B55 判读＝**我方打印本身会扰动该链** ⇒ 打印次数
+        //     越少越好（3 次 → 1 次）。static 缓冲 224 B（不占栈，无栈风险）；并发
+        //     仅可能致内容交错（写完立即 nredTraceLine，窗口极小），不崩溃。
+        static char line[224];
+        int n = snprintf(line, sizeof(line),
+                         "memdump: off=%04x b=%016llx%016llx%016llx%016llx%016llx%016llx"
+                         "%016llx%016llx%016llx%016llx%016llx\n",
                          0xE001, reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
-                         reinterpret_cast<UInt64>(B), E);
-        if (n > 0) { nredTraceLine(line, n); }
-        n = snprintf(line, sizeof(line), "memdump: off=%04x b=%016llx%016llx%016llx%016llx\n",
-                     0xE002, reinterpret_cast<UInt64>(param), Ee8, Em0, 0ULL);
-        if (n > 0) { nredTraceLine(line, n); }
-        n = snprintf(line, sizeof(line), "memdump: off=%04x b=%016llx%016llx%016llx%016llx\n",
-                     0xE003, base28, t28_0, base30, t30_0);
+                         reinterpret_cast<UInt64>(B), E, reinterpret_cast<UInt64>(param),
+                         Ee8, Em0, 0ULL, base28, t28_0, base30, t30_0);
         if (n > 0) { nredTraceLine(line, n); }
     }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
