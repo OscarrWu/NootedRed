@@ -938,12 +938,14 @@ void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
 
 bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 {
-    // B60 入口自证（**零解引用**：只打参数值，不解引用任何指针）——必须早于 :941
-    //  （调用 Apple 原函数＝B52 判读的崩溃点）⇒ 下一轮看本行是否出现即可确定性定位崩溃段。
-    //  ⚠️ 本行**不含任何 *(...) 解引用**，自身不可能成为崩溃源。
-    NRED_TRACE("chkD-enter: obj=%llx p2=%llx",
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)));
+    // B62：入口自证（**零解引用**：只打参数值）——纳入门控 `-NRedAccelLog`，
+    //  使"基线轮"（不带该 boot-arg）在这条路径上**我方打印整体静默** ⇒ 单变量判
+    //  "是不是我方探针把这条链搞崩的"。⚠️ 不改任何读值/判定/控制流/返回值。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        NRED_TRACE("chkD-enter: obj=%llx p2=%llx",
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)));
+    }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
     if (checkKernelArgument("-NRedAccelLog")) {
         // `obj` 此处即收集器（`0x8b10e` 的 r14）；同时读出它的接口表快照，判断 idx=4 是否已注册。

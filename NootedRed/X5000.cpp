@@ -1105,15 +1105,14 @@ void X5000::fixedGetSurfaceInfo(AMDRadeonX5000_AMDHWAlignManager* const self, AM
 //  安全：只读对象字段，不调用任何 Apple 方法；门控 `-NRedAccelProbe`（默认不安装本 hook）。
 bool X5000::wrapAccelStart(void* const self, void* const provider)
 {
-    // B60 入口自证（**零解引用**：只打参数值）——早于 :1112 起的解引用与 :1130 的 Apple 调用，
-    //  用于"由前到后"看哪一条第一处缺失 ⇒ 确定性定位崩溃段（不依赖栈解码）。
-    NRED_TRACE("accelStart-enter: self=%llx prov=%llx",
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
-    // B61：入口事件驱动刷盘（既有 API）——修 B53 判读的"刷盘时窗"问题（唯一 flush 在 16 s、
-    //  崩溃更晚 ⇒ 崩溃前内容从未写出）。本节栈深评估：加速器 `start` 属普通 IOService 启动
-    //  路径（**非** B19/B25 的固件 bringup 深栈链）⇒ 此处 flush 安全（依据见报告 §二）。
-    nredTraceFlush();
+    // B62：纳入门控 `-NRedAccelLog`（基线轮须让该链上我方打印/刷盘整体静默）；
+    //  不改读值/控制流/返回值。⚠️ flush 一并纳入（避免基线轮改变落盘行为）。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        NRED_TRACE("accelStart-enter: self=%llx prov=%llx",
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
+        nredTraceFlush();
+    }
 
 
     // 入口读数（before）：`start` 会自行设置 `0x368`/`0x1e88` ⇒ 与出口对比可区分
@@ -1220,14 +1219,15 @@ static IOReturn ttlStubCallback(void* ctx, void* in, void** out)
 
 void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 {
-    // B60 入口自证（**零解引用**：只打参数值）——早于本函数任何解引用与 Apple 调用；
-    //  该阶段（TTL 初始化）若本行出现而后段缺失 ⇒ 崩溃在 TTL 初始化内部。
-    NRED_TRACE("initTtl-enter: self=%llx gart=%llx",
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(gartParams)));
-    // B61：入口事件驱动刷盘（既有 API）。栈深评估：TTL 初始化阶段，**非** B19/B25 的
-    //  固件 bringup 深栈链（`nredFwBringupHook` 那条）⇒ 此处 flush 安全（依据见报告 §二）。
-    nredTraceFlush();
+    // B62：纳入门控 `-NRedAccelLog`（基线轮须让该链上我方打印/刷盘整体静默）；
+    //  不改读值/控制流/返回值；flush 一并纳入（避免基线轮改变落盘行为）。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        NRED_TRACE("initTtl-enter: self=%llx gart=%llx",
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(gartParams)));
+        nredTraceFlush();
+    }
+
 
 
     auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
