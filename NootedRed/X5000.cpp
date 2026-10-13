@@ -1110,6 +1110,11 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
     NRED_TRACE("accelStart-enter: self=%llx prov=%llx",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
+    // B61：入口事件驱动刷盘（既有 API）——修 B53 判读的"刷盘时窗"问题（唯一 flush 在 16 s、
+    //  崩溃更晚 ⇒ 崩溃前内容从未写出）。本节栈深评估：加速器 `start` 属普通 IOService 启动
+    //  路径（**非** B19/B25 的固件 bringup 深栈链）⇒ 此处 flush 安全（依据见报告 §二）。
+    nredTraceFlush();
+
 
     // 入口读数（before）：`start` 会自行设置 `0x368`/`0x1e88` ⇒ 与出口对比可区分
     //  "从未设置"与"设置了又被清零"（真机出口 f368=0、f1e88 含 bit6 ⇒ 需 before 判定）。
@@ -1220,6 +1225,10 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
     NRED_TRACE("initTtl-enter: self=%llx gart=%llx",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(gartParams)));
+    // B61：入口事件驱动刷盘（既有 API）。栈深评估：TTL 初始化阶段，**非** B19/B25 的
+    //  固件 bringup 深栈链（`nredFwBringupHook` 那条）⇒ 此处 flush 安全（依据见报告 §二）。
+    nredTraceFlush();
+
 
     auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
         return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
