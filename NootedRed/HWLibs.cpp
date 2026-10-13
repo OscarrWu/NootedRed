@@ -959,10 +959,9 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
     {
         void* const o1 = (nredKernelPtrOk(obj)) ? *reinterpret_cast<void**>(obj) : nullptr;
         void* const B  = (nredKernelPtrOk(o1))  ? *reinterpret_cast<void**>(o1)  : nullptr;
-        UInt64 E = 0, Ee8 = 0, Em0 = 0, base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0;
+        UInt64 E = 0, Ee8 = 0, base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0;
         if (nredKernelPtrOk(B)) {
-            E   = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(B) + 0x58);
-            Em0 = *reinterpret_cast<UInt64*>(B);
+            E = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(B) + 0x58);
         }
         void* const Ep = reinterpret_cast<void*>(E);
         if (nredKernelPtrOk(Ep)) {
@@ -979,20 +978,20 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
             t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
         }
-        // B64 修截断：真因＝**TraceRing::kLineBytes＝192**（NRedTraceRing.hpp:33）
-        //  ⇒ push() 截断到 191 字符+'\n'（:47）。单行需 21+12×16+1＝214 字符 ⇒ 必被截断
-        //  （B56 实测 hex 仅 170）；且上版格式串只有 **11** 个 %016llx（字段数≠12，末字段漏打）。
-        //  修法＝**拆 2 行、每行 6 字段**（21+96+1＝118 ≤ 192，完整）＋修正字段数。
-        //  仍 static（不占栈）；仍无条件、仍在 Apple 调用之前；字段序不变。
-        static char line[128];
-        int n = snprintf(line, sizeof(line),
-                         "memdump: off=e001 b=%016llx%016llx%016llx%016llx%016llx%016llx\n",
-                         reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
-                         reinterpret_cast<UInt64>(B), E, reinterpret_cast<UInt64>(param), Ee8);
-        if (n > 0) { nredTraceLine(line, n); }
-        n = snprintf(line, sizeof(line),
-                     "memdump: off=e002 b=%016llx%016llx%016llx%016llx%016llx%016llx\n",
-                     Em0, 0ULL, base28, t28_0, base30, t30_0);
+        // B65 收敛为**单行 9 字段**（B55 结论：我方打印越少对该链扰动越小 ⇒ 1 行最优）。
+        //  保留（真链 9）：obj, o1=*(obj), B=*(o1), E=*(B+0x58), Ee8=*(E+0xe8),
+        //                  base28=*(Ee8+0x28), t28_0=*(base28), base30=*(Ee8+0x30), t30_0=*(base30)
+        //  丢弃（3，非链）：param（真 arg1 已证不可得）／Em0（证伪用，当前链在更上游即断）／保留位 0
+        //  长度自证：前缀 20 + 9×16 hex = 144 ⇒ **165 ≤ 191**（TraceRing 上限）⇒ 完整不截断。
+        //  缓冲 static char line[176]（不占栈，≥165+1）；仍无条件、仍在 Apple 调用之前；
+        //  逐跳先 nredKernelPtrOk（不合法 ⇒ 该字段按 0 编码、不解引用）。
+        static char line[176];
+        const int n =
+            snprintf(line, sizeof(line),
+                     "memdump: off=e001 b=%016llx%016llx%016llx%016llx%016llx"
+                     "%016llx%016llx%016llx%016llx\n",
+                     reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
+                     reinterpret_cast<UInt64>(B), E, Ee8, base28, t28_0, base30, t30_0);
         if (n > 0) { nredTraceLine(line, n); }
     }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
