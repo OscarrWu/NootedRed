@@ -802,6 +802,23 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(out)), static_cast<unsigned long long>(v0),
                static_cast<unsigned long long>(v1));
     }
+    // B48 挂点 B：查询分发器 out 对象 dump（纯只读、零行为改动）。
+    //  `ret`＝0x90ddc 返回的分配对象（=local_40）；dump 其前 0x60 字节 ×2 条（防单行截断）。
+    //  ⚠️ 非空门：ret 为空只打哨兵行。深栈纪律：只走 nredTraceLine。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        if (ret == nullptr) {
+            NRED_TRACE("qry-dump: skip (id=%u ret=0)", static_cast<unsigned>(id));
+        } else {
+            const auto* const p = static_cast<const UInt8*>(ret);
+            char hex[97];
+            for (UInt32 part = 0; part < 2; part += 1) {
+                for (UInt32 k = 0; k < 0x30; k += 1) {
+                    snprintf(hex + k * 2, 3, "%02x", p[part * 0x30 + k]);
+                }
+                NRED_TRACE("qry-dump: id=%u +%x b=%s", static_cast<unsigned>(id), part * 0x30, hex);
+            }
+        }
+    }
     return ret;
 }
 
@@ -815,6 +832,29 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
         NRED_TRACE("ttl-coll: ctx=%llx ret=%llx (NULL would fail 0x8b10e)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)));
+    }
+    // B48 挂点 A：收集器 dump（纯只读、零行为改动）。
+    //  `ret`＝收集器本体（0x8b5de 返回 rbx＝查询 3/id=8 对象）；其 +0＝查询 1（id=552）对象
+    //  （0x8b6b6 `movq %r15,(%rbx)`）。真机死因：`*(collector+0x58)==0`（interface#3 缺失）。
+    //  本 dump 输出收集器 +0 指向对象的前 0x58 字节 ×2 条（0xB0 总量；单行 hex 224 字符过长
+    //  ⇒ 按方案文档 §5 拆两条防截断）。⚠️ 非空门：ret 与 *(void**)ret 任一为空即只打哨兵行。
+    //  深栈纪律：只走 nredTraceLine（禁 SYSLOG/FileIO/dumpNow）。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        void* const q1obj = (ret != nullptr) ? *reinterpret_cast<void**>(ret) : nullptr;
+        if (ret == nullptr || q1obj == nullptr) {
+            NRED_TRACE("coll-dump: skip (coll=%llx q1=%llx)",
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(ret)),
+                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(q1obj)));
+        } else {
+            const auto* const p = static_cast<const UInt8*>(q1obj);
+            char hex[185];
+            for (UInt32 part = 0; part < 2; part += 1) {
+                for (UInt32 k = 0; k < 0x58; k += 1) {
+                    snprintf(hex + k * 2, 3, "%02x", p[part * 0x58 + k]);
+                }
+                NRED_TRACE("coll-dump: +%x b=%s", part * 0x58, hex);
+            }
+        }
     }
     return ret;
 }
