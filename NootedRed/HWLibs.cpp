@@ -1049,7 +1049,10 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
             if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
                 t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
             }
-            NRED_TRACE("c3dump3: obj=%llx o1=%llx B=%llx E=%llx arg1=%llx Ee8=%llx base28=%llx t28_0=%llx base30=%llx t30_0=%llx Em0=%llx",
+            // ⚠️ 诚实标注：`param`＝本 wrapper 的**第 2 个参数（指针值）**；判据真正的
+            //   `arg1`（`0xa3154 cmpl $1,%ebx` 判的那个标量＝`0xa250b` 的返回值）在
+            //   `0x93f76` **内部**算出、wrapper 拿不到 ⇒ 本处**不伪称 arg1**，只打 param。
+            NRED_TRACE("c3dump3: obj=%llx o1=%llx B=%llx E=%llx param=%llx Ee8=%llx base28=%llx t28_0=%llx base30=%llx t30_0=%llx Em0=%llx",
                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(p1)),
                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(o1)),
                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(B)),
