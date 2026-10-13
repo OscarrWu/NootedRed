@@ -1230,6 +1230,24 @@ SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
     if (in != nullptr) {
         in2 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(in) + 8);
     }
+    // B47 入口参数观测（零行为改动、无条件于 ret 值，置于任何 early-return 之前）：
+    //  0x6430f 头部校验 `param_1 && param_2 && *param_1==0x2c0 && *param_2==0x50 && param_1[2]==1`
+    //  任一不满足即 return 2（且不经 0x6720b）⇒ 本行读出三要素一刀切开 ret=2 来源。
+    //  ⚠️ 解引用**必须先判非空**（防野指针 panic）：v1/v2/in2 均为非空门后的值，空则打 0/-1。
+    //  深栈纪律：只走 nredTraceLine，-NRedAccelLog 门控。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        const UInt64 p2 = reinterpret_cast<UInt64>(out);
+        const UInt64 v1 = (in != nullptr) ? *reinterpret_cast<const UInt64*>(in) : 0;
+        const UInt64 v2 = (out != nullptr) ? *reinterpret_cast<const UInt64*>(out) : 0;
+        const int in2v = (in != nullptr) ? static_cast<const int*>(in)[2] : -1;
+        char line[128];
+        const int n = snprintf(line, sizeof(line),
+                               "6430f: enter p2=%llx v1=%llx v2=%llx in2=%d\n",
+                               static_cast<unsigned long long>(p2),
+                               static_cast<unsigned long long>(v1),
+                               static_cast<unsigned long long>(v2), in2v);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
     const SInt32 ret = FunctionCast(wrapMode6430f, singleton().orgMode6430f)(in, out);
     if (checkKernelArgument("-NRedAccelLog")) {
         char line[128];
