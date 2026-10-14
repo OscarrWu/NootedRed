@@ -135,10 +135,11 @@ static void nredTraceTruncateFile(const char* const path)
     vnode_t vp = nullptr;
     // 仅 O_CREAT|FWRITE：不靠 O_TRUNC（实测不生效），长度由下面的 setattr 显式置 0。
     if (vnode_open(path, O_CREAT | FWRITE | O_NOFOLLOW, S_IRUSR | S_IWUSR, VNODE_LOOKUP_NOFOLLOW, &vp, ctx) == 0) {
+        // XNU 惯用写法：`VATTR_INIT` → `VATTR_SET(va, va_data_size, 0)`
+        //  （`VATTR_SET` 同时赋值并置 active 位 ⇒ `vnode_setattr` 才会执行截断）。
         vnode_attr va{};
         VATTR_INIT(&va);
-        VATTR_WANTED(&va, va_data_size);
-        va.va_data_size = 0;
+        VATTR_SET(&va, va_data_size, static_cast<off_t>(0));
         vnode_setattr(vp, &va, ctx);   // 显式截断到 0（返回值不判：失败则沿用旧行为）
         vnode_close(vp, FWASWRITTEN, ctx);
     }
