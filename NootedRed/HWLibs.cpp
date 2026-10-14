@@ -39,6 +39,8 @@
 #include <Regs/VBIOSSMC.hpp>
 #include <pexpert/pexpert.h>   // B70：PE_boot_args()（与 checkKernelArgument 同源 PE_state+8，逐字读生效 boot-args）
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态落盘，见下方 IP 探针）
+#include <sys/vnode.h>          // B77①：vnode_open/vnode_setattr/vnode_close（落盘前显式截断）
+#include <sys/vnode_if.h>
 #include <NRedTraceSafe.hpp>       // A-20：早期落盘安全前置检查（纯逻辑）
 #include <NRedTraceRing.hpp>       // A-22：早期 trace 内存环形缓冲（纯逻辑静态存储）
 #include <FwBringup/NRedClkLayoutReadout.hpp>   // A-27：（甲）线读数（C2 出口延迟读）
@@ -117,6 +119,32 @@ static inline bool nredKernelPtrOk(const void* const p)
 //
 // A-28 "最后一拍可读到秒"：文件名带**秒级时间戳**（`sec`），并写一行 `[flush-stamp] sec=<n>` 首行标签
 //  ⇒ 判读侧从"最后存在的那个 NRedTraceFlush 文件"即可读出本轮死亡时点（秒级）。
+// ── B77①：落盘**先截断**（根因修）────────────────────────────────────────────
+//  背景（技术经理离线定案）："受门控的行却落盘"这一矛盾的根因＝**旧轮残留尾部**——
+//   写盘时**没有真正截断**，新正文比旧文件短时，旧文件尾部留在后面；而文件名只由
+//   `slide(0)/fseq/sec` 决定 ⇒ 跨轮重名是常态 ⇒ 判读时把旧轮尾巴当成本轮读数（已误判多次）。
+//  为什么需要本函数：Lilu `FileIO::writeBufferToFile` 的 `fmode` 虽含 `O_TRUNC`，但实测
+//   `O_TRUNC` 在该路径未被 honor（旧尾部仍在）⇒ 我方**显式**把目标文件长度截为 0。
+//  做法：`vnode_open`（O_CREAT|FWRITE，不截断）→ `vnode_setattr(va_data_size=0)` → `vnode_close`。
+//   ⚠️ 只改"落盘前的文件长度"，**不改**落盘路径/频率/正文格式/文件名格式（B77 第 4 件不做）。
+//   ⚠️ 失败不致命：截断失败仍照常写（保持既有行为，不新增失效路径）。
+static void nredTraceTruncateFile(const char* const path)
+{
+    vfs_context_t ctx = vfs_context_create(nullptr);
+    if (ctx == nullptr) { return; }
+    vnode_t vp = nullptr;
+    // 仅 O_CREAT|FWRITE：不靠 O_TRUNC（实测不生效），长度由下面的 setattr 显式置 0。
+    if (vnode_open(path, O_CREAT | FWRITE | O_NOFOLLOW, S_IRUSR | S_IWUSR, VNODE_LOOKUP_NOFOLLOW, &vp, ctx) == 0) {
+        vnode_attr va{};
+        VATTR_INIT(&va);
+        VATTR_WANTED(&va, va_data_size);
+        va.va_data_size = 0;
+        vnode_setattr(vp, &va, ctx);   // 显式截断到 0（返回值不判：失败则沿用旧行为）
+        vnode_close(vp, FWASWRITTEN, ctx);
+    }
+    vfs_context_rele(ctx);
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -146,6 +174,8 @@ int nredTraceFlush(int secTag)
         body[off++] = '\n';
     }
     if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
+    // B77①：**写之前先把目标文件截断到 0**（消除"新正文短于旧文件 ⇒ 旧尾部冒充本轮"）。
+    nredTraceTruncateFile(name);
     const int err = FileIO::writeBufferToFile(name, body, off);
     if (err == 0) {
         gTraceRing.reset();
@@ -1025,13 +1055,16 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         //  bit62/61=等待门成败、bit0-3=PowerUpConfig 各步）＋ 紧邻打印既有单例标志
         //  `smu13InitAttempted`（**不新造语义**：它就是 wrapSmu90SendMessageWithParameter
         //  首发送块里置的那个标志——该 wrapper 是死代码，故该值同时也判"死路径是否跑过"）。
-        //  记录行逐字：`smustate=%llx attempted=%d`（定长 ≤191）；nredTraceLine 内存环。
+        //  记录行逐字：`smustate=%llx attempted=%d n=%u`（定长 ≤191）；nredTraceLine 内存环。
+        //  B77③：追加 `n=`（本行被打印的次数，进入即自增并打自增后值）——解决
+        //  "smustate=0 attempted=0 与上一轮值完全相同 ⇒ 无法辨别新鲜度"的问题。
         {
             static char lineSm[96];
+            static unsigned sSmStatePrints = 0;
             const int nSm =
-                snprintf(lineSm, sizeof(lineSm), "smustate=%llx attempted=%d\n",
+                snprintf(lineSm, sizeof(lineSm), "smustate=%llx attempted=%d n=%u\n",
                          static_cast<unsigned long long>(NRed::singleton().getSmu13ProbeState()),
-                         singleton().smu13InitAttempted ? 1 : 0);
+                         singleton().smu13InitAttempted ? 1 : 0, ++sSmStatePrints);
             if (nSm > 0) { nredTraceLine(lineSm, nSm); }
         }
     }

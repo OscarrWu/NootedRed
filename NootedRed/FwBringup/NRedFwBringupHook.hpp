@@ -466,12 +466,18 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                                                            fwPriMc, smuHdr.ucode_size_bytes,
                                                GFX_FW_TYPE_SMU,
                                                            cmdBufMc, fenceMc);
-                    // B75：记录行追加 `mc=`（值＝本次帧交给 PSP 的 MC 地址＝`fwPriMc`）。
-                    //  行长自证：前缀 39 + ret/hdr/pay/off ≈ 4×8 + mc 18 ≈ 89 ≤ 191 ⇒ 不截断。
-                    NRED_TRACE("fw: load-ip-fw smu ret=%d hdr=%u pay=%u off=%u mc=0x%llx",
+                    // B75：`mc=`（本次帧交给 PSP 的 MC 地址）／B77②：`resp_status=`（PSP
+
+                    //  B77②：追加 `resp_status=`（PSP 响应状态字）——仿既有
+                    //  `bringup: loadToc resp_status=0x%X` 写法；取法＝调用后读响应帧
+                    //  `fw::cmdBufGet(&ring)->resp_status`（既有只读访问器，零行为改动）。
+                    //  行长自证：前缀 39 + 4×~8 + mc 18 + resp_status ~14 ≈ 97 ≤ 191 ⇒ 不截断。
+                    const fw::GfxCmdResp* const respSmu = fw::cmdBufGet(&ring);
+                    NRED_TRACE("fw: load-ip-fw smu ret=%d hdr=%u pay=%u off=%u mc=0x%llx resp_status=0x%X",
                                smuRet, smuHdr.header_size_bytes, smuHdr.ucode_size_bytes,
                                smuHdr.ucode_array_offset_bytes,
-                               static_cast<unsigned long long>(fwPriMc));
+                               static_cast<unsigned long long>(fwPriMc),
+                               (respSmu != nullptr) ? respSmu->resp_status : 0xFFFFFFFFu);
                     if (smuRet != 0) {
                         NRED_TRACE("bringup: phase3 failed (load-ip-fw smu) ret=%d", smuRet);
                     }
