@@ -37,6 +37,7 @@
 #include <Regs/SDMA0.hpp>
 #include <Regs/SMU.hpp>
 #include <Regs/VBIOSSMC.hpp>
+#include <pexpert/pexpert.h>   // B70：PE_boot_args()（与 checkKernelArgument 同源 PE_state+8，逐字读生效 boot-args）
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态落盘，见下方 IP 探针）
 #include <NRedTraceSafe.hpp>       // A-20：早期落盘安全前置检查（纯逻辑）
 #include <NRedTraceRing.hpp>       // A-22：早期 trace 内存环形缓冲（纯逻辑静态存储）
@@ -1029,6 +1030,15 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)), ret ? 1 : 0,
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)),
                static_cast<unsigned long long>(e1), static_cast<unsigned long long>(e4));
+        // B70：`smustate=` 行（既有 -NRedAccelLog 块内；零新门控、零新寄存器操作）。
+        //  内容＝NRed::getSmu13ProbeState()：bit63=InternalHwInit 被调用过、bit60=首发送进过、
+        //  bit62/61=等待门成败、bit0-3=PowerUpConfig 各步（NRed.hpp 注释）。ring 打印，定长 ≤191。
+        {
+            static char lineSm[96];
+            const int nSm = snprintf(lineSm, sizeof(lineSm), "smustate=%llx\n",
+                                     static_cast<unsigned long long>(NRed::singleton().getSmu13ProbeState()));
+            if (nSm > 0) { nredTraceLine(lineSm, nSm); }
+        }
     }
     // B55 三层解引用只读 dump（零行为改动；交叉复核 §4 观测清单）。
     //  链：r15=*(obj+8)（obj=本函数入参，0x92911 调用点传 rdi）；rbx=*r15（0x93f98）；
@@ -1947,6 +1957,28 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         DBGLOG("NRed", "build: date=%s time=%s hooks=%u", __DATE__, __TIME__, nHooks);
         // 同一目的：`-NRedFwBringup` 门控实际解析值（顺带解决「门控是否真的开了」盲区）。
         DBGLOG("NRed", "bootarg FwBringup=%d", singleton().smu13FwBringupEnabled ? 1 : 0);
+        // B70：`bootargs:` 逐字行（PE_boot_args，与 checkKernelArgument 同源 PE_state+8；
+        //  解决「请求的 ≠ 内核实际看到的」盲区——现有三份 boot-args 记录均只是请求值）。
+        //  ⚠️ 位置＝本 kext 最早无条件执行点（构建自报行旁）；**每轮必打**。
+        //  通道＝nredTraceLine（内存环，零新增 SYSLOG）；缓冲 static（不占栈）；定长 ≤191。
+        //  截断：内容 >180 ⇒ 截到 179 并加 `~` 标记（10 前缀+179+1+换行=191 ≤191）。
+        //  失败出口：PE_boot_args() 返回 nullptr ⇒ 记 `bootargs: (null)` 行，不悬停。
+        {
+            static char lineBoot[192];
+            const char* const ba = PE_boot_args();
+            int n = 0;
+            if (ba != nullptr) {
+                const size_t blen = strlen(ba);
+                if (blen <= 180) {
+                    n = snprintf(lineBoot, sizeof(lineBoot), "bootargs: %s\n", ba);
+                } else {
+                    n = snprintf(lineBoot, sizeof(lineBoot), "bootargs: %.179s~\n", ba);
+                }
+            } else {
+                n = snprintf(lineBoot, sizeof(lineBoot), "bootargs: (null)\n");
+            }
+            if (n > 0) { nredTraceLine(lineBoot, n); }
+        }
     }
 
     // ★ 落盘通道自检（2026-09-28）：`mode2-tail` 的关键读数发生在 ~34.8s，已晚于 L2 的 msgbuf 覆盖窗口，
