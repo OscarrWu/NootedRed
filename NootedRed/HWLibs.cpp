@@ -417,6 +417,19 @@ static const UInt8 kTtlInitCheckDPatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
                                                   0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+// B67（2026-10-15）：HWLibs `ttl_initialize`（归零 `0x8af60`；kc 绝对 `0x4DEEF60`；Ghidra 名
+//  FUN_0008af60，**无符号** ⇒ 必须地址路由）。模式锚点＝**函数头序言**（push rbp; mov rsp,rbp;
+//  push r15/r14/r12/rbx; sub rsp,80; 连续 9 个 `movq $0,-N(%rbp)` 清零栈槽; movl $2,%r15d），
+//  共 59 字节，**取自真机同 build 的二进制**（`kb/内核扩展/13.6/extracted/
+//  com.apple.kext.AMDRadeonX5000HWLibs.macho`，__text fileoff 口径 0x8bf60 提取）；
+//  Ghidra `pattern_search` 实测**唯一**命中 0x8af60。编译期断言字节数＝59（防拷贝错行）。
+static const UInt8 kTtlInitPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48,
+                                        0x83, 0xEC, 0x50, 0x31, 0xC0, 0x48, 0x89, 0x45, 0xD8, 0x48, 0x89, 0x45,
+                                        0xD0, 0x48, 0x89, 0x45, 0xC8, 0x48, 0x89, 0x45, 0xC0, 0x48, 0x89, 0x45,
+                                        0xB8, 0x48, 0x89, 0x45, 0xB0, 0x48, 0x89, 0x45, 0xA8, 0x48, 0x89, 0x45,
+                                        0xA0, 0x48, 0x89, 0x45, 0x98, 0x41, 0xBF, 0x02, 0x00, 0x00, 0x00};
+static_assert(arrsize(kTtlInitPattern) == 59, "B67: kTtlInitPattern must be 59 bytes");
+
 // 第八步观测（2026-09-28 第二十一轮）：接口表注册函数 `0x8b9a5(table, idx, obj, val)`
 //  —— 写 `table[idx] = {idx, val, obj}`。离线实测：全 kext 内只有**两处**调用它（idx = 1 与 2），
 //  而 `0x8bb9f(pool, 4)`（取 `pIpi`）要求表项 4 存在 ⇒ 需真机确认"表项 4 是否被注册"。
@@ -1129,6 +1142,47 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
     }
     return ret;
 }
+// B67（2026-10-15）：HWLibs `ttl_initialize`（0x8af60；kc 绝对 0x4DEEF60）**唯一新增挂点**。
+//  **零行为改动**：wrapper 逐字透传（参数/返回值/控制流原样）；不加门控（无条件执行，与
+//  B66 e002 行同性质）；零 SYSLOG、零 panic 文本增量。
+//  读数（两行，走 `nredTraceLine` 内存环）：
+//    · in 行：只打 a1/a2（a2 ＝ `&门面+0x38`，由调用方 `0xa940b: leaq 56(%rbx),%rsi` 提供——
+//      已自核 `HWLibs_full.asm` 行 190313/190315：`a940b leaq 56(%rbx),%rsi` ⇒ `a9416 callq 0x8af60`），
+//      **不解引用**；
+//    · out 行（调原函数之后）：a2 内核区间校验通过才 `v = *(u64*)a2`（＝写点 `0x8b09f`
+//      `movq %rax,(%r14)` 写的那个格子；r14＝rsi＝a2 ⇒ 读的就是它），否则记 0xFF 哨兵（不解引用）；
+//    · 按补充决定（保守变体）：**只在 out 行之后 flush 一次**（flush＝磁盘 I/O；本取点在
+//      深栈链上（0xa9416→0x8af60），B19 病根＝深栈重 I/O ⇒ I/O 次数取最少；"入口行可能丢失"
+//      可接受——若原函数内 panic，panic 回溯自带本 wrapper 帧即证明"已进入"）。
+//  长度自证：两行均 ≤ 60 字符 ≤ 191（TraceRing 上限）。缓冲 static（不占栈）。
+UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
+{
+    {
+        // in 行（无条件，只打参数值，不解引用）
+        static char lineIn[96];
+        const int nIn =
+            snprintf(lineIn, sizeof(lineIn), "ttl-init: in a1=%llx a2=%llx\n",
+                     static_cast<unsigned long long>(reinterpret_cast<UInt64>(a1)),
+                     static_cast<unsigned long long>(reinterpret_cast<UInt64>(a2)));
+        if (nIn > 0) { nredTraceLine(lineIn, nIn); }
+    }
+    const UInt32 ret = FunctionCast(wrapTtlInit, singleton().orgTtlInit)(a1, a2);
+    {
+        // out 行：`v = *(u64*)a2`（a2 非合法内核地址 ⇒ 0xFF 哨兵，不解引用）
+        static char lineOut[96];
+        const UInt64 a2u = reinterpret_cast<UInt64>(a2);
+        const UInt64 v   = (a2u >= 0xffffff7f80000000ULL) ? *reinterpret_cast<const UInt64*>(a2u)
+                                                          : 0xFFULL;
+        const int nOut =
+            snprintf(lineOut, sizeof(lineOut), "ttl-init: out v=%llx\n",
+                     static_cast<unsigned long long>(v));
+        if (nOut > 0) {
+            nredTraceLine(lineOut, nOut);
+            nredTraceFlush();   // B67 保守变体：仅此处 flush 一次（深栈少 I/O）
+        }
+    }
+    return ret;
+}
 // 第八步观测（2026-09-28 第二十一轮）：接口表注册 `0x8b9a5(table, idx, obj, val)`（只读，仅记录索引与值）。
 void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* const obj, void* const val)
 {
@@ -1822,6 +1876,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("ttl-checkD", kTtlInitCheckDPattern, kTtlInitCheckDPatternMask,
                                            arrsize(kTtlInitCheckDPattern), 0xA285F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlCheckD, this->orgTtlCheckD}, "ttl-checkD");
+        }
+        if (const auto from = resolveProbe("ttl-init", kTtlInitPattern, nullptr, arrsize(kTtlInitPattern),
+                                           0x8AF60)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlInit, this->orgTtlInit}, "ttl-init");
         }
         if (const auto from = resolveProbe("ttl-reg", kTtlRegIfacePattern, nullptr, arrsize(kTtlRegIfacePattern),
                                            0x8B9A5)) {

@@ -95,6 +95,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgTtlAllocA{0};    // 0x93880
     mach_vm_address_t                                            orgTtlAllocB{0};    // 0x928f4
     mach_vm_address_t                                            orgTtlCheckD{0};    // 0xa285f
+    mach_vm_address_t                                            orgTtlInit{0};     // 0x8af60 ttl_initialize（B67；无符号内部函数，地址路由）
     mach_vm_address_t                                            orgTtlRegIface{0};  // 0x8b9a5 接口表注册（idx/值）
     mach_vm_address_t                                            orgTlsCreate{0};    // 0x93f76 TlsCreateInstance 判据
     mach_vm_address_t                                            orgTlsSwInit{0};    // 0x95e9f TlsSwInit 内部创建
@@ -148,6 +149,7 @@ private:
     static void* wrapTtlAllocA(void* ctx);
     static void* wrapTtlAllocB(void* ctx);
     static bool  wrapTtlCheckD(void* obj, void* param);
+    static UInt32 wrapTtlInit(void* a1, void* a2);   // B67：ttl_initialize 出入口两读（零行为改动）
     // 第八步观测（2026-09-28 第二十一轮）：接口表注册函数 `0x8b9a5(table, idx, obj, val)`（只读）
     static void wrapTtlRegIface(void* table, UInt32 idx, void* obj, void* val);
     // 第八步观测（2026-09-28 第二十三轮）：TlsCreateInstance(0x93f76) 与 TlsSwInit 内部创建(0x95e9f)（只读）
