@@ -186,8 +186,12 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     //     `NRED_TRACE` 会走 SYSLOG（`lilu_os_log` 内含 1 KB 栈缓冲）⇒ B19 Double fault 同根因。
     //     故此处**不走 NRED_TRACE**，直连 `nredTraceLine`（内存环，零 FS、零 os_log）。
     {
+        // B75：追加进入计数 `n=`（kext 侧真正的 bringup 入口＝**本函数**；
+        //  `bringupRun`（Psp13Bringup.hpp 的三阶段兼容封装）只被用户态测试调用 ⇒
+        //  那行的 `bringupRun: enter` 不会进包，故此处补上同义计数）。
+        static unsigned sGHookEnter = 0;
         char line[64];
-        const int n = snprintf(line, sizeof(line), "bringup: enter\n");
+        const int n = snprintf(line, sizeof(line), "bringup: enter n=%u\n", ++sGHookEnter);
         if (n > 0) { nredTraceLine(line, n); }
     }
     const NredSyslogMuteGuard _syslogMute;   // B19：本 hook 作用域内静音 SYSLOG（RAII，随各 return 复位）
