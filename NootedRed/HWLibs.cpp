@@ -61,6 +61,13 @@ nred::TraceRing gTraceRing;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
+// B73b：SMU「起来确认」序列的**一次性（文件级）标志**（技术经理要求文件级共用）：
+//  · 语义：本进程内该确认序列至多执行一次（首条 `TestMessage(0x01)` 在 SMU 不应答时
+//    最多等 ~2 s，上界＝ctx+0x310 的 2000 步；Apple 可能多次调用发送点 ⇒ 防反复等待）。
+//  · **共用约定**：`PPSMC_MSG_GetSmuVersion`(0x02) 在我方有**两处发送点**（`smuInternalSwInitOld`
+//    与 `smuGetUCodeConsts`）⇒ 本标志由「SMU 起来确认」序列**共用**；**若将来在其它发送点
+//    也插同一确认，必须复用本标志**（否则一次引导会发两次、各等 ~2 s）。
+static bool sGSmUpProbeDone = false;
 
 
 // 诊断行落盘（2026-09-28 第 17 轮）：L2 走内核 `msgbuf`，覆盖窗口实测只有 26–35 s，而 TTL/BGM 的
@@ -2443,18 +2450,26 @@ CAILResult X5000HWLibs::smuGetUCodeConsts(void* const ctx, AMDSMUUCodeConstants*
     //   `rc=2`＝仍无应答。**每个分支都有出口**（ctx 由本函数语义保证非空；rc!=0 记行返回、
     //   不重试、不悬停——smuSendMessage 内部等待上界＝ctx+0x310 的 2000 步）。
     //  ⚠️ 零 SMN 读（不碰 0x3010028）；零新增 SYSLOG（nredTraceLine 内存环）；定长单行 ≤191。
-    {
-        uint32_t resp = 0;
-        const CAILResult rcTest = singleton().smuSendMessage(
-            ctx, PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &resp);
-        NRED_TRACE("smu probe: test msg=0x1 rc=%u resp=0x%X",
-                   static_cast<unsigned>(rcTest), resp);
-        if (rcTest == kCAILResultOK) {
-            uint32_t ver = 0;
-            const CAILResult rcVer = singleton().smuSendMessage(
-                ctx, PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion, 0, &ver);
-            NRED_TRACE("smu probe: ver=0x%X", ver);
-            (void)rcVer;   // 版本已落盘；本函数原有 0x02 发送路径不动（保持返回值语义）
+    // B73b：**一次性保护**（技术经理要求）——Apple 可能多次调用 `smuGetUCodeConsts`，
+    //  而该序列首条 `TestMessage` 在 SMU 不应答时最多等 ~2 s（上界＝ctx+0x310 的 2000 步）；
+    //  ⇒ 不加保护会**反复等待、拖时间、扰动时序**。故本序列**本进程内至多执行一次**。
+    //  标志＝**文件级 `sGSmUpProbeDone`**（:70；技术经理要求共用——0x02 有两处发送点，
+    //  将来在其它发送点插同一确认必须复用本标志，否则一次引导发两次）。
+    if (!sGSmUpProbeDone) {
+        sGSmUpProbeDone = true;
+        {
+            uint32_t resp = 0;
+            const CAILResult rcTest = singleton().smuSendMessage(
+                ctx, PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &resp);
+            NRED_TRACE("smu probe: test msg=0x1 rc=%u resp=0x%X",
+                       static_cast<unsigned>(rcTest), resp);
+            if (rcTest == kCAILResultOK) {
+                uint32_t ver = 0;
+                const CAILResult rcVer = singleton().smuSendMessage(
+                    ctx, PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion, 0, &ver);
+                NRED_TRACE("smu probe: ver=0x%X", ver);
+                (void)rcVer;   // 版本已落盘；本函数原有 0x02 发送路径不动（保持返回值语义）
+            }
         }
     }
     return singleton().smuSendMessage(ctx, PPSMC_MSG_GetSmuVersion, 0, &consts->version);
