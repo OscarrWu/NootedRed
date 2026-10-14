@@ -946,26 +946,37 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)));
     }
-    // B63：把"四跳真链"读值**编码进 memdump 通道**（B55 判读：memdump 是崩溃前后
-    //  唯一活着的通道；写文件通道自 ~16s 起失败 ⇒ 不依赖入口 flush）。
-    //  ⚠️ **无条件执行**（不新增 boot-arg 门）——否则基线轮取不到值。
-    //  编码规则（固定长度、自含可解读，详见报告）：
-    //    行 `memdump: off=%04x b=%016llx%016llx%016llx%016llx`（off＝标签号，b＝4×64 位 hex）
-    //    0xE001: obj, o1=*(obj), B=*(o1),   E=*(B+0x58)
-    //    0xE002: param(第2参), Ee8=*(E+0xe8), Em0=*(E), 0(保留)
-    //    0xE003: base28=*(Ee8+0x28), t28_0=*(base28), base30=*(Ee8+0x30), t30_0=*(base30)
-    //  每跳先 nredKernelPtrOk；不合法 ⇒ 该字段按 0 编码（**不解引用**）。
-    //  栈占用：局部 `line[112]`（远小于既有 1 KB 行缓冲）+ 标量，无大缓冲、无循环展开。
+    // B66（2026-10-14）：修「一跳错位」＋补读 TTL 设备描述符（依据＝技术经理定因报告
+    //  `tmp/tech-manager/容器为空定因-2026-10-14.md` §二A／§七「动作 1」）。
+    //  ⚠️ **零行为改动**：只改「读值来源与编码字段」，不改判定/控制流/返回值、不新增/删除门控、
+    //  不新增 hook；仍**无条件**执行（基线轮也要取值）、仍在 Apple 原函数调用之前、仍只走
+    //  `nredTraceLine`（内存环），仍**单行 1 次输出**（B55：我方打印越少对该链扰动越小）。
+    //  ── 口径更正（**旧 `off=e001` 行作废，勿与新行混读**）───────────────────────────
+    //  ① `tbl = *(obj)` 即 **TTL 服务注册表本体**（552 B ＝ 23 槽 × 24 B；旧日志里就叫 `tbl`），
+    //     不是"容器"；旧编码行的 `B=*(tbl)` 是**表第 0 号槽的槽号**——建表时写死 0、此后无任何
+    //     `idx=0` 的注册调用 ⇒ **恒 0、不表意** ⇒ 本行**删除**该字段（避免再次误读）。
+    //  ② 真链：`0x8b8e7(p)` ＝ `表*(p)` 的**槽 3**（表项 stride 0x18、对象指针在 +0x10 ⇒ `+0x58`）
+    //     ⇒ `dev = *(tbl+0x58)`；旧行写成 `E = *(B+0x58)`，**多了一跳**，恒被指针门短路成 0。
+    //  ── 编码规则（固定长度、单行、无堆/栈大缓冲）─────────────────────────────────
+    //    行 `memdump: off=e002 b=<9×64 位 hex>`，字段次序：
+    //      obj, tbl=*(obj)〔**实例配对键**：同轮可见 ≥3 次 TTL 初始化，跨实例混读会误判（B56 教训）〕,
+    //      dev=*(tbl+0x58)〔TTL 设备描述符〕,
+    //      boot=*(u32*)(dev+0x220)〔启动模式；Apple `ttlDevGetBootMode` 读 544(dev)，**32 位**〕,
+    //      Ee8=*(dev+0xE8)〔基础 SWIP 序列指针；Apple `ttlDevGetBaseSwipSeq` 读 232(dev)〕,
+    //      base28=*(Ee8+0x28), t28_0=*(base28), base30=*(Ee8+0x30), t30_0=*(base30)
+    //  长度自证：前缀 20 + 9×16 hex ＝ 164（+换行 165）≤ 191（`TraceRing::kLineBytes`−1）⇒ 完整不截断。
+    //  缓冲 static char line[176]（不占栈）；**逐跳先 nredKernelPtrOk**（不合法 ⇒ 该字段按 0 编码、
+    //  不解引用）；`dev+0x220` 只取低 32 位（高 32 位属相邻字段，不得当"高半"读）。
     {
-        void* const o1 = (nredKernelPtrOk(obj)) ? *reinterpret_cast<void**>(obj) : nullptr;
-        void* const B  = (nredKernelPtrOk(o1))  ? *reinterpret_cast<void**>(o1)  : nullptr;
-        UInt64 E = 0, Ee8 = 0, base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0;
-        if (nredKernelPtrOk(B)) {
-            E = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(B) + 0x58);
+        void* const tbl = (nredKernelPtrOk(obj)) ? *reinterpret_cast<void**>(obj) : nullptr;
+        UInt64 dev = 0, boot = 0, Ee8 = 0, base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0;
+        if (nredKernelPtrOk(tbl)) {
+            dev = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(tbl) + 0x58);
         }
-        void* const Ep = reinterpret_cast<void*>(E);
-        if (nredKernelPtrOk(Ep)) {
-            Ee8 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(Ep) + 0xe8);
+        void* const devp = reinterpret_cast<void*>(dev);
+        if (nredKernelPtrOk(devp)) {
+            boot = *reinterpret_cast<UInt32*>(static_cast<UInt8*>(devp) + 0x220);
+            Ee8  = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(devp) + 0xe8);
         }
         void* const f = reinterpret_cast<void*>(Ee8);
         if (nredKernelPtrOk(f)) {
@@ -978,20 +989,14 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
         if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
             t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
         }
-        // B65 收敛为**单行 9 字段**（B55 结论：我方打印越少对该链扰动越小 ⇒ 1 行最优）。
-        //  保留（真链 9）：obj, o1=*(obj), B=*(o1), E=*(B+0x58), Ee8=*(E+0xe8),
-        //                  base28=*(Ee8+0x28), t28_0=*(base28), base30=*(Ee8+0x30), t30_0=*(base30)
-        //  丢弃（3，非链）：param（真 arg1 已证不可得）／Em0（证伪用，当前链在更上游即断）／保留位 0
-        //  长度自证：前缀 20 + 9×16 hex = 144 ⇒ **165 ≤ 191**（TraceRing 上限）⇒ 完整不截断。
-        //  缓冲 static char line[176]（不占栈，≥165+1）；仍无条件、仍在 Apple 调用之前；
-        //  逐跳先 nredKernelPtrOk（不合法 ⇒ 该字段按 0 编码、不解引用）。
+        // B66：单行 9 字段（标签 e002 ＝新口径；`boot`/`Ee8` 即新补的两值，`dev` 见上）。
         static char line[176];
         const int n =
             snprintf(line, sizeof(line),
-                     "memdump: off=e001 b=%016llx%016llx%016llx%016llx%016llx"
+                     "memdump: off=e002 b=%016llx%016llx%016llx%016llx%016llx"
                      "%016llx%016llx%016llx%016llx\n",
-                     reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(o1),
-                     reinterpret_cast<UInt64>(B), E, Ee8, base28, t28_0, base30, t30_0);
+                     reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(tbl), dev, boot,
+                     Ee8, base28, t28_0, base30, t30_0);
         if (n > 0) { nredTraceLine(line, n); }
     }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
