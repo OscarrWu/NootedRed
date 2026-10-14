@@ -33,6 +33,7 @@
 
 #include "../HWLibs.hpp"          // NRED_TRACE（共享 trace 宏；含 SYSLOG）
 #include "../NRed.hpp"            // NRed::singleton().readReg32Raw/writeReg32Raw/hasRmmio
+#include <GPUDriversAMD/PhoenixPPSMC.hpp>  // B71：PPSMC_MSG_TestMessage(0x01) 起来确认
 #include <IOKit/IOLib.h>          // IODelay
 #include <IOKit/IOMemoryDescriptor.h>       // A-10：addr64_t / IOByteCount
 #include <IOKit/IOBufferMemoryDescriptor.h> // A-10：kIOMemoryPhysicallyContiguous / withOptions
@@ -52,8 +53,12 @@ static const uint8_t sPsp13TocData[] = {
 static const uint8_t sPsp13TaData[] = {
     #embed "../Firmware/psp_13_0_4_ta.bin"
 };
+static const uint8_t sSmu1300Data[] = {
+    #embed "../Firmware/smu_13_0_0.bin"
+};
 static const fw::FwAssetDesc kFwTocAsset = {sPsp13TocData, sizeof(sPsp13TocData), 0x5277BF308C9C5C4CULL};
 static const fw::FwAssetDesc kFwTaAsset  = {sPsp13TaData, sizeof(sPsp13TaData), 0x3DD1DDCCE682BB8FULL};
+static const fw::FwAssetDesc kFwSmuAsset = {sSmu1300Data, sizeof(sSmu1300Data), 0x47420DC80A7B332FULL};
 
 namespace fw {
 
@@ -428,6 +433,61 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     //  ⚠️ 顺序登记（Linux＝**SMU 先、ASD 后**）：将来 SMU 步应插在**本块之前**（插入点见交付
     //   说明：phase3 内部先 SMC 后 ASD），届时用 `GFX_FW_TYPE_SMU=18`（本卡已补常量）
     //   ＋既有 `executeLoadIpFw` 原语 ＋ 入库的 SMC 镜像资产。
+    // ── B71：SMU/PMFW 发帧（LOAD_IP_FW × GFX_FW_TYPE_SMU=18；插在 ASD 之前）＋起来确认──
+    //  依据：镜像卡（smu_13_0_0.bin，整文件 292,452 B；payload 切片 261,632 B @256）＋
+    //  映射卡（LOAD_IP_FW=6 × fw_type=18；等 Linux psp_execute_ip_fw_load amdgpu_psp.c:3386）
+    //  ＋起来卡 §⑤（TestMessage=0x01 经 Apple 入口；判据＝既有 T4 行）。
+    //  流程：fwAssetVerify(整文件) → parseCommonFwHeader → copyFw(payload 切片) →
+    //    executeLoadIpFw(6,18) → 成功才起来确认（smuContext()→smuSendMessage(TestMessage)）。
+    //  ⚠️ SMU 步失败 ⇒ 记行＋停机（不重试、不进任何后续消息阶段，包括 ASD）。
+    //  ⚠️ ctx==0 ⇒ 记 `smu probe: no ctx yet`（**0 本身是有效读数**，不当作失败）。
+    //  ⚠️ 零 SMN 读（不碰 0x3010028）；零新门控；零白名单改动；零新增 SYSLOG；定长单行 ≤191。
+    if (rc == 0) {
+        if (!fw::fwAssetVerify(kFwSmuAsset)) {
+            NRED_TRACE("fw: load-ip-fw smu asset-invalid, skipped");
+        } else {
+            fw::CommonFwHeader smuHdr{};
+            if (!fw::parseCommonFwHeader(kFwSmuAsset.data, kFwSmuAsset.size, &smuHdr)) {
+                NRED_TRACE("fw: load-ip-fw smu hdr-parse fail");
+            } else if (smuHdr.ucode_array_offset_bytes > kFwSmuAsset.size ||
+                       smuHdr.ucode_size_bytes > kFwSmuAsset.size - smuHdr.ucode_array_offset_bytes) {
+                NRED_TRACE("fw: load-ip-fw smu slice-oob off=%u pay=%u",
+                           smuHdr.ucode_array_offset_bytes, smuHdr.ucode_size_bytes);
+            } else {
+                // ① payload 切片 [off, off+pay) 拷入 fw_pri（261,632 B ≤ kFwCopyMax 1 MB）
+                const int copyRet = fw::copyFw(fwPriVa, kFwSmuAsset.data + smuHdr.ucode_array_offset_bytes,
+                                               smuHdr.ucode_size_bytes);
+                if (copyRet != 0) {
+                    NRED_TRACE("fw: load-ip-fw smu copy fail ret=%d", copyRet);
+                } else {
+                    // ② LOAD_IP_FW 单帧（fw_type=GFX_FW_TYPE_SMU=18；与 tmrLoad 同通道）
+                    const int smuRet = fw::executeLoadIpFw(sink, &ring,
+                                                           fwPriMc, smuHdr.ucode_size_bytes,
+                                                           GFX_FW_TYPE_SMU,
+                                                           cmdBufMc, fenceMc);
+                    NRED_TRACE("fw: load-ip-fw smu ret=%d hdr=%u pay=%u off=%u", smuRet,
+                               smuHdr.header_size_bytes, smuHdr.ucode_size_bytes,
+                               smuHdr.ucode_array_offset_bytes);
+                    if (smuRet != 0) {
+                        NRED_TRACE("bringup: phase3 failed (load-ip-fw smu) ret=%d", smuRet);
+                    } else {
+                        // ③ 起来确认：TestMessage(0x01) 经 Apple 发送入口（判据＝既有 T4 行）
+                        void* const smuCtx = X5000HWLibs::smuContext();
+                        if (smuCtx == nullptr) {
+                            NRED_TRACE("smu probe: no ctx yet");
+                        } else {
+                            uint32_t resp = 0;
+                            const CAILResult rcMsg = X5000HWLibs::singleton().smuSendMessage(
+                                smuCtx, PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &resp);
+                            NRED_TRACE("smu probe: test msg=0x%X rc=%u resp=0x%X",
+                                       static_cast<unsigned>(PhoenixPPSMC::PPSMC_MSG_TestMessage),
+                                       static_cast<unsigned>(rcMsg), resp);
+                        }
+                    }
+                }
+            }
+        }
+    }
     if (rc == 0) {
         if (!fw::fwAssetVerify(kFwTaAsset)) {
             NRED_TRACE("fw: load-asd asset-invalid, skipped");

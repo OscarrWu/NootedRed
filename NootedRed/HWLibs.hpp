@@ -167,7 +167,6 @@ private:
     static UInt32 wrapMode96c4c(void* obj, UInt32 hw, void* out);
     static UInt32 wrapMode9e505(void* slot);
     static SInt32 wrapMode6430f(void* in, void* out);
-    CAILResult        smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     static CAILResult smuPowerUpConfigCommon(void* ctx);
     static CAILResult smuInternalSwInit(void* ctx, void* input, AMDSMUSWInitOutput* output);
     static CAILResult smuInternalSwInitOld(void* ctx, void* input, AMDSMUSWInitOutput* output);
@@ -185,6 +184,10 @@ private:
     static CAILResult smu13NotifyEvent(void* ctx, TTLEventInput* input);
     static CAILResult smu13FullAsicReset(void* ctx, void* data);
 public:
+    // B71：`smuSendMessage` 从 private 区移入 public——供 `fw::nredFwBringupHook` 的
+    //  「SMU 起来确认」调用（经 Apple 发送入口发 TestMessage；零我方寄存器操作）。
+    //  ⚠️ 仅可见性变更（private→public），零运行时行为变化。
+    CAILResult smuSendMessage(void* ctx, UInt32 message, UInt32 param = 0, UInt32* outParam = nullptr) const;
     // NRed 直读 MMIO 绕过 Apple SMU ctx 的 PMFW 消息发送（Phoenix 上电序列旁路）
     // public：供 X6000FB::wrapControllerPowerUp 调用（该函数 100% 被调用，而 smu13PowerUpConfig 死点）
     static CAILResult smu13SendMsgDirect(UInt32 msgId, UInt32 param, UInt32 *rawResp = nullptr);
