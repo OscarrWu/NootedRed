@@ -3254,6 +3254,33 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
         singleton().smuFullAsicResetField(ctx) = reinterpret_cast<void*>(smuFullAsicReset);
     }
 
+    // ─── B79：盲试轮唯一行为改动——**一次**直调 `smu13InternalHwInit(ctx)` ─────────
+    //  依据：技术经理规格（tmp/tech-manager/盲试轮可实现规格-2026-10-15.md §2/§4/§5/§6）：
+    //    · Apple 入口 0x67423 语义＝读 `this+0x6C8`（＝刚写成的 smuInternalHWInitField）
+    //      非空则调用 ⇒ 直调我方 static 成员在执行内容上等价，且省两处未知契约；
+    //    · **一次性守卫**：本函数每引导约被调 5 次（B78 原位 `smu fp list:` 行 ×5）
+    //      ⇒ 不加守卫会触发 5 次（5 组寄存器写/等待）⇒ 用函数内 `static bool`（kext
+    //      __DATA ⇒ 每次引导归零）＋ `effectiveMajor == 13` 限定（语义＝只在 case 13
+    //      分支上触发一次）；`n`＝static 计数器自增后值 ⇒ `n=1` 即"本轮只触发一次"自证。
+    //    · 等待上界（**已核实**）：`smu13WaitForFwLoaded`＝`smuCosWaitFor(ctx, …,
+    //      PP_WAIT_ON_REGISTER_TIMEOUT_DEFAULT=2000)`（Apple COS 助手，duration 有界）⇒ 有界。
+    //    · 失败出口：ctx==null ⇒ 记行跳过；trig!=OK ⇒ 记行后继续；**不改**本函数返回值。
+    //    · 记录行走 nredTraceLine 内存环；零新增 SYSLOG/门控/刷盘点；定长 ≤191。
+    {
+        static bool sB79TrigDone = false;   // kext __DATA ⇒ 每次引导归零（一次性）
+        static unsigned sB79TrigN = 0;      // 自增后打印 ⇒ n=1 自证"本轮只触发一次"
+        if (effectiveMajor == 13 && !sB79TrigDone) {
+            sB79TrigDone = true;
+            if (ctx == nullptr) {
+                NRED_TRACE("smu-trigger: ctx null, skipped n=%u", ++sB79TrigN);
+            } else {
+                const CAILResult trig = X5000HWLibs::smu13InternalHwInit(ctx);
+                NRED_TRACE("smu-trigger: ret=0x%X (case13) n=%u",
+                           static_cast<unsigned>(trig), ++sB79TrigN);
+            }
+        }
+    }
+
     SYSLOG_COND(ADDPR(debugEnabled), "HWLibs", "Ignore error about unsupported SMU HW version.");
 
     // ─── 区分性日志（技术决策 agent 逐字规格，2026-10-03；**只追加、不改既有串**）───────
