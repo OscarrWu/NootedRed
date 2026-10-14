@@ -1012,6 +1012,21 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                      reinterpret_cast<UInt64>(obj), reinterpret_cast<UInt64>(tbl), dev, boot,
                      Ee8, base28, t28_0, base30, t30_0);
         if (n > 0) { nredTraceLine(line, n); }
+        // B73：`smustate=` 与 `attempted=` 移至**无门控**块（B72 实证 `-NRedAccelLog` 未
+        //  生效 ⇒ 原处未落盘；此处与 `memdump: off=e002` 同一无条件块，B72 已证会落盘）。
+        //  内容＝既有 getSmu13ProbeState()（bit63=InternalHwInit 被调用过、bit60=首发送进过、
+        //  bit62/61=等待门成败、bit0-3=PowerUpConfig 各步）＋ 紧邻打印既有单例标志
+        //  `smu13InitAttempted`（**不新造语义**：它就是 wrapSmu90SendMessageWithParameter
+        //  首发送块里置的那个标志——该 wrapper 是死代码，故该值同时也判"死路径是否跑过"）。
+        //  记录行逐字：`smustate=%llx attempted=%d`（定长 ≤191）；nredTraceLine 内存环。
+        {
+            static char lineSm[96];
+            const int nSm =
+                snprintf(lineSm, sizeof(lineSm), "smustate=%llx attempted=%d\n",
+                         static_cast<unsigned long long>(NRed::singleton().getSmu13ProbeState()),
+                         singleton().smu13InitAttempted ? 1 : 0);
+            if (nSm > 0) { nredTraceLine(lineSm, nSm); }
+        }
     }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
     if (checkKernelArgument("-NRedAccelLog")) {
@@ -1030,15 +1045,6 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)), ret ? 1 : 0,
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(tbl)),
                static_cast<unsigned long long>(e1), static_cast<unsigned long long>(e4));
-        // B70：`smustate=` 行（既有 -NRedAccelLog 块内；零新门控、零新寄存器操作）。
-        //  内容＝NRed::getSmu13ProbeState()：bit63=InternalHwInit 被调用过、bit60=首发送进过、
-        //  bit62/61=等待门成败、bit0-3=PowerUpConfig 各步（NRed.hpp 注释）。ring 打印，定长 ≤191。
-        {
-            static char lineSm[96];
-            const int nSm = snprintf(lineSm, sizeof(lineSm), "smustate=%llx\n",
-                                     static_cast<unsigned long long>(NRed::singleton().getSmu13ProbeState()));
-            if (nSm > 0) { nredTraceLine(lineSm, nSm); }
-        }
     }
     // B55 三层解引用只读 dump（零行为改动；交叉复核 §4 观测清单）。
     //  链：r15=*(obj+8)（obj=本函数入参，0x92911 调用点传 rdi）；rbx=*r15（0x93f98）；
@@ -2422,6 +2428,35 @@ CAILResult X5000HWLibs::smuGetUCodeConsts(void* const ctx, AMDSMUUCodeConstants*
 {
     if (consts == nullptr) { return kCAILResultInvalidParameters; }
     // ✅ 同值同义例外：Phoenix 上 0x02 = GetPmfwVersion（同值同义），T1 白名单放行。
+    // ── B73：SMU「起来确认」**移至此**（原在 NRedFwBringupHook phase3，B72 实测
+    //  bringup 阶段 `smuContext()` 恒 0 ⇒ 未发出）────────────────────────────
+    //  依据：B72 判读＋技术经理判定——本函数是**实证执行**的 Apple-ctx 持有点：
+    //    · Ventura 13.6（>10.15）走 `processKext` 的 else 分支（HWLibs.cpp:3135）
+    //      ⇒ `smuGetUCodeConstsField` 装入本函数，Apple 初始化时**必然调用**（B72
+    //      的 `T4 id=0x2`（GetPmfwVersion）正是经本函数发出）⇒ Apple 给的 ctx 在；
+    //    · 发送走 `smuSendMessage` → 内部调 Apple 原函数（`smu90SendMessageWithParameter`
+    //      字段＝solve 到的 Apple 指针；wrapper 未 route、是死代码——见 :1721/:2511 注释）
+    //      ⇒ 经 Apple 入口、零我方新增寄存器操作。
+    //  序列（逐字）：先 `TestMessage(0x01)` 验活；**仅 rc==0** 再发 `GetPmfwVersion(0x02)`
+    //   并把版本值落盘（用途：与资产头 `ucode_version=0x004E8500` 比对）。
+    //  判据（既有 T4 行不变）：`T4: smuSendMessage id=0x1 rc=0 arg=非0 regrd=1`＝SMU 活；
+    //   `rc=2`＝仍无应答。**每个分支都有出口**（ctx 由本函数语义保证非空；rc!=0 记行返回、
+    //   不重试、不悬停——smuSendMessage 内部等待上界＝ctx+0x310 的 2000 步）。
+    //  ⚠️ 零 SMN 读（不碰 0x3010028）；零新增 SYSLOG（nredTraceLine 内存环）；定长单行 ≤191。
+    {
+        uint32_t resp = 0;
+        const CAILResult rcTest = singleton().smuSendMessage(
+            ctx, PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &resp);
+        NRED_TRACE("smu probe: test msg=0x1 rc=%u resp=0x%X",
+                   static_cast<unsigned>(rcTest), resp);
+        if (rcTest == kCAILResultOK) {
+            uint32_t ver = 0;
+            const CAILResult rcVer = singleton().smuSendMessage(
+                ctx, PhoenixPPSMC::PPSMC_MSG_GetPmfwVersion, 0, &ver);
+            NRED_TRACE("smu probe: ver=0x%X", ver);
+            (void)rcVer;   // 版本已落盘；本函数原有 0x02 发送路径不动（保持返回值语义）
+        }
+    }
     return singleton().smuSendMessage(ctx, PPSMC_MSG_GetSmuVersion, 0, &consts->version);
 }
 
@@ -2564,6 +2599,19 @@ CAILResult X5000HWLibs::smu13PowerUpConfig(void* const ctx)
 
 CAILResult X5000HWLibs::smu13InternalHwInit(void* const ctx)
 {
+    // ── B73：`smu13-init: enter` 入口行（**不依赖任何标志位**）──────────────────
+    //  用途：分辨 B72 anomaly 的两个候选——(α) **从未被调用**（本行不出现，且 bit63 为 0）
+    //  vs (β) **被调用但没返回/在内部阻塞**（本行出现，而其后的 `smu13: internal HW init
+    //  done` 不出现）⇒ 由"本行是否出现 + 后续 done 行是否出现"直接分辨。
+    //  位置＝函数**入口最前**（在既有 `setSmu13ProbeState(0)`／置 bit63 **之前**），
+    //  理由：① 若内部阻塞，入口行已落盘 ⇒ 仍能判"进过"；② 不掩盖任何后续分支。
+    //  通道＝nredTraceLine（内存环，零新增 SYSLOG）；定长单行 ≤191。
+    {
+        static char lineHi[96];
+        const int nHi = snprintf(lineHi, sizeof(lineHi), "smu13-init: enter ctx=%llx\n",
+                                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)));
+        if (nHi > 0) { nredTraceLine(lineHi, nHi); }
+    }
     // Probe D1 v2: 每轮序列开始清零累积状态（若 WaitForFwLoaded 早退，state 保持 0 = "序列未执行"）
     NRed::singleton().setSmu13ProbeState(0);
     // Probe: 标记 smu13InternalHwInit 被调用过（第 63 位）

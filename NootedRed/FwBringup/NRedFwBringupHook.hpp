@@ -470,20 +470,12 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                                smuHdr.ucode_array_offset_bytes);
                     if (smuRet != 0) {
                         NRED_TRACE("bringup: phase3 failed (load-ip-fw smu) ret=%d", smuRet);
-                    } else {
-                        // ③ 起来确认：TestMessage(0x01) 经 Apple 发送入口（判据＝既有 T4 行）
-                        void* const smuCtx = X5000HWLibs::smuContext();
-                        if (smuCtx == nullptr) {
-                            NRED_TRACE("smu probe: no ctx yet");
-                        } else {
-                            uint32_t resp = 0;
-                            const CAILResult rcMsg = X5000HWLibs::singleton().smuSendMessage(
-                                smuCtx, PhoenixPPSMC::PPSMC_MSG_TestMessage, 0, &resp);
-                            NRED_TRACE("smu probe: test msg=0x%X rc=%u resp=0x%X",
-                                       static_cast<unsigned>(PhoenixPPSMC::PPSMC_MSG_TestMessage),
-                                       static_cast<unsigned>(rcMsg), resp);
-                        }
                     }
+                    // B73：`TestMessage` 起来确认**移走**——bringup 阶段 `smuContext()` 恒 0
+                    // （B72 实测 `smu probe: no ctx yet`）⇒ 改放 `smuGetUCodeConsts`（HWLibs.cpp，
+                    //  Apple 经 smuGetUCodeConstsField 实证调用、持有 Apple ctx 的发送点）。
+                    //  ⚠️ 此处**只留 SMU 发帧**（LOAD_IP_FW）；确认序列见 HWLibs.cpp:2421 入口。
+                    //  判据保持既有 T4 行（smuSendMessage 成功/失败两路都打）。
                 }
             }
         }
