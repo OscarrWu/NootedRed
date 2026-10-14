@@ -406,35 +406,55 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
         NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
                    static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);
     }
-    // ── B68 phase3：**第一次真实调用 LOAD_IP_FW**（载荷＝既有 TA 资产；SMU 镜像之后再上）──
-    //  依据：`Psp13Bringup.hpp` §6 原语（`executeLoadIpFw`＝等 Linux `psp_execute_ip_fw_load`
-    //   amdgpu_psp.c:3386-3401）＋ `Regs/PSP13.hpp` 的 `GFX_FW_TYPE_TA=75`（psp_gfx_if.h:281）。
+    // ── B69 phase3（更正版）：第一次真实调用 LOAD_ASD（载荷＝TA 内 ASD 子固件切片）──
+    //  依据（技术经理 B69 更正＋Linux 对应实现）：
+    //    · 本资产 TA 表 `desc[0]`＝ASD（`Psp13Bringup.hpp` 6b 注释实测：ASD size=217344）⇒
+    //      Linux 侧装载用 **`GFX_CMD_ID_LOAD_ASD = 4`**（`amdgpu_psp.c:1693` 设
+    //      `asd_context.ta_load_type = GFX_CMD_ID_LOAD_ASD`；`:1775` `cmd->cmd_id =
+    //      context->ta_load_type`；常量 `psp_gfx_if.h:92`）——**不是** `LOAD_IP_FW(6)`，
+    //      **也**不是通用 `LOAD_TA(1)`（后者用于其它 TA，本资产不用）。
+    //    · 载荷布局＝`cmd_load_ta` 专用结构（地址 lo/hi ＋ `ta_size`，psp_gfx_if.h:131-143），
+    //      与 `cmd_load_ip_fw` 不同 ⇒ 用既有专用原语 `prepLoadAsdCmd`/`executeLoadAsd`
+    //      （`Psp13Bringup.hpp` 6b；等 Linux `psp_prep_ta_load_cmd_buf` amdgpu_psp.c:1771-1785）。
     //  条件：phase2（TMR）**成功**才执行（rc==0）；前置**再**验 TA 资产（fnv1a64，缺失/损坏
     //  ⇒ 记行、不再发任何帧——可判失败，不静默通过）。
-    //  判据：`executeLoadIpFw` ret==0 成功；ret<0＝超时/环错误；ret>0＝TEE 错误码（psp_gfx_if.h
-    //   :516-520）。**每个失败分支都有出口**：记一行、停机（不重试、不进任何后续消息阶段），
-    //  且原语内部 `ringWaitForFence` 自带超时预算 ⇒ **不悬停**。
+    //  流程：assetVerify(TA) → parseTaAsd（取 desc[0] 切片偏移/大小）→ ASD 切片拷入 fw_pri
+    //  （≤kFwCopyMax 1 MB）→ executeLoadAsd（LOAD_ASD 单帧，与 tmrLoad 同 ring/cmd/fence 通道）。
+    //  判据：ret==0 成功；ret<0＝超时/环错误；ret>0＝TEE 错误码（psp_gfx_if.h:516-520）。
+    //  **每个失败分支都有出口**：记一行、停机（不重试、不进任何后续消息阶段），且原语内部
+    //  `ringWaitForFence` 自带超时预算 ⇒ **不悬停**。
     //  ⚠️ 零 SMN 读、零新门控（随整个 bringup 走既有 `-NRedFwBringup`）、零白名单改动、
     //   零新增 SYSLOG（NRED_TRACE 内存环＋B19 静音，深栈安全）；固定长度单行 ≤191。
+    //  ⚠️ 顺序登记（Linux＝**SMU 先、ASD 后**）：将来 SMU 步应插在**本块之前**（插入点见交付
+    //   说明：phase3 内部先 SMC 后 ASD），届时用 `GFX_FW_TYPE_SMU=18`（本卡已补常量）
+    //   ＋既有 `executeLoadIpFw` 原语 ＋ 入库的 SMC 镜像资产。
     if (rc == 0) {
         if (!fw::fwAssetVerify(kFwTaAsset)) {
-            NRED_TRACE("fw: load-ip-fw ta asset-invalid, skipped");
+            NRED_TRACE("fw: load-asd asset-invalid, skipped");
         } else {
-            // ① TA 拷入 fw_pri（MC 可 DMA；TA 254976 B ≤ kFwCopyMax 1 MB）
-            const int copyRet = fw::copyFw(fwPriVa, kFwTaAsset.data, kFwTaAsset.size);
-            if (copyRet != 0) {
-                NRED_TRACE("fw: load-ip-fw ta copy-fail ret=%d", copyRet);
+            // ① 解析 TA 头，取 ASD（desc[0]）切片偏移/大小
+            fw::TaBinDesc asd{};
+            const int parseRet = fw::parseTaAsd(kFwTaAsset.data, kFwTaAsset.size, &asd);
+            if (parseRet != 0) {
+                NRED_TRACE("fw: load-asd parse fail ret=%d", parseRet);
+            } else if (!asd.found) {
+                NRED_TRACE("fw: load-asd no-asd, skipped");
             } else {
-                // ② LOAD_IP_FW 单帧（与 tmrLoad 同一 ring / cmd / fence 通道）
-                const int ipRet = fw::executeLoadIpFw(sink, &ring,
-                                                      fwPriMc,           // fw_mc_addr
-                                                      kFwTaAsset.size,   // fw_size
-                                                      GFX_FW_TYPE_TA,    // fw_type
-                                                      cmdBufMc,
-                                                      fenceMc);
-                NRED_TRACE("fw: load-ip-fw ta ret=%d", ipRet);
-                if (ipRet != 0) {
-                    NRED_TRACE("bringup: phase3 failed (load-ip-fw ta) ret=%d", ipRet);
+                // ② ASD 切片拷入 fw_pri（MC 可 DMA；217344 B ≤ kFwCopyMax 1 MB）
+                const int copyRet = fw::copyFw(fwPriVa, kFwTaAsset.data + asd.offset_bytes,
+                                               asd.size_bytes);
+                if (copyRet != 0) {
+                    NRED_TRACE("fw: load-asd copy fail ret=%d", copyRet);
+                } else {
+                    // ③ LOAD_ASD 单帧（专用 cmd_load_ta 布局；与 tmrLoad 同通道）
+                    const int asdRet = fw::executeLoadAsd(sink, &ring, asd,
+                                                          fwPriMc,      // fw_pri_mc_addr
+                                                          cmdBufMc,
+                                                          fenceMc);
+                    NRED_TRACE("fw: load-asd ret=%d", asdRet);
+                    if (asdRet != 0) {
+                        NRED_TRACE("bringup: phase3 failed (load-asd) ret=%d", asdRet);
+                    }
                 }
             }
         }

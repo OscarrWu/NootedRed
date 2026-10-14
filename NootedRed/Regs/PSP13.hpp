@@ -153,6 +153,7 @@ constexpr UInt32 PSP_RING_TYPE__KM     = 2;  // amdgpu_psp.h:118 — 内核态�
 
 constexpr UInt32 GFX_FW_TYPE_NONE        = 0;   // psp_gfx_if.h:211
 constexpr UInt32 GFX_FW_TYPE_TOC         = 24;  // psp_gfx_if.h:235
+constexpr UInt32 GFX_FW_TYPE_SMU         = 18;  // psp_gfx_if.h:229 — SMU/PMFW（SMC；LOAD_IP_FW 载荷）
 constexpr UInt32 GFX_FW_TYPE_RLC_P       = 25;  // psp_gfx_if.h:236
 constexpr UInt32 GFX_FW_TYPE_RLC_IRAM    = 26;  // psp_gfx_if.h:237
 constexpr UInt32 GFX_FW_TYPE_IMU_I       = 68;  // psp_gfx_if.h:274 — IMU Instruction FW (SOC21)
