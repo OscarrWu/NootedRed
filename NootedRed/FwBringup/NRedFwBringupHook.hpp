@@ -406,6 +406,39 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
         NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
                    static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);
     }
+    // ── B68 phase3：**第一次真实调用 LOAD_IP_FW**（载荷＝既有 TA 资产；SMU 镜像之后再上）──
+    //  依据：`Psp13Bringup.hpp` §6 原语（`executeLoadIpFw`＝等 Linux `psp_execute_ip_fw_load`
+    //   amdgpu_psp.c:3386-3401）＋ `Regs/PSP13.hpp` 的 `GFX_FW_TYPE_TA=75`（psp_gfx_if.h:281）。
+    //  条件：phase2（TMR）**成功**才执行（rc==0）；前置**再**验 TA 资产（fnv1a64，缺失/损坏
+    //  ⇒ 记行、不再发任何帧——可判失败，不静默通过）。
+    //  判据：`executeLoadIpFw` ret==0 成功；ret<0＝超时/环错误；ret>0＝TEE 错误码（psp_gfx_if.h
+    //   :516-520）。**每个失败分支都有出口**：记一行、停机（不重试、不进任何后续消息阶段），
+    //  且原语内部 `ringWaitForFence` 自带超时预算 ⇒ **不悬停**。
+    //  ⚠️ 零 SMN 读、零新门控（随整个 bringup 走既有 `-NRedFwBringup`）、零白名单改动、
+    //   零新增 SYSLOG（NRED_TRACE 内存环＋B19 静音，深栈安全）；固定长度单行 ≤191。
+    if (rc == 0) {
+        if (!fw::fwAssetVerify(kFwTaAsset)) {
+            NRED_TRACE("fw: load-ip-fw ta asset-invalid, skipped");
+        } else {
+            // ① TA 拷入 fw_pri（MC 可 DMA；TA 254976 B ≤ kFwCopyMax 1 MB）
+            const int copyRet = fw::copyFw(fwPriVa, kFwTaAsset.data, kFwTaAsset.size);
+            if (copyRet != 0) {
+                NRED_TRACE("fw: load-ip-fw ta copy-fail ret=%d", copyRet);
+            } else {
+                // ② LOAD_IP_FW 单帧（与 tmrLoad 同一 ring / cmd / fence 通道）
+                const int ipRet = fw::executeLoadIpFw(sink, &ring,
+                                                      fwPriMc,           // fw_mc_addr
+                                                      kFwTaAsset.size,   // fw_size
+                                                      GFX_FW_TYPE_TA,    // fw_type
+                                                      cmdBufMc,
+                                                      fenceMc);
+                NRED_TRACE("fw: load-ip-fw ta ret=%d", ipRet);
+                if (ipRet != 0) {
+                    NRED_TRACE("bringup: phase3 failed (load-ip-fw ta) ret=%d", ipRet);
+                }
+            }
+        }
+    }
     // A-13 D1′：分开记录 tmrLoad resp_status
     NRED_TRACE("bringup: tmrLoad resp_status=0x%X", ctx.last_resp_status_tmr_load);
 
