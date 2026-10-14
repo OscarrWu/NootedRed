@@ -60,6 +60,8 @@ static const fw::FwAssetDesc kFwTocAsset = {sPsp13TocData, sizeof(sPsp13TocData)
 static const fw::FwAssetDesc kFwTaAsset  = {sPsp13TaData, sizeof(sPsp13TaData), 0x3DD1DDCCE682BB8FULL};
 static const fw::FwAssetDesc kFwSmuAsset = {sSmu1300Data, sizeof(sSmu1300Data), 0x47420DC80A7B332FULL};
 
+
+
 namespace fw {
 
 // ── 内核侧回调（无状态转发到 NRed 公开访问器；与 X6000FB.cpp `smnProbeReadReg/WriteReg` 同型）──
@@ -428,20 +430,15 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     //  判据：ret==0 成功；ret<0＝超时/环错误；ret>0＝TEE 错误码（psp_gfx_if.h:516-520）。
     //  **每个失败分支都有出口**：记一行、停机（不重试、不进任何后续消息阶段），且原语内部
     //  `ringWaitForFence` 自带超时预算 ⇒ **不悬停**。
-    //  ⚠️ 零 SMN 读、零新门控（随整个 bringup 走既有 `-NRedFwBringup`）、零白名单改动、
-    //   零新增 SYSLOG（NRED_TRACE 内存环＋B19 静音，深栈安全）；固定长度单行 ≤191。
-    //  ⚠️ 顺序登记（Linux＝**SMU 先、ASD 后**）：将来 SMU 步应插在**本块之前**（插入点见交付
-    //   说明：phase3 内部先 SMC 后 ASD），届时用 `GFX_FW_TYPE_SMU=18`（本卡已补常量）
-    //   ＋既有 `executeLoadIpFw` 原语 ＋ 入库的 SMC 镜像资产。
-    // ── B71：SMU/PMFW 发帧（LOAD_IP_FW × GFX_FW_TYPE_SMU=18；插在 ASD 之前）＋起来确认──
+    // ── B71：SMU/PMFW 发帧（LOAD_IP_FW × GFX_FW_TYPE_SMU=18；插在 ASD 之前）──────────
     //  依据：镜像卡（smu_13_0_0.bin，整文件 292,452 B；payload 切片 261,632 B @256）＋
-    //  映射卡（LOAD_IP_FW=6 × fw_type=18；等 Linux psp_execute_ip_fw_load amdgpu_psp.c:3386）
-    //  ＋起来卡 §⑤（TestMessage=0x01 经 Apple 入口；判据＝既有 T4 行）。
-    //  流程：fwAssetVerify(整文件) → parseCommonFwHeader → copyFw(payload 切片) →
-    //    executeLoadIpFw(6,18) → 成功才起来确认（smuContext()→smuSendMessage(TestMessage)）。
-    //  ⚠️ SMU 步失败 ⇒ 记行＋停机（不重试、不进任何后续消息阶段，包括 ASD）。
-    //  ⚠️ ctx==0 ⇒ 记 `smu probe: no ctx yet`（**0 本身是有效读数**，不当作失败）。
-    //  ⚠️ 零 SMN 读（不碰 0x3010028）；零新门控；零白名单改动；零新增 SYSLOG；定长单行 ≤191。
+    //   映射卡（LOAD_IP_FW=6 × fw_type=18；等 Linux `psp_execute_ip_fw_load`
+    //   amdgpu_psp.c:3386-3401）＋起来卡 §⑤（TestMessage=0x01 经 Apple 入口）。
+    //   ⚠️ 本卡**不做一次性守卫**（技术经理更正：第二遍并未进入 `bringupRun`，
+    //     无 `bringupRun: enter`／`smu13: case 13` ⇒ 守卫当前无实际作用，保留会引入
+    //     不必要的行为变更）⇒ 本段保持原样，仅按第 1 项在其后补门控真值行。
+    //   ⚠️ 零 SMN 读（不碰 0x3010028）；零新门控；零白名单改动；零新增 SYSLOG。
+
     if (rc == 0) {
         if (!fw::fwAssetVerify(kFwSmuAsset)) {
             NRED_TRACE("fw: load-ip-fw smu asset-invalid, skipped");
@@ -463,19 +460,22 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
                     // ② LOAD_IP_FW 单帧（fw_type=GFX_FW_TYPE_SMU=18；与 tmrLoad 同通道）
                     const int smuRet = fw::executeLoadIpFw(sink, &ring,
                                                            fwPriMc, smuHdr.ucode_size_bytes,
-                                                           GFX_FW_TYPE_SMU,
+                                               GFX_FW_TYPE_SMU,
                                                            cmdBufMc, fenceMc);
-                    NRED_TRACE("fw: load-ip-fw smu ret=%d hdr=%u pay=%u off=%u", smuRet,
-                               smuHdr.header_size_bytes, smuHdr.ucode_size_bytes,
-                               smuHdr.ucode_array_offset_bytes);
+                    // B75：记录行追加 `mc=`（值＝本次帧交给 PSP 的 MC 地址＝`fwPriMc`）。
+                    //  行长自证：前缀 39 + ret/hdr/pay/off ≈ 4×8 + mc 18 ≈ 89 ≤ 191 ⇒ 不截断。
+                    NRED_TRACE("fw: load-ip-fw smu ret=%d hdr=%u pay=%u off=%u mc=0x%llx",
+                               smuRet, smuHdr.header_size_bytes, smuHdr.ucode_size_bytes,
+                               smuHdr.ucode_array_offset_bytes,
+                               static_cast<unsigned long long>(fwPriMc));
                     if (smuRet != 0) {
                         NRED_TRACE("bringup: phase3 failed (load-ip-fw smu) ret=%d", smuRet);
                     }
-                    // B73：`TestMessage` 起来确认**移走**——bringup 阶段 `smuContext()` 恒 0
-                    // （B72 实测 `smu probe: no ctx yet`）⇒ 改放 `smuGetUCodeConsts`（HWLibs.cpp，
-                    //  Apple 经 smuGetUCodeConstsField 实证调用、持有 Apple ctx 的发送点）。
-                    //  ⚠️ 此处**只留 SMU 发帧**（LOAD_IP_FW）；确认序列见 HWLibs.cpp:2421 入口。
-                    //  判据保持既有 T4 行（smuSendMessage 成功/失败两路都打）。
+                    // B73：`TestMessage` 起来确认**已移走**——bringup 阶段 `smuContext()`
+                    //  恒 0（B72 实测 `smu probe: no ctx yet`）⇒ 改放
+                    //  `smuGetUCodeConsts`（HWLibs.cpp:2421；Apple 经
+                    //  `smuGetUCodeConstsField` 实证调用、持有 Apple ctx 的发送点）。
+                    //  ⚠️ 此处**只留 SMU 发帧**；判据保持既有 T4 行（成功/失败两路都打）。
                 }
             }
         }

@@ -59,6 +59,21 @@ enum class BringupStep : uint32_t {
     Done               = 12,
 };
 
+    // B75：三入口行用的**文件级静态计数器**（一次引导里各入口被进入的次数）。
+    //  用途：钉死"谁发起了第二遍 TOC/TMR"——本轮实测一次引导出现两套
+    //  tmrInit/loadToc/tmrLoad/step=12（两次 tmr_mc 不同），但第二遍**没有**
+    //  `bringupRun: enter`／`smu13: case 13` ⇒ 它并未进入 `bringupRun`，而是
+    //  "另一个未识别入口"重跑 ⇒ 由本计数器直接判"本链到底被进了几次"。
+    //  ⚠️ **纯观测**：不改控制流、不改返回值、不跳过任何既有步骤（非守卫）。
+    //  ⚠️ header 内 static：每个包含本头的 TU 各一份；bringup 三函数为 inline 且
+    //    仅被 `nredFwBringupHook`（HWLibs.cpp TU）调用 ⇒ kext 运行期只有一份计数。
+    //  ⚠️ 测试环境（FW_NO_NRED_TRACE）不定义——入口行同宏保护（:37 惯例）。
+    #ifndef FW_NO_NRED_TRACE
+    static unsigned sGBringupRunEnter = 0;  // bringupRun 入口计数
+    static unsigned sGTmrInitEnter    = 0;  // bringupRunToTmrInit 入口计数（phase1）
+    static unsigned sGTmrLoadEnter    = 0;  // bringupRunTmrLoad 入口计数（phase2）
+    #endif
+
 // =============================================================================
 // 带回溯的寄存器序列记录接口
 // =============================================================================
@@ -788,6 +803,18 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
                                uint64_t fence_mc_addr,
                                uint64_t cmd_buf_mc_addr,
                                uint64_t ring_mc_addr) {
+#ifndef FW_NO_NRED_TRACE
+    // B75：入口行（**纯观测**，非守卫）——进入即自增并打印自增后的值；
+    //  用途＝钉死"谁发起了第二遍 TOC/TMR"（本轮实测一次引导出现两套
+    //  tmrInit/loadToc/tmrLoad/step=12，且第二遍无本行的孪生行）。
+    //  ⚠️ 不改控制流／返回值；kext 侧走 nredTraceLine（内存环，零 SYSLOG）。
+    {
+        static char lineEn[96];
+        const int nEn = snprintf(lineEn, sizeof(lineEn), "tmrInit: enter n=%u\n", ++sGTmrInitEnter);
+        if (nEn > 0) { nredTraceLine(lineEn, nEn); }
+    }
+#endif
+
     display::RegSink& sink = *ctx->sink;
     ctx->last_step = BringupStep::None;
     ctx->last_error = 0;
@@ -866,6 +893,18 @@ inline int bringupRunTmrLoad(BringupCtx* ctx,
                              uint64_t tmr_mc_addr,
                              uint64_t cmd_buf_mc_addr,
                              uint64_t fence_mc_addr) {
+#ifndef FW_NO_NRED_TRACE
+    // B75：入口行（**纯观测**，非守卫）——进入即自增并打印自增后的值；
+    //  用途＝钉死"谁发起了第二遍 TOC/TMR"（本轮实测一次引导出现两套
+    //  tmrInit/loadToc/tmrLoad/step=12，且第二遍无本行的孪生行）。
+    //  ⚠️ 不改控制流／返回值；kext 侧走 nredTraceLine（内存环，零 SYSLOG）。
+    {
+        static char lineEn[96];
+        const int nEn = snprintf(lineEn, sizeof(lineEn), "tmrLoad: enter n=%u\n", ++sGTmrLoadEnter);
+        if (nEn > 0) { nredTraceLine(lineEn, nEn); }
+    }
+#endif
+
     display::RegSink& sink = *ctx->sink;
     ctx->last_error = 0;
 
@@ -901,6 +940,17 @@ inline int bringupRun(BringupCtx* ctx,
                       uint64_t fence_mc_addr,
                       uint64_t cmd_buf_mc_addr,
                       uint64_t ring_mc_addr) {
+#ifndef FW_NO_NRED_TRACE
+    // B75：入口行（**纯观测**，非守卫）——进入即自增并打印自增后的值；
+    //  用途＝钉死"谁发起了第二遍 TOC/TMR"（本轮实测一次引导出现两套
+    //  tmrInit/loadToc/tmrLoad/step=12，且第二遍无本行的孪生行）。
+    //  ⚠️ 不改控制流／返回值；kext 侧走 nredTraceLine（内存环，零 SYSLOG）。
+    {
+        static char lineEn[96];
+        const int nEn = snprintf(lineEn, sizeof(lineEn), "bringupRun: enter n=%u\n", ++sGBringupRunEnter);
+        if (nEn > 0) { nredTraceLine(lineEn, nEn); }
+    }
+#endif
     int ret = bringupRunToTmrInit(ctx, boot_time_tmr, autoload_supported,
                                   fw_pri_mc_addr, fence_mc_addr,
                                   cmd_buf_mc_addr, ring_mc_addr);

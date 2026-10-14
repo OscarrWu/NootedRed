@@ -1991,6 +1991,19 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                 n = snprintf(lineBoot, sizeof(lineBoot), "bootargs: (null)\n");
             }
             if (n > 0) { nredTraceLine(lineBoot, n); }
+            // B75：`probe: accelLog=… ttlLog=…` **门控真值行**（纯观测）——把"门控开关"
+            //  从推断变成读数：本轮 `bootargs:` 逐字行不含 `-NRedAccelLog`，但同受该门控
+            //  包裹的 `tls-create`/`tls-swinit` 却落盘 ⇒ 三者不能同时为真（技术经理未解出项）；
+            //  此处直接打印 `checkKernelArgument` 的**返回值**（与 bootargs 行同位置同通道、
+            //  紧邻其后，便于对照）。⚠️ 不新增门控、不改任何流程；nredTraceLine 内存环。
+            {
+                static char lineGate[96];
+                const int nGate =
+                    snprintf(lineGate, sizeof(lineGate), "probe: accelLog=%d ttlLog=%d\n",
+                             checkKernelArgument("-NRedAccelLog") ? 1 : 0,
+                             checkKernelArgument("-NRedTtlLog") ? 1 : 0);
+                if (nGate > 0) { nredTraceLine(lineGate, nGate); }
+            }
         }
     }
 
