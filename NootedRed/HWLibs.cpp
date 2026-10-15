@@ -1156,12 +1156,22 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                 NRED_TRACE("c3dump2: skip (pp58=0)");
             } else {
                 const UInt64 pp58e8 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(q) + 0xe8);
-                const UInt64 base28 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(q) + 0x28);
-                const UInt64 base30 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(q) + 0x30);
-                const UInt64 t28_0 = (base28 != 0)
-                    ? *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base28)) : 0;
-                const UInt64 t30_0 = (base30 != 0)
-                    ? *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30)) : 0;
+                // B84 定因修复（2026-10-15）：① 解引用一律先过 nredKernelPtrOk（本轮 *(q+0x30)
+                //  =0x10000000 垃圾值，非空门拦不住 ⇒ page fault；任一跳不合法 ⇒ 后续字段按 0
+                //  编码，可机读判据）；② 取址修正：base28/base30 改为基于 pp58e8（与注释自述的
+                //  Apple 链 0xa3173/a3182=Ee8+0x28/+0x30 一致，逐指令依据见 c3dump3；原实现读
+                //  *(q+0x28/0x30) 与自述不符，读数误导）。观测字段与打印行不变；与 c3dump3 同构。
+                UInt64 base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0;
+                if (nredKernelPtrOk(reinterpret_cast<void*>(pp58e8))) {
+                    base28 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(reinterpret_cast<void*>(pp58e8)) + 0x28);
+                    base30 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(reinterpret_cast<void*>(pp58e8)) + 0x30);
+                }
+                if (nredKernelPtrOk(reinterpret_cast<void*>(base28))) {
+                    t28_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base28));
+                }
+                if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
+                    t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
+                }
                 NRED_TRACE("c3dump2: pp58e8=%llx base28=%llx base30=%llx t28_0=%llx t30_0=%llx",
                            static_cast<unsigned long long>(pp58e8),
                            static_cast<unsigned long long>(base28),
