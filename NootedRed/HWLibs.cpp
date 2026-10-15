@@ -176,7 +176,8 @@ int nredTraceFlush(int secTag)
     }
     if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
     // B77①：**写之前先把目标文件截断到 0**（消除"新正文短于旧文件 ⇒ 旧尾部冒充本轮"）。
-    nredTraceTruncateFile(name);
+    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off, "[flush-stamp] sec=%d overflow=%u\n",
+                                        secTag, static_cast<unsigned>(gTraceRing.overflow)));
     const int err = FileIO::writeBufferToFile(name, body, off);
     if (err == 0) {
         gTraceRing.reset();
@@ -924,6 +925,19 @@ UInt8 X5000HWLibs::wrapPred90(void* const ctx)
 //  ⚠️ 零行为改动（返回 al 逐字透传）、不新增寄存器访问、不受门控；小缓冲 nredTraceLine（深栈纪律）。
 UInt8 X5000HWLibs::wrap93F64(void* const obj, const UInt32 id)
 {
+    // B90 Q4①：入口无条件行（静态哨兵限前 4 次）——区分"(i) 从未被调" vs "(ii) 被调但 id 非 5/8"。
+    //  ⚠️ 仍原样透传返回（下方 org 调用与返回值逐字不变）；不受门控；小缓冲 nredTraceLine。
+    {
+        static unsigned sEnterN = 0;
+        if (++sEnterN <= 4) {
+            char line[128];
+            const int n = snprintf(line, sizeof(line), "flt93f64: enter n=%u obj=%llx id=%u\n",
+                                   sEnterN,
+                                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+                                   static_cast<unsigned>(id));
+            if (n > 0) { nredTraceLine(line, n); }
+        }
+    }
     const UInt8 ret = (singleton().org93F64 != 0)
                           ? FunctionCast(wrap93F64, singleton().org93F64)(obj, id)
                           : 0;
