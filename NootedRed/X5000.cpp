@@ -1379,27 +1379,36 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(t48_48));
     }
 
-    // 路径C（TTL注册缺失定位 NOTES §6.2）：TTL 门面 m_hTtl 读数 + 实例同一性比对。
-    //  读 mHttl=*(f338+0x38)（置位链判据字段）+ HWServices 侧门面 hws=*(*(self+0x50)+0xD8)，
-    //  比对 f338 vs hws（实例同一性）。仅值变化时打一行（≤4 行）；小缓冲 nredTraceLine（栈深纪律）。
-    //  ⚠️ 零行为改动、不新增寄存器访问（只读对象内存）、不受门控；逐跳 isKernelPtr 校验防野指针。
+    // 路径C（TTL注册缺失定位 NOTES §6.2）＋B85 方案 A（观测口径修正）：TTL 门面读数 + 实例同一性。
+    //  读 mHttl=*(f338+0x38)、hws=*(*(self+0x50)+0xD8)、hws38=*(hws+0x38)（控制器 getRtsInfo 实际读格），
+    //  比对 f338 vs hws；**追加打印被守卫的源值 f338/s50**（区分"守卫回落"与"真 0"，B85 §0-1 缺陷修正）。
+    //  仅值变化时打一行（≤4 行）；小缓冲 nredTraceLine（栈深纪律）；逐跳 isKernelPtr 守卫防野指针。
     {
-        UInt64 mHttl = 0, hws = 0;
+        UInt64 mHttl = 0, hws = 0, hws38 = 0;
         if (isKernelPtr(f338)) { mHttl = load64(f338, 0x38); }
         const UInt64 s50 = isKernelPtr(s) ? load64(s, 0x50) : 0;
         if (isKernelPtr(s50)) { hws = load64(s50, 0xD8); }
         const int same = (isKernelPtr(f338) && f338 == hws) ? 1 : 0;
+        // B85 方案 A：hws38=*(hws+0x38)（控制器读的那一格），自带 isKernelPtr 守卫；非法按 0。
+        if (isKernelPtr(hws)) { hws38 = load64(hws, 0x38); }
         static UInt64 sPrevM = 0xFFFFFFFFFFFFFFFFULL;
         static UInt64 sPrevH = 0xFFFFFFFFFFFFFFFFULL;
+        static UInt64 sPrevF = 0xFFFFFFFFFFFFFFFFULL;
+        static UInt64 sPrevS = 0xFFFFFFFFFFFFFFFFULL;
+        static UInt64 sPrevH38 = 0xFFFFFFFFFFFFFFFFULL;
         static int sPrevSame = -1;
         static unsigned sSeq = 0;
-        if (mHttl != sPrevM || hws != sPrevH || same != sPrevSame) {
+        if (mHttl != sPrevM || hws != sPrevH || same != sPrevSame || f338 != sPrevF || s50 != sPrevS || hws38 != sPrevH38) {
             sPrevM = mHttl; sPrevH = hws; sPrevSame = same;
+            sPrevF = f338; sPrevS = s50; sPrevH38 = hws38;
             if (++sSeq <= 4) {
-                char buf[80];
-                const int n = snprintf(buf, sizeof(buf), "ttlC: mHttl=%llx hws=%llx same=%d\n",
+                char buf[160];
+                const int n = snprintf(buf, sizeof(buf), "ttlC: mHttl=%llx hws=%llx same=%d f338=%llx s50=%llx hws38=%llx\n",
                                        static_cast<unsigned long long>(mHttl),
-                                       static_cast<unsigned long long>(hws), same);
+                                       static_cast<unsigned long long>(hws), same,
+                                       static_cast<unsigned long long>(f338),
+                                       static_cast<unsigned long long>(s50),
+                                       static_cast<unsigned long long>(hws38));
                 if (n > 0) { nredTraceLine(buf, n); }
             }
         }
