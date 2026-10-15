@@ -60,6 +60,9 @@ extern UInt64 gNRedPpSmuOverlayCalls;
 nred::TraceSafe gTraceSafe;
 // A-22：早期 trace 内存环形缓冲（静态，无分配；早期路径只 push，不写文件）
 nred::TraceRing gTraceRing;
+// B91②：最近一次 type=5（`wrapMode9440f` 的 b==5）时的 t30（观测留存：flush-stamp 行使用）。
+//  初值 0xFFFFFFFFFFFFFFFFULL＝"尚未发生过 type=5"哨兵（区别于真 0）；仅 R1 块写、flush 读。
+UInt64 gLastT30Type5 = 0xFFFFFFFFFFFFFFFFULL;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -176,8 +179,10 @@ int nredTraceFlush(int secTag)
     }
     if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
     // B77①：**写之前先把目标文件截断到 0**（消除"新正文短于旧文件 ⇒ 旧尾部冒充本轮"）。
-    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off, "[flush-stamp] sec=%d overflow=%u\n",
-                                        secTag, static_cast<unsigned>(gTraceRing.overflow)));
+    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off,
+                                        "[flush-stamp] sec=%d overflow=%u t30=%llx\n",
+                                        secTag, static_cast<unsigned>(gTraceRing.overflow),
+                                        static_cast<unsigned long long>(gLastT30Type5)));
     const int err = FileIO::writeBufferToFile(name, body, off);
     if (err == 0) {
         gTraceRing.reset();
@@ -1617,10 +1622,15 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
         static UInt32 sPrevRet = 0xFFFFFFFFU;
         static UInt32 sPrevOvf = 0xFFFFFFFFU;
         static unsigned sSeq = 0;
+        static bool sType5Done = false;    // B91①：type==5 必打（一次性，豁免 ≤4 上限）
         const UInt32 ovf = gTraceRing.overflow;   // B89 (b1')：环溢出丢弃次数
-        if (t30 != sPrevT30 || ret != sPrevRet || ovf != sPrevOvf) {
+        const bool isType5 = (b == 5);      // B91①：type=5 那次必打（判 (5,0) 时 obj+0x30 是否为空）
+        if (isType5) { gLastT30Type5 = t30; }     // B91②：记录供 flush-stamp 留存（即使行被截也先落全局）
+        if (t30 != sPrevT30 || ret != sPrevRet || ovf != sPrevOvf || isType5) {
             sPrevT30 = t30; sPrevRet = ret; sPrevOvf = ovf;
-            if (++sSeq <= 4) {
+            const bool forceType5 = isType5 && !sType5Done;   // B91①：type==5 豁免 ≤4 行上限
+            if (forceType5) { sType5Done = true; }
+            if (++sSeq <= 4 || forceType5) {
                 char line[128];
                 const int n = snprintf(line, sizeof(line),
                                        "ip5slot: slot=%llx t30=%llx type=%u sub=%u ret=%u overflow=%u\n",
