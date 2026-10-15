@@ -437,6 +437,13 @@ static const UInt8 kPred90Pattern[]     = {0x55, 0x48, 0x89, 0xE5, 0xBE, 0x9A, 0
 static const UInt8 kPred90PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
                                            0x00, 0x00};
+// B88 观测 R2'（95bda 收口规格 §3.1）：Apple 0x93f64（查位过滤器）。
+//  入口字节：push rbp; mov rsp,rbp; movl 1976(%rdi),%eax; btl %esi,%eax; setb %al; pop rbp; ret
+//  语义：return (*(UInt32*)(obj+0x7B8) >> id) & 1（bm 查位；id=5 为关注位）。
+//  等价核对（hook-check 不可用）：__TEXT.__text 内 18B 唯一 1 次@0x93f64（函数头✓，llvm-objdump+od 双证），
+//  callq 0x93f64 全库 1 处（0x95c7c）；交叉口径 0x9e505 21B 同法唯一 1 次 ⇒ 搜索方法可信。
+static const UInt8 kFlt93F64Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x8B, 0x87, 0xB8, 0x07, 0x00, 0x00,
+                                         0x0F, 0xA3, 0xF0, 0x0F, 0x92, 0xC0, 0x5D, 0xC3};
 
 // 第八步观测（2026-09-28 第十九轮）：定位 TTL 初始化 `0x8b10e` 的失败出口。
 //  `0x8b10e` 共 6 条出口，离线已排除 A（`0x90d75` 校验失败⇒将不做任何查询，与实测的 8 次查询矛盾）
@@ -908,6 +915,30 @@ UInt8 X5000HWLibs::wrapPred90(void* const ctx)
     static UInt8 sPrev = 0xFFu; static unsigned sSeq = 0;
     if (r != sPrev) { sPrev = r; if (++sSeq <= 4) NRED_TRACE("pred90: r=%u seq=%u", (unsigned)r, sSeq); }
     return r;
+}
+
+// B88 观测 R2'（95bda 收口规格 §3.1）：拦截 Apple 0x93f64（查位过滤器）。
+//  机制：routeFunction 改 0x93f64 入口跳本 wrapper；原样调回 org（trampoline）并**原样返回**其值。
+//  观测：bm=*(obj+0x7B8)（1 跳，先 nredKernelPtrOk，非法按 0）；仅 id∈{5,8} 或 id 变化时打一行。
+//  ⚠️ 零行为改动（返回 al 逐字透传）、不新增寄存器访问、不受门控；小缓冲 nredTraceLine（深栈纪律）。
+UInt8 X5000HWLibs::wrap93F64(void* const obj, const UInt32 id)
+{
+    const UInt8 ret = (singleton().org93F64 != 0)
+                          ? FunctionCast(wrap93F64, singleton().org93F64)(obj, id)
+                          : 0;
+    const UInt32 bm = nredKernelPtrOk(obj)
+        ? *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(obj) + 0x7B8) : 0;
+    static UInt32 sPrevId = 0xFFFFFFFFU;
+    if (id == 5 || id == 8 || id != sPrevId) {
+        sPrevId = id;
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "flt93f64: obj=%llx bm=%08x id=%u ret=%u\n",
+                               static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+                               static_cast<unsigned>(bm), static_cast<unsigned>(id),
+                               static_cast<unsigned>(ret));
+        if (n > 0) { nredTraceLine(line, n); }
+    }
+    return ret;
 }
 
 // 第八步观测（2026-09-28 第十九轮）：`0x8b10e` 的 4 个候选失败出口判据函数（**只读**，仅记录返回值）。
@@ -1561,6 +1592,29 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
             nredTraceLine(line, n);
         }
      }
+    // B88 观测 R1（95bda 收口规格 §3.1）：结果层读数 t30=*(a+0x30)（1 跳）。
+    //  ≠0 ⟺ "id=5 表项存在∧建槽成功"；仅 t30/ret 变化时才打（≤4 行/轮）。
+    //  ⚠️ 零行为改动、不新增寄存器访问、**不受门控**；逐跳 nredKernelPtrOk（非法按 0，B84 铁律四）；
+    //  小缓冲 char[128]＋nredTraceLine（深栈纪律：B19/B25 Double fault 同根因）。
+    {
+        const UInt64 t30 = nredKernelPtrOk(a)
+            ? *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30) : 0;
+        static UInt64 sPrevT30 = 0xFFFFFFFFFFFFFFFFULL;
+        static UInt32 sPrevRet = 0xFFFFFFFFU;
+        static unsigned sSeq = 0;
+        if (t30 != sPrevT30 || ret != sPrevRet) {
+            sPrevT30 = t30; sPrevRet = ret;
+            if (++sSeq <= 4) {
+                char line[128];
+                const int n = snprintf(line, sizeof(line),
+                                       "ip5slot: slot=%llx t30=%llx type=%u sub=%u ret=%u\n",
+                                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
+                                       static_cast<unsigned long long>(t30), static_cast<unsigned>(b),
+                                       static_cast<unsigned>(c), static_cast<unsigned>(ret));
+                if (n > 0) { nredTraceLine(line, n); }
+            }
+        }
+    }
     return ret;
 }
 
@@ -2033,6 +2087,11 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("pred90", kPred90Pattern, kPred90PatternMask,
                                            arrsize(kPred90Pattern), 0x6839E)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapPred90, this->orgPred90}, "pred90");
+        }
+        // B88 观测 R2'：route Apple 0x93f64（查位过滤器；函数入口型；route 失败只打一行不 panic）。
+        if (const auto from = resolveProbe("mode93f64", kFlt93F64Pattern, nullptr, arrsize(kFlt93F64Pattern),
+                                           0x93F64)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrap93F64, this->org93F64}, "mode93f64");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
