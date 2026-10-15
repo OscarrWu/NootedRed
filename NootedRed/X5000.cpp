@@ -1378,6 +1378,32 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(t48_0), static_cast<unsigned long long>(t48_40),
                static_cast<unsigned long long>(t48_48));
     }
+
+    // 路径C（TTL注册缺失定位 NOTES §6.2）：TTL 门面 m_hTtl 读数 + 实例同一性比对。
+    //  读 mHttl=*(f338+0x38)（置位链判据字段）+ HWServices 侧门面 hws=*(*(self+0x50)+0xD8)，
+    //  比对 f338 vs hws（实例同一性）。仅值变化时打一行（≤4 行）；小缓冲 nredTraceLine（栈深纪律）。
+    //  ⚠️ 零行为改动、不新增寄存器访问（只读对象内存）、不受门控；逐跳 isKernelPtr 校验防野指针。
+    {
+        UInt64 mHttl = 0, hws = 0;
+        if (isKernelPtr(f338)) { mHttl = load64(f338, 0x38); }
+        const UInt64 s50 = isKernelPtr(s) ? load64(s, 0x50) : 0;
+        if (isKernelPtr(s50)) { hws = load64(s50, 0xD8); }
+        const int same = (isKernelPtr(f338) && f338 == hws) ? 1 : 0;
+        static UInt64 sPrevM = 0xFFFFFFFFFFFFFFFFULL;
+        static UInt64 sPrevH = 0xFFFFFFFFFFFFFFFFULL;
+        static int sPrevSame = -1;
+        static unsigned sSeq = 0;
+        if (mHttl != sPrevM || hws != sPrevH || same != sPrevSame) {
+            sPrevM = mHttl; sPrevH = hws; sPrevSame = same;
+            if (++sSeq <= 4) {
+                char buf[80];
+                const int n = snprintf(buf, sizeof(buf), "ttlC: mHttl=%llx hws=%llx same=%d\n",
+                                       static_cast<unsigned long long>(mHttl),
+                                       static_cast<unsigned long long>(hws), same);
+                if (n > 0) { nredTraceLine(buf, n); }
+            }
+        }
+    }
 }
 
 // ─── 第八步观测（2026-09-28）：`configureDevice` 与 `initLinkToPeer` ────────────
