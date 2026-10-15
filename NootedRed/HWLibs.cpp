@@ -188,17 +188,26 @@ int nredTraceFlush(int secTag)
         body[off++] = '\n';
     }
     if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
-    // B77①：**写之前先把目标文件截断到 0**（消除"新正文短于旧文件 ⇒ 旧尾部冒充本轮"）。
-    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off,
-                                        "[flush-stamp] sec=%d overflow=%u t30=%llx\n",
-                                        secTag, static_cast<unsigned>(gTraceRing.overflow),
-                                        static_cast<unsigned long long>(gLastT30Type5)));
-    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off,
-                                        "[flush-t30] type3=%llx type8=%llx type5=%llx sub5=%08x\n",
-                                        static_cast<unsigned long long>(gLastT30Type3),
-                                        static_cast<unsigned long long>(gLastT30Type8),
-                                        static_cast<unsigned long long>(gLastT30Type5),
-                                        static_cast<unsigned>(gLastSub5)));
+    // B94 修复（s0-006 实测 4122B>4096 且 [flush-t30] 乱码）：snprintf 返回**应写长度**（截断时仍返回
+    //  完整长度）⇒ `off += snprintf(...)` 在 off 接近 4096 时越界累加 ⇒ 越界写 body、FileIO 读越界。
+    //  ⇒ 改用"实际写入长度"（min(返回值, 余量)）累加，off 恒 ≤ sizeof(body)，文件大小 ≤ 4096。
+    if (off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int fsN = snprintf(body + off, cap, "[flush-stamp] sec=%d overflow=%u t30=%llx\n",
+                                 secTag, static_cast<unsigned>(gTraceRing.overflow),
+                                 static_cast<unsigned long long>(gLastT30Type5));
+        if (fsN > 0) { off += (static_cast<size_t>(fsN) < cap) ? static_cast<size_t>(fsN) : cap; }
+    }
+    if (off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int ftN = snprintf(body + off, cap,
+                                 "[flush-t30] type3=%llx type8=%llx type5=%llx sub5=%08x\n",
+                                 static_cast<unsigned long long>(gLastT30Type3),
+                                 static_cast<unsigned long long>(gLastT30Type8),
+                                 static_cast<unsigned long long>(gLastT30Type5),
+                                 static_cast<unsigned>(gLastSub5));
+        if (ftN > 0) { off += (static_cast<size_t>(ftN) < cap) ? static_cast<size_t>(ftN) : cap; }
+    }
     // B93①（B77① 截断函数补上调用——此前定义了却未调用，致旧轮内容残留）：
     //  写前显式把目标文件长度截为 0（FileIO::writeBufferToFile 的 O_TRUNC 实测不被 honor）。
     nredTraceTruncateFile(name);
