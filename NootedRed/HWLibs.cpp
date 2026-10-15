@@ -66,6 +66,8 @@ UInt64 gLastT30Type5 = 0xFFFFFFFFFFFFFFFFULL;
 // B93②：type∈{3,8} 的最近 t30（与 type5 同款哨兵 0xFFFFFFFFFFFFFFFFULL＝未见到该 type）。
 UInt64 gLastT30Type3 = 0xFFFFFFFFFFFFFFFFULL;
 UInt64 gLastT30Type8 = 0xFFFFFFFFFFFFFFFFULL;
+// B94①：最近一次 b==5 时的阶段号 c（sub5；哨兵 0xFFFFFFFF＝未发生过 b==5）——判"(5,0)"是否真被调过。
+UInt32 gLastSub5 = 0xFFFFFFFFU;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -192,10 +194,11 @@ int nredTraceFlush(int secTag)
                                         secTag, static_cast<unsigned>(gTraceRing.overflow),
                                         static_cast<unsigned long long>(gLastT30Type5)));
     off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off,
-                                        "[flush-t30] type3=%llx type8=%llx type5=%llx\n",
+                                        "[flush-t30] type3=%llx type8=%llx type5=%llx sub5=%08x\n",
                                         static_cast<unsigned long long>(gLastT30Type3),
                                         static_cast<unsigned long long>(gLastT30Type8),
-                                        static_cast<unsigned long long>(gLastT30Type5)));
+                                        static_cast<unsigned long long>(gLastT30Type5),
+                                        static_cast<unsigned>(gLastSub5)));
     // B93①（B77① 截断函数补上调用——此前定义了却未调用，致旧轮内容残留）：
     //  写前显式把目标文件长度截为 0（FileIO::writeBufferToFile 的 O_TRUNC 实测不被 honor）。
     nredTraceTruncateFile(name);
@@ -466,7 +469,6 @@ static const UInt8 kPred90PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0
 //  callq 0x93f64 全库 1 处（0x95c7c）；交叉口径 0x9e505 21B 同法唯一 1 次 ⇒ 搜索方法可信。
 static const UInt8 kFlt93F64Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x8B, 0x87, 0xB8, 0x07, 0x00, 0x00,
                                          0x0F, 0xA3, 0xF0, 0x0F, 0x92, 0xC0, 0x5D, 0xC3};
-
 // 第八步观测（2026-09-28 第十九轮）：定位 TTL 初始化 `0x8b10e` 的失败出口。
 //  `0x8b10e` 共 6 条出口，离线已排除 A（`0x90d75` 校验失败⇒将不做任何查询，与实测的 8 次查询矛盾）
 //  与 B（`0x8b5de` 返回 NULL⇒但其内部的 3 次查询实测均成功）。剩余候选即下面 4 个函数：
@@ -1646,7 +1648,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
         const UInt32 bm5 = nredKernelPtrOk(a)     // B92增：能力位图（e0 的安全等价读数，见块注释）
             ? *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(a) + 0x7B8) : 0;
         const bool isType5 = (b == 5);      // B91①：type=5 那次必打（判 (5,0) 时 obj+0x30 是否为空）
-        if (isType5) { gLastT30Type5 = t30; }     // B91②：记录供 flush-stamp 留存（即使行被截也先落全局）
+        if (isType5) { gLastT30Type5 = t30; gLastSub5 = c; }   // B91②/B94①：记录供 flush 行留存
         // B93②：另存 type∈{3,8} 的 t30 供 [flush-t30] 行留存（关键读数钉在每片必写的行上）。
         if (b == 3) { gLastT30Type3 = t30; }
         else if (b == 8) { gLastT30Type8 = t30; }
