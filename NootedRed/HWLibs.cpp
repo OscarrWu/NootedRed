@@ -1614,30 +1614,35 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  ≠0 ⟺ "id=5 表项存在∧建槽成功"；仅 t30/ret/overflow 变化时才打（≤4 行/轮）。
     //  B89 (b1')：overflow=gTraceRing.overflow（环溢出丢弃次数，真实成员名）——直接证实/否证"环淹没丢行"。
     //  ⚠️ 零行为改动、不新增寄存器访问、**不受门控**；逐跳 nredKernelPtrOk（非法按 0，B84 铁律四）；
-    //  小缓冲 char[128]＋nredTraceLine（深栈纪律：B19/B25 Double fault 同根因）。
+    //  小缓冲 char[160]＋nredTraceLine（深栈纪律：B19/B25 Double fault 同根因）。
+    //  B92增：e0（id=5 表项[0]）的表项地址口径【未解出】（新表基址经 0x8b9ea 挂入对象池的字段未证）
+    //  ⇒ 不臆造解引用（B84 铁律四）；以 bm=*(a+0x7B8)（能力位图，1 跳、同 t30 纪律）作安全等价读数。
     {
         const UInt64 t30 = nredKernelPtrOk(a)
             ? *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30) : 0;
         static UInt64 sPrevT30 = 0xFFFFFFFFFFFFFFFFULL;
         static UInt32 sPrevRet = 0xFFFFFFFFU;
         static UInt32 sPrevOvf = 0xFFFFFFFFU;
+        static UInt32 sPrevBm = 0xFFFFFFFFU;
         static unsigned sSeq = 0;
         static bool sType5Done = false;    // B91①：type==5 必打（一次性，豁免 ≤4 上限）
         const UInt32 ovf = gTraceRing.overflow;   // B89 (b1')：环溢出丢弃次数
+        const UInt32 bm5 = nredKernelPtrOk(a)     // B92增：能力位图（e0 的安全等价读数，见块注释）
+            ? *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(a) + 0x7B8) : 0;
         const bool isType5 = (b == 5);      // B91①：type=5 那次必打（判 (5,0) 时 obj+0x30 是否为空）
         if (isType5) { gLastT30Type5 = t30; }     // B91②：记录供 flush-stamp 留存（即使行被截也先落全局）
-        if (t30 != sPrevT30 || ret != sPrevRet || ovf != sPrevOvf || isType5) {
-            sPrevT30 = t30; sPrevRet = ret; sPrevOvf = ovf;
+        if (t30 != sPrevT30 || ret != sPrevRet || ovf != sPrevOvf || bm5 != sPrevBm || isType5) {
+            sPrevT30 = t30; sPrevRet = ret; sPrevOvf = ovf; sPrevBm = bm5;
             const bool forceType5 = isType5 && !sType5Done;   // B91①：type==5 豁免 ≤4 行上限
             if (forceType5) { sType5Done = true; }
             if (++sSeq <= 4 || forceType5) {
-                char line[128];
+                char line[160];   // B92：追加 bm 后最大行长 130 ⇒ 128 不够
                 const int n = snprintf(line, sizeof(line),
-                                       "ip5slot: slot=%llx t30=%llx type=%u sub=%u ret=%u overflow=%u\n",
+                                       "ip5slot: slot=%llx t30=%llx type=%u sub=%u ret=%u overflow=%u bm=%08x\n",
                                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                                        static_cast<unsigned long long>(t30), static_cast<unsigned>(b),
                                        static_cast<unsigned>(c), static_cast<unsigned>(ret),
-                                       static_cast<unsigned>(ovf));
+                                       static_cast<unsigned>(ovf), static_cast<unsigned>(bm5));
                 if (n > 0) { nredTraceLine(line, n); }
             }
         }
