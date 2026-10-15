@@ -919,7 +919,8 @@ UInt8 X5000HWLibs::wrapPred90(void* const ctx)
 
 // B88 观测 R2'（95bda 收口规格 §3.1）：拦截 Apple 0x93f64（查位过滤器）。
 //  机制：routeFunction 改 0x93f64 入口跳本 wrapper；原样调回 org（trampoline）并**原样返回**其值。
-//  观测：bm=*(obj+0x7B8)（1 跳，先 nredKernelPtrOk，非法按 0）；仅 id∈{5,8} 或 id 变化时打一行。
+//  观测：bm=*(obj+0x7B8)（1 跳，先 nredKernelPtrOk，非法按 0）；仅 id∈{5,8} 时打一行
+//  （B89 (b1)：收窄掉"id 变化就打"支——该支几乎恒真、单轮可写 ≥32 行、淹没 256 行环）。
 //  ⚠️ 零行为改动（返回 al 逐字透传）、不新增寄存器访问、不受门控；小缓冲 nredTraceLine（深栈纪律）。
 UInt8 X5000HWLibs::wrap93F64(void* const obj, const UInt32 id)
 {
@@ -928,9 +929,7 @@ UInt8 X5000HWLibs::wrap93F64(void* const obj, const UInt32 id)
                           : 0;
     const UInt32 bm = nredKernelPtrOk(obj)
         ? *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(obj) + 0x7B8) : 0;
-    static UInt32 sPrevId = 0xFFFFFFFFU;
-    if (id == 5 || id == 8 || id != sPrevId) {
-        sPrevId = id;
+    if (id == 5 || id == 8) {
         char line[128];
         const int n = snprintf(line, sizeof(line), "flt93f64: obj=%llx bm=%08x id=%u ret=%u\n",
                                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
@@ -1593,7 +1592,8 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
         }
      }
     // B88 观测 R1（95bda 收口规格 §3.1）：结果层读数 t30=*(a+0x30)（1 跳）。
-    //  ≠0 ⟺ "id=5 表项存在∧建槽成功"；仅 t30/ret 变化时才打（≤4 行/轮）。
+    //  ≠0 ⟺ "id=5 表项存在∧建槽成功"；仅 t30/ret/overflow 变化时才打（≤4 行/轮）。
+    //  B89 (b1')：overflow=gTraceRing.overflow（环溢出丢弃次数，真实成员名）——直接证实/否证"环淹没丢行"。
     //  ⚠️ 零行为改动、不新增寄存器访问、**不受门控**；逐跳 nredKernelPtrOk（非法按 0，B84 铁律四）；
     //  小缓冲 char[128]＋nredTraceLine（深栈纪律：B19/B25 Double fault 同根因）。
     {
@@ -1601,16 +1601,19 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
             ? *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30) : 0;
         static UInt64 sPrevT30 = 0xFFFFFFFFFFFFFFFFULL;
         static UInt32 sPrevRet = 0xFFFFFFFFU;
+        static UInt32 sPrevOvf = 0xFFFFFFFFU;
         static unsigned sSeq = 0;
-        if (t30 != sPrevT30 || ret != sPrevRet) {
-            sPrevT30 = t30; sPrevRet = ret;
+        const UInt32 ovf = gTraceRing.overflow;   // B89 (b1')：环溢出丢弃次数
+        if (t30 != sPrevT30 || ret != sPrevRet || ovf != sPrevOvf) {
+            sPrevT30 = t30; sPrevRet = ret; sPrevOvf = ovf;
             if (++sSeq <= 4) {
                 char line[128];
                 const int n = snprintf(line, sizeof(line),
-                                       "ip5slot: slot=%llx t30=%llx type=%u sub=%u ret=%u\n",
+                                       "ip5slot: slot=%llx t30=%llx type=%u sub=%u ret=%u overflow=%u\n",
                                        static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                                        static_cast<unsigned long long>(t30), static_cast<unsigned>(b),
-                                       static_cast<unsigned>(c), static_cast<unsigned>(ret));
+                                       static_cast<unsigned>(c), static_cast<unsigned>(ret),
+                                       static_cast<unsigned>(ovf));
                 if (n > 0) { nredTraceLine(line, n); }
             }
         }
