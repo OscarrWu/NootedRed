@@ -63,6 +63,9 @@ nred::TraceRing gTraceRing;
 // B91②：最近一次 type=5（`wrapMode9440f` 的 b==5）时的 t30（观测留存：flush-stamp 行使用）。
 //  初值 0xFFFFFFFFFFFFFFFFULL＝"尚未发生过 type=5"哨兵（区别于真 0）；仅 R1 块写、flush 读。
 UInt64 gLastT30Type5 = 0xFFFFFFFFFFFFFFFFULL;
+// B93②：type∈{3,8} 的最近 t30（与 type5 同款哨兵 0xFFFFFFFFFFFFFFFFULL＝未见到该 type）。
+UInt64 gLastT30Type3 = 0xFFFFFFFFFFFFFFFFULL;
+UInt64 gLastT30Type8 = 0xFFFFFFFFFFFFFFFFULL;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -166,6 +169,11 @@ int nredTraceFlush(int secTag)
     size_t off = 0;
     // 首行指纹（复用 NvMsgBuf 的既有指纹格式）+ 秒级标签
     off += NvMsgBuf::formatFingerprint(body, sizeof(body));
+    // B93③：身份自证行——每片文件首行即"本轮身份"（build=编译时间、boot=启动指纹、seq=片序号）。
+    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off,
+                                        "[trace-ident] build=%s %s boot=%llx seq=%u\n",
+                                        __DATE__, __TIME__,
+                                        static_cast<unsigned long long>(NvMsgBuf::bootUptimeTicks()), fseq));
     off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off, "[flush-stamp] sec=%d\n", secTag));
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -183,6 +191,14 @@ int nredTraceFlush(int secTag)
                                         "[flush-stamp] sec=%d overflow=%u t30=%llx\n",
                                         secTag, static_cast<unsigned>(gTraceRing.overflow),
                                         static_cast<unsigned long long>(gLastT30Type5)));
+    off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off,
+                                        "[flush-t30] type3=%llx type8=%llx type5=%llx\n",
+                                        static_cast<unsigned long long>(gLastT30Type3),
+                                        static_cast<unsigned long long>(gLastT30Type8),
+                                        static_cast<unsigned long long>(gLastT30Type5)));
+    // B93①（B77① 截断函数补上调用——此前定义了却未调用，致旧轮内容残留）：
+    //  写前显式把目标文件长度截为 0（FileIO::writeBufferToFile 的 O_TRUNC 实测不被 honor）。
+    nredTraceTruncateFile(name);
     const int err = FileIO::writeBufferToFile(name, body, off);
     if (err == 0) {
         gTraceRing.reset();
@@ -1631,6 +1647,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
             ? *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(a) + 0x7B8) : 0;
         const bool isType5 = (b == 5);      // B91①：type=5 那次必打（判 (5,0) 时 obj+0x30 是否为空）
         if (isType5) { gLastT30Type5 = t30; }     // B91②：记录供 flush-stamp 留存（即使行被截也先落全局）
+        // B93②：另存 type∈{3,8} 的 t30 供 [flush-t30] 行留存（关键读数钉在每片必写的行上）。
+        if (b == 3) { gLastT30Type3 = t30; }
+        else if (b == 8) { gLastT30Type8 = t30; }
         if (t30 != sPrevT30 || ret != sPrevRet || ovf != sPrevOvf || bm5 != sPrevBm || isType5) {
             sPrevT30 = t30; sPrevRet = ret; sPrevOvf = ovf; sPrevBm = bm5;
             const bool forceType5 = isType5 && !sType5Done;   // B91①：type==5 豁免 ≤4 行上限
