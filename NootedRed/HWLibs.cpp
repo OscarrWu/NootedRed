@@ -426,6 +426,17 @@ static const UInt8 kPutFirmwarePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x83, 0xFE, 
 static const UInt8 kTtlQueryPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
                                          0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x38, 0x48, 0x85, 0xFF,
                                          0x0F, 0x84, 0xBB, 0x00};
+// B81 观测点 A：Apple 发送入口 0x683bd 的就绪谓词 0x6839e（读 C2PMSG_90(0x29A)→setne→ret al）。
+//  入口字节：push rbp; mov rsp,rbp; mov $0x29A,%esi; xor edx,edx; mov $4,%ecx; xor r8d,r8d; call 0x65530。
+//  末 4 字节＝call rel32（0x65530 的 rel32＝7A D1 FF FF，随二进制版本变 ⇒ mask 通配）。
+//  hook-check：pattern 唯一@0x6839e ✓、func_head ✓、CALL xref ✗（仅 4 处 DATA 取址——
+//  谓词以函数指针经 0x64f12 间接调用，无直接 callq；routeFunction 改入口对取址调用同样生效）。
+static const UInt8 kPred90Pattern[]     = {0x55, 0x48, 0x89, 0xE5, 0xBE, 0x9A, 0x02, 0x00, 0x00, 0x31, 0xD2,
+                                           0xB9, 0x04, 0x00, 0x00, 0x00, 0x45, 0x31, 0xC0, 0xE8, 0x7A, 0xD1,
+                                           0xFF, 0xFF};
+static const UInt8 kPred90PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                           0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+                                           0x00, 0x00};
 
 // 第八步观测（2026-09-28 第十九轮）：定位 TTL 初始化 `0x8b10e` 的失败出口。
 //  `0x8b10e` 共 6 条出口，离线已排除 A（`0x90d75` 校验失败⇒将不做任何查询，与实测的 8 次查询矛盾）
@@ -882,6 +893,21 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
         }
     }
     return ret;
+}
+
+// B81 观测点 A：拦截 Apple 就绪门谓词 0x6839e（读 C2PMSG_90(0x29A)→setne→ret al）。
+//  机制：routeFunction 把 0x6839e 入口改跳本 wrapper；wrapper 原样调回 org（trampoline）并返回其值，
+//  仅在结果变化时打印（≤4 行）。零行为改动：返回值/控制流逐字不变。
+//  ⚠️ 不新增任何硬件访问（只截获 Apple 已有的那次读）；route 失败时 org=0 ⇒ 返回 0（与"谓词为假"
+//  等价，不改变失败路径）。只走 nredTraceLine 内存环（深栈纪律：不走 SYSLOG）。
+UInt8 X5000HWLibs::wrapPred90(void* const ctx)
+{
+    const UInt8 r = (singleton().orgPred90 != 0)
+                        ? FunctionCast(wrapPred90, singleton().orgPred90)(ctx)
+                        : 0;
+    static UInt8 sPrev = 0xFFu; static unsigned sSeq = 0;
+    if (r != sPrev) { sPrev = r; if (++sSeq <= 4) NRED_TRACE("pred90: r=%u seq=%u", (unsigned)r, sSeq); }
+    return r;
 }
 
 // 第八步观测（2026-09-28 第十九轮）：`0x8b10e` 的 4 个候选失败出口判据函数（**只读**，仅记录返回值）。
@@ -1993,6 +2019,11 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                            0x6430F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode6430f, this->orgMode6430f}, "mode6430f");
         }
+        // B81 观测点 A：route Apple 就绪门谓词 0x6839e（函数入口型；route 失败只打一行不 panic）。
+        if (const auto from = resolveProbe("pred90", kPred90Pattern, kPred90PatternMask,
+                                           arrsize(kPred90Pattern), 0x6839E)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapPred90, this->orgPred90}, "pred90");
+        }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
         //  B24 疑案：ESP 部署 run304，但内核实际运行的 kext 疑似 run301（mode9440f 零命中、
@@ -2577,10 +2608,14 @@ CAILResult X5000HWLibs::smu12InternalHwInit(void* const ctx)
 
 bool X5000HWLibs::smu13IsFwLoaded(void* const ctx)
 {
-    // MP1 固件就绪判据的寄存器地址为 0x3010028（另一候选 0x3010024 已由既有离线判定排除——Apple 自身即用 0x3010028）。遗留未核：Apple 谓词取 bit0，而 smu13IsFwLoaded 用 INTERRUPTS_ENABLED，位语义是否一致待核。
-    return (singleton().smuCgsReadRegister(ctx, 0x3010028, 0, kCAILHWBlockMP1, MP1_PUBLIC)
-            & MP1_FIRMWARE_FLAGS_INTERRUPTS_ENABLED)
-           != 0;
+    // B81 观测点 B：打印 0x3010028 原值（值变化才打、≤4 行）。返回语义逐字不变。
+    // 注（更正旧注释）：Apple 发送入口 0x683bd 的就绪谓词＝C2PMSG_90(0x29A)≠0【反汇编·确凿】；
+    //   0x3010028 是我方判据，两者是否同源【未解出】。
+    const UInt32 v = singleton().smuCgsReadRegister(ctx, 0x3010028, 0, kCAILHWBlockMP1, MP1_PUBLIC);
+    static UInt32 sPrev = 0xDEADBEEFu; static unsigned sSeq = 0; static unsigned sCall = 0;
+    ++sCall;
+    if (v != sPrev) { sPrev = v; if (++sSeq <= 4) NRED_TRACE("fwflag28: v=0x%X seq=%u call=%u", v, sSeq, sCall); }
+    return (v & MP1_FIRMWARE_FLAGS_INTERRUPTS_ENABLED) != 0;
 }
 
 CAILResult X5000HWLibs::smu13WaitForFwLoaded(void* const ctx)
@@ -3275,8 +3310,9 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
                 NRED_TRACE("smu-trigger: ctx null, skipped n=%u", ++sB79TrigN);
             } else {
                 const CAILResult trig = X5000HWLibs::smu13InternalHwInit(ctx);
-                NRED_TRACE("smu-trigger: ret=0x%X (case13) n=%u",
-                           static_cast<unsigned>(trig), ++sB79TrigN);
+                NRED_TRACE("smu-trigger: ret=0x%X (case13) n=%u state=%llx",
+                           static_cast<unsigned>(trig), ++sB79TrigN,
+                           static_cast<unsigned long long>(NRed::singleton().getSmu13ProbeState()));
             }
         }
     }
