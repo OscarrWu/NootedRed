@@ -571,12 +571,6 @@ static const UInt8 kDevTableKey3PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0
 static const UInt8 kDevTableWritePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41,
                                               0x54, 0x53, 0x50, 0x49, 0x89, 0xCE, 0x49, 0x89, 0xD4, 0x49, 0x89,
                                               0xF5, 0x49, 0x89, 0xFF};
-static const UInt8 kDevTableKey1Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00, 0x00,
-                                              0x48, 0x83, 0x39, 0x00, 0x74, 0x45, 0x89, 0xFA, 0x41, 0x89, 0xF1,
-                                              0xBF};
-static const UInt8 kDevTableKey1PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
-                                                 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                                                 0xFF};
 static const UInt8 kCreateFirmwarePatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                                    0xFF, 0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0,
                                                    0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -1263,7 +1257,7 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
 // P7g 包G：`0xa2691`（三键查表）只读钩子——记三键与命中（返回非空⇒hit=1）。
 //  判据：若未命中（hit=0）⇒ dev+0xE8 写 0 ⇒ 全链失败（设备描述符数据来源 §一-7）。
 //  ⚠️ 只读：只写 4 个标量，不入环、不打印；逐字透传返回值。
-UInt64 X5000HWLibs::wrapDevTableKey3(const UInt32 k1, const UInt32 k2, const UInt32 k3)
+UInt64 X5000HWLibs::wrapDevTableKey3(const UInt64 k1, const UInt64 k2, const UInt64 k3)
 {
     const UInt64 ret = (singleton().orgDevTableKey3 != 0)
                            ? FunctionCast(wrapDevTableKey3, singleton().orgDevTableKey3)(k1, k2, k3) : 0;
@@ -1286,15 +1280,6 @@ UInt64 X5000HWLibs::wrapDevTableWrite(void* const dev, void* const a2, void* con
     return ret;
 }
 
-// P7g 包G：`0xa1cb8`（第一次二键查表）只读钩子——记键1（运行期未观测过）。
-//  ⚠️ 只读：只写 1 个标量；逐字透传返回值；不入环、不打印。
-UInt64 X5000HWLibs::wrapDevTableKey1(const UInt32 k1, const UInt32 k2)
-{
-    const UInt64 ret = (singleton().orgDevTableKey1 != 0)
-                           ? FunctionCast(wrapDevTableKey1, singleton().orgDevTableKey1)(k1, k2) : 0;
-    gTKey1a = k1;
-    return ret;
-}
 
 bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 {
@@ -2395,10 +2380,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("dev-write", kDevTableWritePattern, nullptr, arrsize(kDevTableWritePattern),
                                            0xA25DE)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevTableWrite, this->orgDevTableWrite}, "dev-write");
-        }
-        if (const auto from = resolveProbe("dev-key1", kDevTableKey1Pattern, kDevTableKey1PatternMask,
-                                           arrsize(kDevTableKey1Pattern), 0xA1CB8)) {
-            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevTableKey1, this->orgDevTableKey1}, "dev-key1");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
