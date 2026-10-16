@@ -83,16 +83,21 @@ static UInt64  gP5 = 0xFFFFFFFFFFFFFFFFULL;   // 0x9440f：(type<<32) | ret（�
 // P7d 包D″：真 `m_hTtl`＝加速器侧门面对象 `+0x38`（由 X5000.cpp 的既有 `ttlC:` 块顺带存此；
 //  与 `ttlC: mHttl=` 同一个值）。哨兵 0xFFFFFFFFFFFFFFFF＝尚未采到。取代原先误用的 gLastT30Type5。
 UInt64 gMHttl = 0xFFFFFFFFFFFFFFFFULL;
-// P7e 包E：判别读数 v2（按"调用者返回地址"分辨 `0x929ac` 的 5 个入口；规格 NOTES-尾部.md §6）。
-//  哨兵：gABRet=-1（allocB 未被调用）、gC4RA=0（判据④入口未命中）、gC4Sub/gC4Al=0xFFFFFFFF。
-//  ⚠️ 限流硬约束：`0x929ac` 属高频路径 ⇒ 仅归属相关入口（RA∈{0x9295b,0x92dd4,0x92e63} 或 sub∈{0,2}）
-//     才写标量（不打印、不入环）；其余入口**只自增计数** ⇒ 判别行不会被挤出 4096 B 片。
+// P7e 包E′：判别读数 v3（修复"清理路径覆盖判别值"缺陷；规格 NOTES-尾部.md §6）。
+//  ★分槽原则：判据④那次（`RA==0x9295B`）**首次锁定、永不覆盖**（否则失败清理会在其
+//    之后以 RA=0x92DD4/sub=2 再进一次 `0x929ac`，把判别值冲掉 ⇒ R6 拿不到判据④结果）；
+//    清理（0x92DD4）／派发器（0x92E63）与其它 sub∈{0,2} 入口记**最近一次**（分槽 cln_*）。
+//  哨兵：gABRet=-1、gC4Locked=false、gC4Al/gC4N=0、gClnRA=0 / gClnSub/gClnAl=0xFFFFFFFF。
+//  ⚠️ 限流硬约束：本函数高频 ⇒ 只写标量（不入环、不打印）；其余入口只 ++gC4Other 计数。
 static SInt32  gABRet  = -1;    // `0x928f4`(allocB) 最近一次返回值（0/非 0）
 static UInt32  gABSeq  = 0;     // allocB 调用序号（同轮对齐用）
-static UInt64  gC4RA   = 0;     // 判据④入口那次的调用者返回地址（归零 VM）
-static UInt32  gC4Sub  = 0xFFFFFFFFU;  // 该次的 sub（0＝判据④、2＝失败清理）
-static UInt32  gC4Al   = 0xFFFFFFFFU;  // 该次返回值的 al 低位
-static UInt32  gC4Other = 0;    // 非归属入口的调用次数（只计数，不打印）
+static bool    gC4Locked = false;  // 判据④（RA==0x9295B）是否已锁定
+static UInt32  gC4Al   = 0;     // 【锁定】判据④那次返回值的 al 低位（&0xFF）
+static UInt32  gC4N    = 0;     // RA==0x9295B 的调用计数（含锁定后重复进入）
+static UInt64  gClnRA  = 0;     // 【最近】清理/派发器入口的 RA（归零 VM）
+static UInt32  gClnSub = 0xFFFFFFFFU;  // 该次 sub（2＝失败清理）
+static UInt32  gClnAl  = 0xFFFFFFFFU;  // 该次返回值 al 低位
+static UInt32  gC4Other = 0;    // 其余高频入口调用次数（只计数）
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -234,18 +239,34 @@ int nredTraceFlush(int secTag)
     // P7e 包E③：`[ttlchain2]` 头部戳记（与 `[bringup]`／`[ttlchain]` 并列，同处头部区）。
     //  判别读数 v2：ab_ret＝allocB 返回值、c4ra/c4sub/c4al＝**判据④入口**那次的调用者返回
     //  地址/sub/al（按 RA 分辨，见 wrapIpEntrySeq 注释）⇒ 解决"p4=1 却仍 ret=0"的归因歧义。
-    //  哨兵控制：allocB 未被调用（gABRet==-1）且判据④入口未命中 ⇒ **不追加本行**
-    //  ⇒ 未命中形态输出逐字不变。只读标量，不新增解引用/SYSLOG。单行 ≤191。
-    if ((gABRet != -1 || gC4RA != 0) && off < sizeof(body)) {
+    //  P7e 包E′：字段来源改为新槽（c4ra/c4sub＝**最近清理/派发器入口**；c4al＝锁定的判据④）。
+    //  哨兵控制同上（未命中不追加）⇒ 未命中形态输出逐字不变。只读标量，单行 ≤191。
+    if ((gABRet != -1 || gClnRA != 0 || gC4N != 0) && off < sizeof(body)) {
         const size_t cap = sizeof(body) - off;
         const int n4 = snprintf(body + off, cap,
                                 "[ttlchain2] ab_ret=%d c4ra=%llx c4sub=%u c4al=%u p3=%d mHttl=%llx\n",
                                 static_cast<int>(gABRet),
-                                static_cast<unsigned long long>(gC4RA),
-                                static_cast<unsigned>(gC4Sub), static_cast<unsigned>(gC4Al),
+                                static_cast<unsigned long long>(gClnRA),
+                                static_cast<unsigned>(gClnSub), static_cast<unsigned>(gC4Al),
                                 static_cast<int>(gP3),
                                 static_cast<unsigned long long>(gMHttl));
         if (n4 > 0) { off += (static_cast<size_t>(n4) < cap) ? static_cast<size_t>(n4) : cap; }
+    }
+    // P7e 包E′④：头部戳记 v3（与 [bringup]／[ttlchain]／[ttlchain2] 并列）。
+    //  判据④的 c4al/c4n 取自**首次锁定**槽（不被其后的失败清理冲掉）；cln_* 为清理/派发器
+    //  入口的最近一次。哨兵控制：allocB 未被调用且判据④未命中且清理未命中 ⇒ 不追加本行
+    //  ⇒ 未命中形态输出逐字不变。只读标量，不强新增解引用/SYSLOG。单行 ≤191。
+    if ((gABRet != -1 || gC4N != 0 || gClnRA != 0) && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n5 = snprintf(body + off, cap,
+                                "[ttlchain3] ab_ret=%d c4al=%u c4n=%u cln_ra=%llx cln_sub=%u cln_al=%u p3=%d mHttl=%llx\n",
+                                static_cast<int>(gABRet),
+                                static_cast<unsigned>(gC4Al), static_cast<unsigned>(gC4N),
+                                static_cast<unsigned long long>(gClnRA),
+                                static_cast<unsigned>(gClnSub), static_cast<unsigned>(gClnAl),
+                                static_cast<int>(gP3),
+                                static_cast<unsigned long long>(gMHttl));
+        if (n5 > 0) { off += (static_cast<size_t>(n5) < cap) ? static_cast<size_t>(n5) : cap; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -1190,19 +1211,22 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
 {
     const UInt32 ret = (singleton().orgIpEntrySeq != 0)
                            ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
-    // P7e 包E②：**按调用者返回地址 RA 分辨入口**（`0x929ac` 全库 5 入口，仅判据④那次可归因）。
-    //  RA＝`__builtin_return_address(0)` 减 kcSlide ⇒ 归零 VM；归属相关入口：
-    //    0x9295b＝判据④（sub=0）／0x92dd4＝失败清理（sub=2）／0x92e63＝派发器。
-    //  ⚠️ 限流硬约束：本函数属高频路径 ⇒ **只写标量、不入环、不打印**；
-    //     非归属入口只自增 gC4Other 计数 ⇒ 判别行不会被挤出 4096 B 片（规格 §6）。
+    // P7e 包E′：**按 RA 分辨入口 ＋ 判据④首次锁定**（`0x929ac` 全库 5 入口）。
+    //  RA＝`__builtin_return_address(0)` 减 kcSlide ⇒ 归零 VM。
+    //  ★判据④（`RA==0x9295B`）：**首次锁定、永不覆盖**（gC4Locked）⇒ 判据④的真结果
+    //    不会被其后的失败清理（RA=0x92DD4/sub=2）冲掉（这是包E 的缺陷）。
+    //  ★清理／派发器（RA==0x92DD4／0x92E63）与 sub∈{0,2} 的其它入口：记**最近一次**到 cln_*。
+    //  ⚠️ 限流硬约束：本函数高频 ⇒ 只写标量（不入环、不打印）；其余入口只 ++gC4Other。
     {
         const UInt64 ra = (singleton().kcSlide != 0)
             ? (reinterpret_cast<UInt64>(__builtin_return_address(0)) - singleton().kcSlide) : 0;
-        const bool rel = (ra == 0x9295BULL || ra == 0x92DD4ULL || ra == 0x92E63ULL) || (b == 0) || (b == 2);
-        if (rel) {
-            gC4RA = ra;
-            gC4Sub = b;
-            gC4Al = static_cast<UInt32>(ret & 0xFF);
+        if (ra == 0x9295BULL) {
+            ++gC4N;
+            if (!gC4Locked) { gC4Locked = true; gC4Al = static_cast<UInt32>(ret & 0xFF); }
+        } else if (ra == 0x92DD4ULL || ra == 0x92E63ULL || b == 0 || b == 2) {
+            gClnRA = ra;
+            gClnSub = b;
+            gClnAl = static_cast<UInt32>(ret & 0xFF);
         } else {
             ++gC4Other;   // 高频非归属入口：只计数
         }
