@@ -1361,6 +1361,20 @@ void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* con
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(val)));
     }
     FunctionCast(wrapTtlRegIface, singleton().orgTtlRegIface)(table, idx, obj, val);
+    // B94 介入补装（最终用户已授权；回滚＝删本块）：给"收集器表 idx=1 槽对象"补 `+0xE0` 函数指针。
+    //  第一因：Apple 0x93880（ttl_initialize step2 内）读并调用 idx=1 槽对象 +0xE0，读到空 ⇒ 返 0 ⇒
+    //  m_hTtl 恒 0。穷尽普查确认无合法安装路径 ⇒ 仅能由我方补装（回调值 0xa76e0，规格定稿 §3.2）。
+    //  三重前置（缺一不写、绝不覆盖 Apple 已装值、绝不崩）：nredKernelPtrOk(obj) ∧ kcSlide!=0 ∧
+    //  *slotE0==nullptr（短路：obj 非法 ⇒ 不解引用 slotE0）。
+    //  ⚠️ 门控纪律：本写入分支在 checkKernelArgument 门控**之外**（旧补丁 pool: iface3 整块在门控内
+    //  ＝"观测改变行为"违纪前例；写入是无条件执行的介入，打印才有门控约束——本块不打印）。
+    if (idx == 1) {
+        const UInt8* const fn = reinterpret_cast<const UInt8*>(0xa76e0 + singleton().kcSlide);
+        void** const slotE0 = reinterpret_cast<void**>(static_cast<UInt8*>(obj) + 0xE0);
+        if (nredKernelPtrOk(obj) && singleton().kcSlide != 0 && *slotE0 == nullptr) {
+            *slotE0 = const_cast<UInt8*>(fn);
+        }
+    }
 }
 
 // 第八步观测（2026-09-28 第二十三轮）：`TlsCreateInstance`(0x93f76) 与 `TlsSwInit` 内部创建(0x95e9f)（只读）。
