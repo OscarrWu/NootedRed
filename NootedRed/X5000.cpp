@@ -1401,7 +1401,7 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
         if (mHttl != sPrevM || hws != sPrevH || same != sPrevSame || f338 != sPrevF || s50 != sPrevS || hws38 != sPrevH38) {
             sPrevM = mHttl; sPrevH = hws; sPrevSame = same;
             sPrevF = f338; sPrevS = s50; sPrevH38 = hws38;
-            if (++sSeq <= 4) {
+            if (++sSeq <= 8) {   // P7b 包C①：上限 4→8（post-call 读数必现；仍严格限流防环满）
                 char buf[160];
                 const int n = snprintf(buf, sizeof(buf), "ttlC: mHttl=%llx hws=%llx same=%d f338=%llx s50=%llx hws38=%llx\n",
                                        static_cast<unsigned long long>(mHttl),

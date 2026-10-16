@@ -1841,6 +1841,33 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                static_cast<unsigned long long>(tM), static_cast<unsigned long long>(tP),
                static_cast<unsigned long long>(tF));
     }
+    // P7b 包C②：控制器侧 TTL 门面实例只读读数（同一取点 `ttl=*(*(self+0x50)+0xD8)`）。
+    //  与加速器侧 `ttlC:` 行的 f338/hws 比对 ⇒ 判"写入的门面"与"控制器读的门面"是否同一实例。
+    //  ⚠️ 走 **nredTraceLine 内存环**（既有 `NRed TtlAsm cap:` 那行是 SYSLOG，且受 `-NRedTtlAsm`
+    //  门控、基线不含 ⇒ 本轮拿不到；本行置 `-NRedAccelLog` 门控内 ⇒ 基线本轮必现）。
+    //  禁新增 SYSLOG（该阶段深栈 SYSLOG 曾致 Double fault，见 provider注册链 §一.9）。只读、≤191B。
+    if (checkKernelArgument("-NRedAccelLog")) {
+        UInt64 cTtl = 0, cM = 0xFFULL;
+        {
+            auto rd = [](UInt64 base, UInt64 off) -> UInt64 {
+                return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+            };
+            const UInt64 tSelf = reinterpret_cast<UInt64>(self);
+            if (tSelf >= 0xffffff7f80000000ULL) {
+                const UInt64 tNode = rd(tSelf, 0x50);
+                if (tNode >= 0xffffff7f80000000ULL) {
+                    cTtl = rd(tNode, 0xD8);
+                    if (cTtl >= 0xffffff7f80000000ULL) { cM = rd(cTtl, 0x38); }
+                }
+            }
+        }
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "ttlCtrl: ttl=%llx mHttl=%llx self=%llx\n",
+                               static_cast<unsigned long long>(cTtl),
+                               static_cast<unsigned long long>(cM),
+                               static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)));
+        if (n > 0) { nredTraceLine(line, n); }
+    }
 
 
     return FunctionCast(wrapPpHelperPowerUp, singleton().orgPpHelperPowerUp)(self);
