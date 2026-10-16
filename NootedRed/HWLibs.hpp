@@ -94,6 +94,7 @@ class X5000HWLibs
     mach_vm_address_t                                            org93F64{0};    // B88 观测 R2'：Apple 0x93f64（查位过滤器，bm=(obj+0x7B8)>>id & 1）
     mach_vm_address_t                                            orgIpiInit{0};      // P7c 包D：判据③ 0x9405e（IpiInitializeIpInterfaces）
     mach_vm_address_t                                            orgIpEntrySeq{0};   // P7c 包D：判据④ 0x929ac（TlsExecuteIpEntrySeq）
+    mach_vm_address_t                                            orgAllocB{0};       // P7e 包E：判据 h 0x928f4（allocB）
     // 第八步观测（2026-09-28 第十九轮）：TTL 初始化 `0x8b10e` 的失败出口定位（只读）
     mach_vm_address_t                                            orgTtlCollect{0};   // 0x8b5de 收集器
     mach_vm_address_t                                            orgTtlAllocA{0};    // 0x93880
@@ -152,6 +153,7 @@ private:
     static UInt8 wrap93F64(void* obj, UInt32 id);   // B88 观测 R2'：Apple 0x93f64（查位过滤器，原样透传返回值）
     static UInt32 wrapIpiInit(void* a, UInt32 b, void* c);        // P7c 包D：判据③ 0x9405e（只记返回值）
     static UInt32 wrapIpEntrySeq(void* a, UInt32 b, UInt32 c);    // P7c 包D：判据④ 0x929ac（只记返回值）
+    static UInt64 wrapAllocB(void* ctx);                          // P7e 包E：判据 h 0x928f4（记 ret＋序号）
     // 第八步观测（2026-09-28 第十九轮）：`0x8b10e` 的 4 个候选失败出口判据函数（只读）
     static void* wrapTtlCollect(void* ctx);
     static void* wrapTtlAllocA(void* ctx);
