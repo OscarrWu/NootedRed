@@ -68,6 +68,12 @@ UInt64 gLastT30Type3 = 0xFFFFFFFFFFFFFFFFULL;
 UInt64 gLastT30Type8 = 0xFFFFFFFFFFFFFFFFULL;
 // B94①：最近一次 b==5 时的阶段号 c（sub5；哨兵 0xFFFFFFFF＝未发生过 b==5）——判"(5,0)"是否真被调过。
 UInt32 gLastSub5 = 0xFFFFFFFFU;
+// P2 包A：固件流程状态（定义在 FwBringup/NRedFwBringupHook.hpp；本处只读，供 [bringup] 头部戳记）。
+extern UInt32 gBringupEnterCount;
+extern UInt32 gBringupStep;
+extern SInt32 gBringupLastError;
+extern UInt32 gBringupLoadToc;
+extern UInt32 gBringupTmrLoad;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -177,6 +183,20 @@ int nredTraceFlush(int secTag)
                                         __DATE__, __TIME__,
                                         static_cast<unsigned long long>(NvMsgBuf::bootUptimeTicks()), fseq));
     off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off, "[flush-stamp] sec=%d\n", secTag));
+    // P2 包A：执行确认通道（头部区——"先写、永不被 4096 上限截到"，故每片必现）。
+    //  哨兵控制：`gBringupEnterCount==0`（接口一关闭态／hook 未进入）⇒ **不追加本行** ⇒
+    //  关态每片正文逐字不变（与 B55/B93 的"关态零差异"纪律一致）。不受任何观测门控。
+    if (gBringupEnterCount != 0 && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n2 = snprintf(body + off, cap,
+                                "[bringup] enter=%u step=%u last_error=%d loadToc=%X tmrLoad=%X\n",
+                                static_cast<unsigned>(gBringupEnterCount),
+                                static_cast<unsigned>(gBringupStep),
+                                static_cast<int>(gBringupLastError),
+                                static_cast<unsigned>(gBringupLoadToc),
+                                static_cast<unsigned>(gBringupTmrLoad));
+        if (n2 > 0) { off += (static_cast<size_t>(n2) < cap) ? static_cast<size_t>(n2) : cap; }
+    }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
         const char* line = nullptr;

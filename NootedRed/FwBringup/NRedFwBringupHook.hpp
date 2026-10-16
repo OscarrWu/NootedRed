@@ -59,6 +59,14 @@ static const uint8_t sSmu1300Data[] = {
 static const fw::FwAssetDesc kFwTocAsset = {sPsp13TocData, sizeof(sPsp13TocData), 0x5277BF308C9C5C4CULL};
 static const fw::FwAssetDesc kFwTaAsset  = {sPsp13TaData, sizeof(sPsp13TaData), 0x3DD1DDCCE682BB8FULL};
 static const fw::FwAssetDesc kFwSmuAsset = {sSmu1300Data, sizeof(sSmu1300Data), 0x47420DC80A7B332FULL};
+// P2 包A：固件流程关键状态（供 HWLibs.cpp 的 [bringup] 头部戳记读取）。
+//  在 hook 内两处**既有**打印点各记一次，不新增任何打印/落盘量；常量初始化（无 guard variable，
+//  符合内核态约束）；全为标量 ⇒ 关态读到的即初值，戳记据此不输出（关态输出逐字不变）。
+static UInt32 gBringupEnterCount = 0;   // 进入 hook 次数（非 0 ⇒ 进入过）
+static UInt32 gBringupStep      = 0;   // 末次 step（哨兵 0＝尚未走到）
+static SInt32 gBringupLastError = 0;   // 末次 last_error
+static UInt32 gBringupLoadToc   = 0;   // 末次 loadToc_resp
+static UInt32 gBringupTmrLoad   = 0;   // 末次 tmrLoad_resp
 
 
 
@@ -192,7 +200,7 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
         static unsigned sGHookEnter = 0;
         char line[64];
         const int n = snprintf(line, sizeof(line), "bringup: enter n=%u\n", ++sGHookEnter);
-        if (n > 0) { nredTraceLine(line, n); }
+        if (n > 0) { nredTraceLine(line, n); ++gBringupEnterCount; }   // P2 包A：供头部戳记
     }
     const NredSyslogMuteGuard _syslogMute;   // B19：本 hook 作用域内静音 SYSLOG（RAII，随各 return 复位）
 
@@ -528,6 +536,11 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     NRED_TRACE("bringup: step=%u last_error=%d loadToc_resp=0x%X tmrLoad_resp=0x%X",
                static_cast<unsigned>(ctx.last_step), ctx.last_error,
                ctx.last_resp_status_load_toc, ctx.last_resp_status_tmr_load);
+    // P2 包A：同一处既有打印点顺带记四项（不新增打印/落盘量），供 HWLibs.cpp 头部戳记读取。
+    gBringupStep = static_cast<UInt32>(ctx.last_step);
+    gBringupLastError = ctx.last_error;
+    gBringupLoadToc = ctx.last_resp_status_load_toc;
+    gBringupTmrLoad = ctx.last_resp_status_tmr_load;
 
     // D3: TMR 缓冲保留至卸载（对齐 Linux"保留至卸载"契约，防提前释放）。
     // 此处不释放 tmrDesc，保留至 kext 卸载（static 持有）。
