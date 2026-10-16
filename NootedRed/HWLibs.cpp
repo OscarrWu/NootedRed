@@ -74,6 +74,12 @@ extern UInt32 gBringupStep;
 extern SInt32 gBringupLastError;
 extern UInt32 gBringupLoadToc;
 extern UInt32 gBringupTmrLoad;
+// P7c 包D：allocB 末两道判据与 0x9440f 的返回值（供 [ttlchain] 头部戳记读取）。
+//  哨兵语义：gP3/gP4＝-1（未进入过该判据）；gP5＝0xFFFFFFFFFFFFFFFF（0x9440f 未被调用）。
+//  仅由相应 wrapper 写、flush 读；常量初始化（无 guard variable）。
+static SInt32  gP3 = -1;   // 判据③ `0x9405e`（IpiInitializeIpInterfaces）的返回值
+static SInt32  gP4 = -1;   // 判据④ `0x929ac`（TlsExecuteIpEntrySeq）的返回值
+static UInt64  gP5 = 0xFFFFFFFFFFFFFFFFULL;   // 0x9440f：(type<<32) | ret（既有 wrapMode9440f 内写）
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -196,6 +202,19 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gBringupLoadToc),
                                 static_cast<unsigned>(gBringupTmrLoad));
         if (n2 > 0) { off += (static_cast<size_t>(n2) < cap) ? static_cast<size_t>(n2) : cap; }
+    }
+    // P7c 包D：`[ttlchain]` 头部戳记（与 `[bringup]` 并列，同处头部区）。
+    //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束，上一轮 `ttl-allocB`
+    //  等判别行正是落在被截的尾部而丢失（只在 SYSLOG 侧留下）⇒ 判别读数必须落头部区才每片必现。
+    //  哨兵控制：三值全为初值（三个判据均未进入）⇒ **不追加本行** ⇒ 未命中形态输出逐字不变。
+    //  ⚠️ 只读：只读三个标量（由相应 wrapper 写入）＋ gLastT30Type5，不新增解引用/SYSLOG。
+    if ((gP3 != -1 || gP4 != -1 || gP5 != 0xFFFFFFFFFFFFFFFFULL) && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n3 = snprintf(body + off, cap, "[ttlchain] p3=%d p4=%d p5=%llx mHttl=%llx\n",
+                                static_cast<int>(gP3), static_cast<int>(gP4),
+                                static_cast<unsigned long long>(gP5),
+                                static_cast<unsigned long long>(gLastT30Type5));
+        if (n3 > 0) { off += (static_cast<size_t>(n3) < cap) ? static_cast<size_t>(n3) : cap; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -469,6 +488,15 @@ static const UInt8 kDeviceTypeTablePattern[] = {0x60, 0x68, 0x00, 0x00, 0x00, 0x
 static const UInt8 kCreateFirmwarePattern[]     = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54,
                                                    0x53, 0x40, 0x89, 0xC0, 0x41, 0x89, 0xD0, 0x41, 0x89, 0xF0,
                                                    0x40, 0x89, 0xF0, 0xBF, 0x20, 0x00, 0x00, 0x00, 0xE8};
+// P7c 包D：判据③ `0x9405e` / 判据④ `0x929ac`（allocB 四道判据的末两道；L2-j定因 §D.2）。
+//  锚点取 24B（**必须**：两者 16B 序言在 __TEXT.__text 内分别命中 245/164 次，不唯一）。
+//  等价核对（hook-check 本机不可用）：24B 各命中 1 次且位于函数头（tmp/prog/pattern-check-p7d.py）。
+//  ⚠️ `0x9440f`（判据④内部子函数）**已由既有 wrapMode9440f 挂钩**（route 标签 mode9440f），
+//     不重复挂；其 ret/type 由该既有 wrapper 内记入全局供头部戳记使用。
+static const UInt8 kIpiInitPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                        0x53, 0x48, 0x83, 0xEC, 0x18, 0x85, 0xF6, 0x74, 0x60, 0x49, 0x89, 0xD7};
+static const UInt8 kIpEntrySeqPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                           0x53, 0x48, 0x83, 0xEC, 0x28, 0x49, 0x89, 0xD6, 0x41, 0x89, 0xF7, 0x49};
 static const UInt8 kCreateFirmwarePatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                                    0xFF, 0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0,
                                                    0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -1110,6 +1138,27 @@ void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
     return ret;
 }
 
+// P7c 包D：判据③ `0x9405e`（IpiInitializeIpInterfaces）只读钩子——只记返回值，逐字透传。
+//  判假条件（L2-j定因 §D.6）：某 id 查表命中但 `0x93d18` 建子对象返假 ⇒ 断言 ttl_ipi.c:668 ⇒ 返 0。
+//  ⚠️ 只读：不改返回值/内存/控制流；不新增 SYSLOG（只写标量供头部戳记）。
+UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
+{
+    const UInt32 ret = (singleton().orgIpiInit != 0)
+                           ? FunctionCast(wrapIpiInit, singleton().orgIpiInit)(a, b, c) : 0;
+    gP3 = static_cast<SInt32>(ret);
+    return ret;
+}
+
+// P7c 包D：判据④ `0x929ac`（TlsExecuteIpEntrySeq）只读钩子——只记返回值，逐字透传。
+//  判假条件（同 §D.5）：逐项 `0x9440f(*(obj+8), ids[i], sub, out)` 任一项返 0 ⇒ 断言 ttl_tls.c:357 ⇒ 返 0。
+UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c)
+{
+    const UInt32 ret = (singleton().orgIpEntrySeq != 0)
+                           ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
+    gP4 = static_cast<SInt32>(ret);
+    return ret;
+}
+
 bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 {
     // B62：入口自证（**零解引用**：只打参数值）——纳入门控 `-NRedAccelLog`，
@@ -1711,6 +1760,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
             }
         }
     }
+    // P7c 包D：把 `0x9440f` 的 (type, ret) 打包记入全局，供 [ttlchain] 头部戳记的 p5 使用。
+    //  （该函数已由本 wrapper 挂钩，不重复挂；此处只写标量，不新增打印/落盘量。）
+    gP5 = (static_cast<UInt64>(b) << 32) | static_cast<UInt64>(ret);
     return ret;
 }
 
@@ -2188,6 +2240,15 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode93f64", kFlt93F64Pattern, nullptr, arrsize(kFlt93F64Pattern),
                                            0x93F64)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrap93F64, this->org93F64}, "mode93f64");
+        }
+        // P7c 包D：判据③ `0x9405e` / 判据④ `0x929ac`（函数入口型；route 失败只打一行不 panic）。
+        if (const auto from = resolveProbe("ipi-init", kIpiInitPattern, nullptr, arrsize(kIpiInitPattern),
+                                           0x9405E)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapIpiInit, this->orgIpiInit}, "ipi-init");
+        }
+        if (const auto from = resolveProbe("ip-entry-seq", kIpEntrySeqPattern, nullptr, arrsize(kIpEntrySeqPattern),
+                                           0x929AC)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapIpEntrySeq, this->orgIpEntrySeq}, "ip-entry-seq");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────

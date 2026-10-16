@@ -92,6 +92,8 @@ class X5000HWLibs
     mach_vm_address_t                                            orgTtlQuery{0};   // 第八步观测：TTL 的跨 kext 查询函数（HWLibs vm 0x90ddc）
     mach_vm_address_t                                            orgPred90{0};   // B81 观测点 A：Apple 就绪门谓词 0x6839e（读 C2PMSG_90）
     mach_vm_address_t                                            org93F64{0};    // B88 观测 R2'：Apple 0x93f64（查位过滤器，bm=(obj+0x7B8)>>id & 1）
+    mach_vm_address_t                                            orgIpiInit{0};      // P7c 包D：判据③ 0x9405e（IpiInitializeIpInterfaces）
+    mach_vm_address_t                                            orgIpEntrySeq{0};   // P7c 包D：判据④ 0x929ac（TlsExecuteIpEntrySeq）
     // 第八步观测（2026-09-28 第十九轮）：TTL 初始化 `0x8b10e` 的失败出口定位（只读）
     mach_vm_address_t                                            orgTtlCollect{0};   // 0x8b5de 收集器
     mach_vm_address_t                                            orgTtlAllocA{0};    // 0x93880
@@ -148,6 +150,8 @@ private:
     static void*      wrapTtlQuery(void* buf, UInt32 id, UInt32 flags, UInt64* out);   // 第八步观测（TTL 查询）
     static UInt8 wrapPred90(void* ctx);   // B81 观测点 A：Apple 就绪门谓词 0x6839e（读 C2PMSG_90→setne）
     static UInt8 wrap93F64(void* obj, UInt32 id);   // B88 观测 R2'：Apple 0x93f64（查位过滤器，原样透传返回值）
+    static UInt32 wrapIpiInit(void* a, UInt32 b, void* c);        // P7c 包D：判据③ 0x9405e（只记返回值）
+    static UInt32 wrapIpEntrySeq(void* a, UInt32 b, UInt32 c);    // P7c 包D：判据④ 0x929ac（只记返回值）
     // 第八步观测（2026-09-28 第十九轮）：`0x8b10e` 的 4 个候选失败出口判据函数（只读）
     static void* wrapTtlCollect(void* ctx);
     static void* wrapTtlAllocA(void* ctx);
