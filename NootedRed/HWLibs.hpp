@@ -94,9 +94,6 @@ class X5000HWLibs
     mach_vm_address_t                                            org93F64{0};    // B88 观测 R2'：Apple 0x93f64（查位过滤器，bm=(obj+0x7B8)>>id & 1）
     mach_vm_address_t                                            orgIpiInit{0};      // P7c 包D：判据③ 0x9405e（IpiInitializeIpInterfaces）
     mach_vm_address_t                                            orgIpEntrySeq{0};   // P7c 包D：判据④ 0x929ac（TlsExecuteIpEntrySeq）
-    mach_vm_address_t                                            orgDevTableKey3{0};  // P7g 包G：0xa2691 三键查表
-    mach_vm_address_t                                            orgDevTableWrite{0}; // P7g 包G：0xa25de 写 dev+0xE8
-    mach_vm_address_t                                            orgDevKey1Wrap{0};  // P7i 包I：0xa1c9f 第一次查表封装
     // 第八步观测（2026-09-28 第十九轮）：TTL 初始化 `0x8b10e` 的失败出口定位（只读）
     mach_vm_address_t                                            orgTtlCollect{0};   // 0x8b5de 收集器
     mach_vm_address_t                                            orgTtlAllocA{0};    // 0x93880
@@ -155,9 +152,6 @@ private:
     static UInt8 wrap93F64(void* obj, UInt32 id);   // B88 观测 R2'：Apple 0x93f64（查位过滤器，原样透传返回值）
     static UInt32 wrapIpiInit(void* a, UInt32 b, void* c);        // P7c 包D：判据③ 0x9405e（只记返回值）
     static UInt32 wrapIpEntrySeq(void* a, UInt32 b, UInt32 c);    // P7c 包D：判据④ 0x929ac（只记返回值）
-    static UInt64 wrapDevTableKey3(UInt64 k1, UInt64 k2, UInt64 k3);  // P7g 包G：0xa2691（记三键+命中；参数按真实 cmpq 语义为 64 位）
-    static UInt64 wrapDevTableWrite(void* dev, void* a2, void* a3, void* a4); // P7g 包G：0xa25de（记 dE8）
-    static UInt64 wrapDevKey1Wrap(void* keySrc);                     // P7i 包I/P7j 包J：0xa1c9f（记键1/命中/表基址/命中行字段；UInt64 透传含命中下标）
     // 第八步观测（2026-09-28 第十九轮）：`0x8b10e` 的 4 个候选失败出口判据函数（只读）
     static void* wrapTtlCollect(void* ctx);
     static void* wrapTtlAllocA(void* ctx);
