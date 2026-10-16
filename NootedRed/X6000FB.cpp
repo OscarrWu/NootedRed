@@ -1097,13 +1097,15 @@ IOReturn X6000FB::getTriageHardwareDataRN(void*, const UInt32 fbIndex, void* con
 // ─── D3 门控与调用计数（第八步第 3 批次）────────────────────────────────────
 //  为什么加计数：D3 此前**恒开**（无任何门控），导致做不了"应该失败"的判别性对照
 //  （违反 roadmap §4.7）。计数与门控解决两件事：
-//    · `-NRedD3Off` 关闭 dummy 返回 → 可做"关掉 D3 后第一个错误是什么"的对照；
+//    · 【2026-10-16 更新：D3 已退役】默认一律透传；对照开关改为显式 `-NRedD3On`
+//      （语义与旧的 `-NRedD3Off` 相反：带它＝打开假成功，不带＝透传）。
 //    · 三个计数**不论门控都计** → 直接回答"IRI 是否真的走 `AmdRadeonController::messageAccelerator`"
 //      （若 `iri` 恒为 0，则 D3 从未拦到 IRI，此前"D3 越过了 IRI"的归因不成立）。
 //  计数为标量（常量初始化），符合内核态约束（kern 不支持函数内静态对象的 guard variable）。
 static UInt32 gMaCalls = 0;   // messageAccelerator 被调用次数
 static UInt32 gMaIri   = 0;   // 命中 `isPhoenix && reqType == 3`（IRI）的次数
-static UInt32 gMaDummy = 0;   // 实际返回 dummy success 的次数（关掉 D3 后应为 0）
+static UInt32 gMaDummy = 0;   // legacy 短路（`-NRedD3On`）被显式启用的次数；默认态恒为 0
+static bool sD3RetiredLogged = false;   // D3 退役自证（一次性）；常量初始化，无 guard variable
 
 // ─── 观测可信度对照（第 5 批次补充）──────────────────────────────────────────
 //  第 5 批次真机探针出现异常读数（HWServices 的 vtable 槽连 [8]/[10] 都是 0）。为区分
@@ -1112,18 +1114,28 @@ static UInt32 gMaDummy = 0;   // 实际返回 dummy success 的次数（关掉 D
 //  常量初始化，无 guard variable（符合内核态约束）。
 static UInt64 gReadCheckMagic = 0xA5A5A5A512345678ULL;
 
-// D3: route messageAccelerator, dummy IRI send (reqType=3) on Phoenix so powerUp
-// continues into its success path (TTL RTS / m_ppInitialized / FB_Boot_PPInitialized)
+// 【D3 已退役 2026-10-16】不再伪造成功：默认一律透传 Apple 原实现并如实返回其结果。
+//  原形态＝命中 IRI（Phoenix && reqType==3）即 `return kIOReturnSuccess`（掩盖"加速器注册未完成"）；
+//  退役后落回 `:1129` 的 orgMessageAccelerator，返回什么就是什么（预期 0xe00002c7＝真实失败）。
+//  保留一个**显式、默认不生效**的对照开关 `-NRedD3On`（语义与旧的 `-NRedD3Off` 相反），
+//  仅在需要"打开假成功"的单变量对照时才显式启用 ⇒ 默认态不掩盖问题（ROADMAP §2.3 规矩 5）。
+//  挂载点 `:628-637` 不动；真注册钩（-NRedRegisterAccel/-NRedRegisterHwSvc）本轮不动。
 IOReturn X6000FB::wrapMessageAccelerator(void* const self, const UInt32 reqType, void* arg2, void* arg3, void* arg4)
 {
     gMaCalls++;
     if (NRed::singleton().getAttributes().isPhoenix() && reqType == 3) {
         gMaIri++;
-        // 门控（默认"开"＝维持既有行为）：`-NRedD3Off` 时透传原始实现
-        if (!checkKernelArgument("-NRedD3Off")) {
+        // 对照开关（默认不出现 ⇒ 默认透传）：显式 `-NRedD3On` 才走旧"假成功"分支。
+        if (checkKernelArgument("-NRedD3On")) {
             gMaDummy++;
-            SYSLOG("X6000FB", "D3: messageAccelerator IRI (cmd=3) -> dummy success on Phoenix");
+            SYSLOG("X6000FB", "D3(legacy): messageAccelerator IRI (cmd=3) -> dummy success on Phoenix");
             return kIOReturnSuccess;
+        }
+        // 【D3 退役自证】执行确认通道（一次性、无门控）：本行出现 ⇒ 新构建在跑且 IRI 已改走透传；
+        //  缺席 ⇒ 构建未替换或本函数未被调用（用于区分"未生效"与"生效但不足"）。
+        if (!sD3RetiredLogged) {
+            sD3RetiredLogged = true;
+            SYSLOG("X6000FB", "D3 retired: IRI (cmd=3) pass-through to orgMessageAccelerator");
         }
     }
     return FunctionCast(wrapMessageAccelerator,
