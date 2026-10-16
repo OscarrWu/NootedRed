@@ -152,6 +152,8 @@ X5000::X5000()
 
 // 第八步观测：保存 X5000 kext 的 slide，供探针在运行时定位其内部符号（如 probe 用的属性名 OSSymbol）
 UInt64 gAccelProbeProv    = 0;    // 最后一次 provider 指针
+// P7d 包D″：真 `m_hTtl` 的承接全局（定义在 HWLibs.cpp；此处写入，供 [ttlchain] 戳记读取）。
+extern UInt64 gMHttl;
 
 // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）───────────────────────────────
 //  目的：判定 `X5000::configureDevice` 究竟从**哪个失败出口**返回（该方法有 6 条以上失败出口，
@@ -1386,6 +1388,9 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
     {
         UInt64 mHttl = 0, hws = 0, hws38 = 0;
         if (isKernelPtr(f338)) { mHttl = load64(f338, 0x38); }
+        // P7d 包D″：把真 m_hTtl（门面 +0x38）存到文件级全局，供 HWLibs.cpp 的 [ttlchain] 戳记读取
+        //  （原先用 gLastT30Type5，与 m_hTtl 无关）。仅写标量，不新增打印/落盘量。
+        gMHttl = mHttl;
         const UInt64 s50 = isKernelPtr(s) ? load64(s, 0x50) : 0;
         if (isKernelPtr(s50)) { hws = load64(s50, 0xD8); }
         const int same = (isKernelPtr(f338) && f338 == hws) ? 1 : 0;

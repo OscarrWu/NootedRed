@@ -80,6 +80,9 @@ extern UInt32 gBringupTmrLoad;
 static SInt32  gP3 = -1;   // 判据③ `0x9405e`（IpiInitializeIpInterfaces）的返回值
 static SInt32  gP4 = -1;   // 判据④ `0x929ac`（TlsExecuteIpEntrySeq）的返回值
 static UInt64  gP5 = 0xFFFFFFFFFFFFFFFFULL;   // 0x9440f：(type<<32) | ret（既有 wrapMode9440f 内写）
+// P7d 包D″：真 `m_hTtl`＝加速器侧门面对象 `+0x38`（由 X5000.cpp 的既有 `ttlC:` 块顺带存此；
+//  与 `ttlC: mHttl=` 同一个值）。哨兵 0xFFFFFFFFFFFFFFFF＝尚未采到。取代原先误用的 gLastT30Type5。
+UInt64 gMHttl = 0xFFFFFFFFFFFFFFFFULL;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -207,13 +210,15 @@ int nredTraceFlush(int secTag)
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束，上一轮 `ttl-allocB`
     //  等判别行正是落在被截的尾部而丢失（只在 SYSLOG 侧留下）⇒ 判别读数必须落头部区才每片必现。
     //  哨兵控制：三值全为初值（三个判据均未进入）⇒ **不追加本行** ⇒ 未命中形态输出逐字不变。
-    //  ⚠️ 只读：只读三个标量（由相应 wrapper 写入）＋ gLastT30Type5，不新增解引用/SYSLOG。
+    //  ⚠️ 只读：只读四个标量（由相应 wrapper / 既有 ttlC 块写入），不新增解引用/SYSLOG。
+    //  P7d 包D″：`mHttl` 改为**真值** gMHttl（＝既有 `ttlC: mHttl=` 采到的门面 +0x38）；
+    //  此前误用 gLastT30Type5（那是 `0x9440f` 的 t30，与 m_hTtl 无关）。
     if ((gP3 != -1 || gP4 != -1 || gP5 != 0xFFFFFFFFFFFFFFFFULL) && off < sizeof(body)) {
         const size_t cap = sizeof(body) - off;
         const int n3 = snprintf(body + off, cap, "[ttlchain] p3=%d p4=%d p5=%llx mHttl=%llx\n",
                                 static_cast<int>(gP3), static_cast<int>(gP4),
                                 static_cast<unsigned long long>(gP5),
-                                static_cast<unsigned long long>(gLastT30Type5));
+                                static_cast<unsigned long long>(gMHttl));
         if (n3 > 0) { off += (static_cast<size_t>(n3) < cap) ? static_cast<size_t>(n3) : cap; }
     }
     const uint32_t n = gTraceRing.count;
@@ -1145,7 +1150,9 @@ UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
 {
     const UInt32 ret = (singleton().orgIpiInit != 0)
                            ? FunctionCast(wrapIpiInit, singleton().orgIpiInit)(a, b, c) : 0;
-    gP3 = static_cast<SInt32>(ret);
+    // 判据③的真实语义＝**布尔低位**：调用者 `0x928f4` 在 `9294b: testb %al,%al`（反汇编确凿，
+    //  非 testq %rax,%rax）⇒ 只看 al（低 8 位），高位是残留垃圾 ⇒ 记 `ret & 0xFF`。
+    gP3 = static_cast<SInt32>(ret & 0xFF);
     return ret;
 }
 
@@ -1155,7 +1162,8 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
 {
     const UInt32 ret = (singleton().orgIpEntrySeq != 0)
                            ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
-    gP4 = static_cast<SInt32>(ret);
+    // 判据④同理＝**布尔低位**：`0x928f4` 在 `9295b: testb %al,%al`（反汇编确凿）⇒ 记 `ret & 0xFF`。
+    gP4 = static_cast<SInt32>(ret & 0xFF);
     return ret;
 }
 
