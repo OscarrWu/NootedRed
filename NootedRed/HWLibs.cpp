@@ -221,9 +221,12 @@ int nredTraceFlush(int secTag)
                                         static_cast<unsigned long long>(NvMsgBuf::bootUptimeTicks()), fseq));
     off += static_cast<size_t>(snprintf(body + off, sizeof(body) - off, "[flush-stamp] sec=%d\n", secTag));
     // P2 包A：执行确认通道（头部区——"先写、永不被 4096 上限截到"，故每片必现）。
-    //  哨兵控制：`gBringupEnterCount==0`（接口一关闭态／hook 未进入）⇒ **不追加本行** ⇒
-    //  关态每片正文逐字不变（与 B55/B93 的"关态零差异"纪律一致）。不受任何观测门控。
-    if (gBringupEnterCount != 0 && off < sizeof(body)) {
+    //  P7j 修回（R8 起 [bringup] 消失的根因＝C2 挂点 0x6720b 未被调用 ⇒ hook 未执行 ⇒
+    //  gBringupEnterCount 恒 0；源码自包A 未变）：输出条件放宽为"接口一开关打开"
+    //  （`-NRedFwBringup` 在位即必现）——enter=0 表示 hook 未执行（接口一未到执行点），
+    //  enter=N 表示执行了 N 次。**未命中形态（接口一关闭）仍不输出** ⇒ 关态逐字不变。
+    //  不受任何观测门控；checkKernelArgument 在刷盘安全时点调用（非深栈）。
+    if ((gBringupEnterCount != 0 || checkKernelArgument("-NRedFwBringup")) && off < sizeof(body)) {
         const size_t cap = sizeof(body) - off;
         const int n2 = snprintf(body + off, cap,
                                 "[bringup] enter=%u step=%u last_error=%d loadToc=%X tmrLoad=%X\n",
