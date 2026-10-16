@@ -111,6 +111,16 @@ static UInt64  gFTbl  = 0;              // 静态表基址（运行时）
 static UInt64  gSTbl  = 0;              // 静态表基址（第二次查表视角，与 gFTbl 同值）
 static SInt64  gSIdx  = -1;             // 第二次查表命中记录下标（(ret−表基址)/0x50；-1＝未取到）
 static UInt32  gFK2   = 0;              // 第一次查表键2（=*(keySrc+0x64)）
+// P7j 包J：C 组读数（L11 §5.3 C-1~C-4 增强）。
+//  gFIdx/gF10/gF18/gF20＝第一次查表**命中行**的下标与 +0x10/+0x18/+0x20 原值；
+//  gSMis/gSRow＝第二次查表**逐行比较**最先不等字段（1=+0x10 无匹配、2=+0x18 失败、3=+0x20 失败）
+//  与该行下标（-1＝未取到）。哨兵：gFIdx/gSRow＝-1、gF10/18/20/gSMis＝0。
+static SInt64  gFIdx = -1;              // 第一次查表命中行下标
+static UInt64  gF10  = 0;               // 命中行 +0x10 原值
+static UInt64  gF18  = 0;               // 命中行 +0x18 原值
+static UInt64  gF20  = 0;               // 命中行 +0x20 原值
+static UInt32  gSMis = 0;               // 第二次查表最先不等字段（0=全部匹配/未取到）
+static SInt64  gSRow = -1;              // 第二次查表最先不等行下标
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -302,6 +312,24 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gSTbl),
                                 static_cast<long long>(gSIdx));
         if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
+    }
+    // P7j 包J：`[ttlhit2]` 头部戳记（L11 §5.3 C-2/C-3 增强读数，与 [ttlhit] 并列）。
+    //  f_idx＝第一次查表**命中行**下标（0-based，与表步长 0x50 对齐）；f10/f18/f20＝该行
+    //  +0x10/+0x18/+0x20 原值；s_mis＝第二次查表逐行比较最先不等字段（1=+0x10 无匹配、
+    //  2=+0x18 失败、3=+0x20 失败、0=全部匹配/未取到）；s_row＝该行下标（-1＝未取到）。
+    //  哨兵控制：第一次未命中（gFIdx==-1）且第二次遍历未取到（gSMis==0）⇒ 不追加 ⇒
+    //  未命中形态输出逐字不变。单行 ≤191。
+    if ((gFIdx != -1 || gSMis != 0) && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n9 = snprintf(body + off, cap,
+                                "[ttlhit2] f_idx=%lld f10=%llx f18=%llx f20=%llx s_mis=%u s_row=%lld\n",
+                                static_cast<long long>(gFIdx),
+                                static_cast<unsigned long long>(gF10),
+                                static_cast<unsigned long long>(gF18),
+                                static_cast<unsigned long long>(gF20),
+                                static_cast<unsigned>(gSMis),
+                                static_cast<long long>(gSRow));
+        if (n9 > 0) { off += (static_cast<size_t>(n9) < cap) ? static_cast<size_t>(n9) : cap; }
     }
     for (uint32_t i = 0; i < n; ++i) {
         const char* line = nullptr;
@@ -1309,6 +1337,33 @@ UInt64 X5000HWLibs::wrapDevTableKey3(const UInt64 k1, const UInt64 k2, const UIn
     } else {
         gSIdx = -1;
     }
+    // P7j 包J（C-3 增强）：第二次查表**逐行比较**找最先不等字段与行（只读遍历，复刻 0xa2691
+    //  判据：+0x10 必须等 k1；+0x18/+0x20 等 k2/k3 或通配 0xDEADCAFE；终止＝行 +0x00==0
+    //  （第 0 行无条件先比——a26b0 直接比较；行号 0-based 与 gSIdx 一致）。只记标量不入环。
+    gSMis = 0; gSRow = -1;
+    if (gSTbl != 0 && gSTbl >= 0xffffff7f80000000ULL) {
+        const UInt8* const base = reinterpret_cast<const UInt8*>(gSTbl);
+        if (nredKernelPtrOk(base) && *reinterpret_cast<const UInt64*>(base) != 0) {
+            for (UInt64 i = 0; i < 269ULL; ++i) {
+                const UInt8* const row = base + i * 0x50ULL;
+                if (i != 0 && *reinterpret_cast<const UInt64*>(row) == 0) { break; }
+                const UInt64 f10 = *reinterpret_cast<const UInt64*>(row + 0x10);
+                const UInt64 f18 = *reinterpret_cast<const UInt64*>(row + 0x18);
+                const UInt64 f20 = *reinterpret_cast<const UInt64*>(row + 0x20);
+                if (f10 != k1) { continue; }
+                if (f18 != k2 && f18 != 0xDEADCAFEULL) {
+                    gSMis = 2; gSRow = static_cast<SInt64>(i); break;
+                }
+                if (f20 != k3 && f20 != 0xDEADCAFEULL) {
+                    gSMis = 3; gSRow = static_cast<SInt64>(i); break;
+                }
+                gSMis = 0; gSRow = static_cast<SInt64>(i);
+                break;
+            }
+            if (gSRow == -1) { gSMis = 1; }   // 无键1 匹配行 → 最先不等字段＝+0x10
+        }
+    }
+
     return ret;
 }
 
@@ -1329,16 +1384,32 @@ UInt64 X5000HWLibs::wrapDevTableWrite(void* const dev, void* const a2, void* con
 //  testb %al 判断）。wrapper：调用前读键1/键2（u32 原值，nredKernelPtrOk 守卫）；调用后
 //  记命中 al 与静态表基址（运行时＝kcSlide+0x478180）。逐字透传 al。
 //  ⚠️ 只读：只写标量，不入环、不打印；无 RIP 相对依赖（规避 0xa1cb8 的 R8 扰动风险）。
-UInt8 X5000HWLibs::wrapDevKey1Wrap(void* const keySrc)
+UInt64 X5000HWLibs::wrapDevKey1Wrap(void* const keySrc)
 {
     if (nredKernelPtrOk(keySrc)) {
         gTKey1a = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(keySrc));
         gFK2    = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(keySrc) + 0x64);
     }
-    const UInt8 ret = (singleton().orgDevKey1Wrap != 0)
-                          ? FunctionCast(wrapDevKey1Wrap, singleton().orgDevKey1Wrap)(keySrc) : 0;
+    // P7j 包J（C-2 增强）：返回类型 UInt8→UInt64（0xa1c9f 尾调 0xa1cb8，命中时 rax=
+    //  0x00000000_下标<<8|1——movl %edi,%eax 清零高 32 位；调用者 0x8afc1 只 testb %al ⇒
+    //  透传一致、无扰动）。命中下标＝ret>>8（0xa1cb8 的循环计数），命中行＝表基址+下标*0x50，
+    //  读 +0x10/+0x18/+0x20 原值（nredKernelPtrOk 守卫）。
+    const UInt64 ret = (singleton().orgDevKey1Wrap != 0)
+                           ? FunctionCast(wrapDevKey1Wrap, singleton().orgDevKey1Wrap)(keySrc) : 0;
     gFAl = static_cast<UInt32>(ret & 0xFF);
     gFTbl = (singleton().kcSlide != 0) ? (singleton().kcSlide + 0x478180ULL) : 0;
+    if (gFTbl != 0 && ret != 0) {
+        const UInt64 idx = (ret >> 8) & 0xFFFFFFULL;
+        if (idx < 269ULL && (gFTbl + idx * 0x50ULL) >= 0xffffff7f80000000ULL) {
+            const UInt8* const row = reinterpret_cast<const UInt8*>(gFTbl + idx * 0x50ULL);
+            if (nredKernelPtrOk(row)) {
+                gFIdx = static_cast<SInt64>(idx);
+                gF10  = *reinterpret_cast<const UInt64*>(row + 0x10);
+                gF18  = *reinterpret_cast<const UInt64*>(row + 0x18);
+                gF20  = *reinterpret_cast<const UInt64*>(row + 0x20);
+            }
+        }
+    }
     return ret;
 }
 
