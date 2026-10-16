@@ -121,6 +121,7 @@ static UInt64  gF18  = 0;               // 命中行 +0x18 原值
 static UInt64  gF20  = 0;               // 命中行 +0x20 原值
 static UInt32  gSMis = 0;               // 第二次查表最先不等字段（0=全部匹配/未取到）
 static SInt64  gSRow = -1;              // 第二次查表最先不等行下标
+static UInt32  gTtlRet = 0xFFFFFFFFU;   // 0x8af60 最终返回码（C-4；0xFFFFFFFF＝未取到）
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -313,22 +314,24 @@ int nredTraceFlush(int secTag)
                                 static_cast<long long>(gSIdx));
         if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
     }
-    // P7j 包J：`[ttlhit2]` 头部戳记（L11 §5.3 C-2/C-3 增强读数，与 [ttlhit] 并列）。
+    // P7j 包J：`[ttlhit2]` 头部戳记（L11 §5.3 C-2/C-3/C-4 读数，与 [ttlhit] 并列）。
     //  f_idx＝第一次查表**命中行**下标（0-based，与表步长 0x50 对齐）；f10/f18/f20＝该行
     //  +0x10/+0x18/+0x20 原值；s_mis＝第二次查表逐行比较最先不等字段（1=+0x10 无匹配、
-    //  2=+0x18 失败、3=+0x20 失败、0=全部匹配/未取到）；s_row＝该行下标（-1＝未取到）。
-    //  哨兵控制：第一次未命中（gFIdx==-1）且第二次遍历未取到（gSMis==0）⇒ 不追加 ⇒
-    //  未命中形态输出逐字不变。单行 ≤191。
-    if ((gFIdx != -1 || gSMis != 0) && off < sizeof(body)) {
+    //  2=+0x18 失败、3=+0x20 失败、0=全部匹配/未取到）；s_row＝该行下标（-1＝未取到）；
+    //  r＝0x8af60 最终返回码（C-4，1/2/4/0；0xFFFFFFFF＝未取到）。
+    //  哨兵控制：第一次未命中（gFIdx==-1）且第二次遍历未取到（gSMis==0）且 0x8af60
+    //  未返回（gTtlRet==0xFFFFFFFF）⇒ 不追加 ⇒ 未命中形态输出逐字不变。单行 ≤191。
+    if ((gFIdx != -1 || gSMis != 0 || gTtlRet != 0xFFFFFFFFU) && off < sizeof(body)) {
         const size_t cap = sizeof(body) - off;
         const int n9 = snprintf(body + off, cap,
-                                "[ttlhit2] f_idx=%lld f10=%llx f18=%llx f20=%llx s_mis=%u s_row=%lld\n",
+                                "[ttlhit2] f_idx=%lld f10=%llx f18=%llx f20=%llx s_mis=%u s_row=%lld r=%u\n",
                                 static_cast<long long>(gFIdx),
                                 static_cast<unsigned long long>(gF10),
                                 static_cast<unsigned long long>(gF18),
                                 static_cast<unsigned long long>(gF20),
                                 static_cast<unsigned>(gSMis),
-                                static_cast<long long>(gSRow));
+                                static_cast<long long>(gSRow),
+                                static_cast<unsigned>(gTtlRet));
         if (n9 > 0) { off += (static_cast<size_t>(n9) < cap) ? static_cast<size_t>(n9) : cap; }
     }
     for (uint32_t i = 0; i < n; ++i) {
@@ -1660,6 +1663,8 @@ UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
         if (nIn > 0) { nredTraceLine(lineIn, nIn); }
     }
     const UInt32 ret = FunctionCast(wrapTtlInit, singleton().orgTtlInit)(a1, a2);
+    // P7j 包J（C-4）：0x8af60 最终返回码（1/2/4/0）记入 gTtlRet，供 [ttlhit2] 戳记与 status 对账。
+    gTtlRet = ret;
     {
         // out 行：`v = *(u64*)a2`（a2 非合法内核地址 ⇒ 0xFF 哨兵，不解引用）
         static char lineOut[96];
