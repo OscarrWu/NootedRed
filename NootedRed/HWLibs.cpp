@@ -92,6 +92,15 @@ static UInt32  gIpSeqN = 0;     // `0x929ac` 调用总计数
 static UInt64  gSeq1RA = 0;     static UInt32 gSeq1Sub = 0xFFFFFFFFU; static UInt32 gSeq1Al = 0xFFFFFFFFU;
 static UInt64  gSeq2RA = 0;     static UInt32 gSeq2Sub = 0xFFFFFFFFU; static UInt32 gSeq2Al = 0xFFFFFFFFU;
 static UInt64  gSeq3RA = 0;     static UInt32 gSeq3Sub = 0xFFFFFFFFU; static UInt32 gSeq3Al = 0xFFFFFFFFU;
+// P7g 包G：设备描述符三键查表的读数（供 [ttlkey] 头部戳记读取）。
+//  哨兵：gTKey1/2/3/gTKey1a＝0xFFFFFFFF（查表函数未被调用）；gTHit＝-1；gTDE8＝0xFFFF…。
+//  ⚠️ 限流硬约束：三个查表函数均低频（每引导 1 次量级）⇒ 只写标量（不入环、不打印）。
+static UInt32  gTKey1 = 0xFFFFFFFFU;   // 第二次查表键1
+static UInt32  gTKey2 = 0xFFFFFFFFU;   // 第二次查表键2
+static UInt32  gTKey3 = 0xFFFFFFFFU;
+static SInt32  gTHit  = -1;            // 第二次查表命中（0xa2691 返回非空⇒1，空⇒0）
+static UInt64  gTDE8  = 0xFFFFFFFFFFFFFFFFULL;  // dev+0xE8（写后的值）
+static UInt32  gTKey1a = 0xFFFFFFFFU;  // 第一次查表键1（运行期未观测过）
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -248,6 +257,21 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gSeq3RA), static_cast<unsigned>(gSeq3Sub),
                                 static_cast<unsigned>(gSeq3Al));
         if (n6 > 0) { off += (static_cast<size_t>(n6) < cap) ? static_cast<size_t>(n6) : cap; }
+    }
+    // P7g 包G：`[ttlkey]` 头部戳记（设备描述符三键查表读数，与 [bringup]／[ttlchain]／[ttlchain4] 并列）。
+    //  k1/k2/k3＝第二次查表的三个键；hit＝查表命中（0xa2691 返回非空）；dE8＝dev+0xE8 写后值；
+    //  k1a＝第一次查表的键1（运行期未观测过）。
+    //  哨兵控制：三个查表函数均未被调用（gTKey1/gTKey1a 均为 0xFFFFFFFF）⇒ **不追加本行**
+    //  ⇒ 未命中形态输出逐字不变。只读标量，无新增解引用/SYSLOG。单行 ≤191。
+    if ((gTKey1 != 0xFFFFFFFFU || gTKey1a != 0xFFFFFFFFU) && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n7 = snprintf(body + off, cap,
+                                "[ttlkey] k1=%08x k2=%08x k3=%08x hit=%d dE8=%llx k1a=%08x\n",
+                                static_cast<unsigned>(gTKey1), static_cast<unsigned>(gTKey2),
+                                static_cast<unsigned>(gTKey3), static_cast<int>(gTHit),
+                                static_cast<unsigned long long>(gTDE8),
+                                static_cast<unsigned>(gTKey1a));
+        if (n7 > 0) { off += (static_cast<size_t>(n7) < cap) ? static_cast<size_t>(n7) : cap; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -532,6 +556,27 @@ static const UInt8 kIpEntrySeqPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0
                                            0x53, 0x48, 0x83, 0xEC, 0x28, 0x49, 0x89, 0xD6, 0x41, 0x89, 0xF7, 0x49};
 // P7f 包E″：不再新增 wrapAllocB 钩子（0x928f4 已被既有 wrapTtlAllocB 占位），
 //  kAllocBPattern 故删除。
+// P7g 包G：设备描述符三键查表（设备描述符数据来源 §二 表2/表3）。
+//  `0xa2691`（三键查表，rdi/rsi/rdx＝键1/键2/键3，返回记录指针或 0）
+//  `0xa25de`（写 dev+0xE8，rdi＝dev）
+//  `0xa1cb8`（第一次二键查表，rdi/rsi＝键1/键2）
+//  锚点唯一性（脚本 tmp/prog/pattern-check-p7g.py）：0xa2691 23B/0xa25de 26B/0xa1cb8 23B
+//  各命中 1 次且为函数头（lea rel32 处 mask 通配 4 字节）。
+static const UInt8 kDevTableKey3Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x4C, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00,
+                                              0x49, 0x83, 0x38, 0x00, 0x74, 0x50, 0x41, 0xBB, 0x01, 0x00, 0x00,
+                                              0x00};
+static const UInt8 kDevTableKey3PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+                                                 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                                 0xFF};
+static const UInt8 kDevTableWritePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41,
+                                              0x54, 0x53, 0x50, 0x49, 0x89, 0xCE, 0x49, 0x89, 0xD4, 0x49, 0x89,
+                                              0xF5, 0x49, 0x89, 0xFF};
+static const UInt8 kDevTableKey1Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00, 0x00,
+                                              0x48, 0x83, 0x39, 0x00, 0x74, 0x45, 0x89, 0xFA, 0x41, 0x89, 0xF1,
+                                              0xBF};
+static const UInt8 kDevTableKey1PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+                                                 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                                 0xFF};
 static const UInt8 kCreateFirmwarePatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                                    0xFF, 0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0,
                                                    0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -1214,6 +1259,42 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
 
 // P7f 包E″：不再新增 wrapAllocB 钩子（0x928f4 已被既有 wrapTtlAllocB 占位，
 //  第二个 wrapper 不生效）。gABRet 由既有 wrapTtlAllocB 在返回处写入。
+
+// P7g 包G：`0xa2691`（三键查表）只读钩子——记三键与命中（返回非空⇒hit=1）。
+//  判据：若未命中（hit=0）⇒ dev+0xE8 写 0 ⇒ 全链失败（设备描述符数据来源 §一-7）。
+//  ⚠️ 只读：只写 4 个标量，不入环、不打印；逐字透传返回值。
+UInt64 X5000HWLibs::wrapDevTableKey3(const UInt32 k1, const UInt32 k2, const UInt32 k3)
+{
+    const UInt64 ret = (singleton().orgDevTableKey3 != 0)
+                           ? FunctionCast(wrapDevTableKey3, singleton().orgDevTableKey3)(k1, k2, k3) : 0;
+    gTKey1 = k1;
+    gTKey2 = k2;
+    gTKey3 = k3;
+    gTHit = (ret != 0) ? 1 : 0;
+    return ret;
+}
+
+// P7g 包G：`0xa25de`（写 dev+0xE8）只读钩子——调用后读 dev+0xE8 记 gTDE8。
+//  ⚠️ 只读：写后读（1 跳，先 nredKernelPtrOk(dev)）；逐字透传返回值；不入环、不打印。
+UInt64 X5000HWLibs::wrapDevTableWrite(void* const dev, void* const a2, void* const a3, void* const a4)
+{
+    const UInt64 ret = (singleton().orgDevTableWrite != 0)
+                           ? FunctionCast(wrapDevTableWrite, singleton().orgDevTableWrite)(dev, a2, a3, a4) : 0;
+    if (nredKernelPtrOk(dev)) {
+        gTDE8 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(dev) + 0xE8);
+    }
+    return ret;
+}
+
+// P7g 包G：`0xa1cb8`（第一次二键查表）只读钩子——记键1（运行期未观测过）。
+//  ⚠️ 只读：只写 1 个标量；逐字透传返回值；不入环、不打印。
+UInt64 X5000HWLibs::wrapDevTableKey1(const UInt32 k1, const UInt32 k2)
+{
+    const UInt64 ret = (singleton().orgDevTableKey1 != 0)
+                           ? FunctionCast(wrapDevTableKey1, singleton().orgDevTableKey1)(k1, k2) : 0;
+    gTKey1a = k1;
+    return ret;
+}
 
 bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 {
@@ -2305,6 +2386,19 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("ip-entry-seq", kIpEntrySeqPattern, nullptr, arrsize(kIpEntrySeqPattern),
                                            0x929AC)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapIpEntrySeq, this->orgIpEntrySeq}, "ip-entry-seq");
+        }
+        // P7g 包G：设备描述符三键查表链（0xa2691／0xa25de／0xa1cb8；函数入口型；route 失败只打一行不 panic）。
+        if (const auto from = resolveProbe("dev-key3", kDevTableKey3Pattern, kDevTableKey3PatternMask,
+                                           arrsize(kDevTableKey3Pattern), 0xA2691)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevTableKey3, this->orgDevTableKey3}, "dev-key3");
+        }
+        if (const auto from = resolveProbe("dev-write", kDevTableWritePattern, nullptr, arrsize(kDevTableWritePattern),
+                                           0xA25DE)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevTableWrite, this->orgDevTableWrite}, "dev-write");
+        }
+        if (const auto from = resolveProbe("dev-key1", kDevTableKey1Pattern, kDevTableKey1PatternMask,
+                                           arrsize(kDevTableKey1Pattern), 0xA1CB8)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevTableKey1, this->orgDevTableKey1}, "dev-key1");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
