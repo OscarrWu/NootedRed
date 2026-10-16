@@ -101,6 +101,16 @@ static UInt32  gTKey3 = 0xFFFFFFFFU;
 static SInt32  gTHit  = -1;            // 第二次查表命中（0xa2691 返回非空⇒1，空⇒0）
 static UInt64  gTDE8  = 0xFFFFFFFFFFFFFFFFULL;  // dev+0xE8（写后的值）
 static UInt32  gTKey1a = 0xFFFFFFFFU;  // 第一次查表键1（运行期未观测过）
+// P7i 包I：两处查表鉴别读数（供 [ttlhit] 头部戳记读取）。
+//  gTKey1a＝第一次查表键1（由 0xa1c9f 钩子写入，恢复真实来源——包H 曾因删 0xa1cb8 钩子
+//  而失去写入者，恒哨兵）；gFAl＝第一次查表命中（返回值 al）；gFTbl/gSTbl＝两次查表共用的
+//  静态表基址（运行时＝kcSlide+0x478180）；gSIdx＝第二次查表命中记录下标（-1＝未取到）。
+//  哨兵：gFAl/gSTbl/gSIdx 初值 0/0/-1（查表未发生）。
+static UInt32  gFAl   = 0;              // 第一次查表命中（返回值 al）
+static UInt64  gFTbl  = 0;              // 静态表基址（运行时）
+static UInt64  gSTbl  = 0;              // 静态表基址（第二次查表视角，与 gFTbl 同值）
+static SInt64  gSIdx  = -1;             // 第二次查表命中记录下标（(ret−表基址)/0x50；-1＝未取到）
+static UInt32  gFK2   = 0;              // 第一次查表键2（=*(keySrc+0x64)）
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -274,6 +284,22 @@ int nredTraceFlush(int secTag)
         if (n7 > 0) { off += (static_cast<size_t>(n7) < cap) ? static_cast<size_t>(n7) : cap; }
     }
     const uint32_t n = gTraceRing.count;
+    // P7i 包I：`[ttlhit]` 头部戳记（两处查表鉴别，与 [bringup]／[ttlchain]／[ttlchain4]／[ttlkey] 并列）。
+    //  f_k＝第一次查表键1（u32 真实值）；f_al＝第一次查表命中（返回值 al）；f_tbl/s_tbl＝静态表
+    //  基址（运行时＝kcSlide+0x478180）；s_idx＝第二次查表命中记录下标（-1＝未取到）。
+    //  哨兵控制：第一次查表未发生（gTKey1a==0xFFFFFFFF）且第二次未发生（gSIdx==-1 且 gFTbl==0）
+    //  ⇒ **不追加本行** ⇒ 未命中形态输出逐字不变。只读标量，无新增解引用/SYSLOG。单行 ≤191。
+    if ((gTKey1a != 0xFFFFFFFFU || gSIdx != -1 || gFTbl != 0) && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n8 = snprintf(body + off, cap,
+                                "[ttlhit] f_k=%llx f_al=%u f_tbl=%llx s_tbl=%llx s_idx=%lld\n",
+                                static_cast<unsigned long long>(gTKey1a),
+                                static_cast<unsigned>(gFAl),
+                                static_cast<unsigned long long>(gFTbl),
+                                static_cast<unsigned long long>(gSTbl),
+                                static_cast<long long>(gSIdx));
+        if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
+    }
     for (uint32_t i = 0; i < n; ++i) {
         const char* line = nullptr;
         const uint32_t len = gTraceRing.get(i, &line);
@@ -575,6 +601,12 @@ static const UInt8 kCreateFirmwarePatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                                    0xFF, 0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0,
                                                    0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+// P7i 包I：`0xa1c9f`（第一次查表封装；尾调 0xa1cb8；唯一调用点 0x8afc1）。
+//  ★选择挂它而非 0xa1cb8：R8 扰动与该地址高度相关（包H 已删）；0xa1c9f 无 RIP 相对指令、
+//  被调点唯一 ⇒ 观测扰动面最小。真实签名：(void* keySrc=this+0x20) → UInt8 al（命中布尔）。
+//  唯一性：18B 命中 1 次@0xa1c9f（函数头✓；脚本实测）。
+static const UInt8 kDevKey1WrapPattern[] = {0x48, 0x85, 0xFF, 0x74, 0x11, 0x55, 0x48, 0x89, 0xE5, 0x8B, 0x07,
+                                            0x8B, 0x77, 0x64, 0x89, 0xC7, 0x5D};
 static const UInt8 kPutFirmwarePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x83, 0xFE, 0x08, 0x7F};
 
 // 第八步观测：TTL 的跨 kext 查询函数（HWLibs 归零 vm 0x90ddc；`0x8b5de` 内三次调用它 =
@@ -1261,10 +1293,19 @@ UInt64 X5000HWLibs::wrapDevTableKey3(const UInt64 k1, const UInt64 k2, const UIn
 {
     const UInt64 ret = (singleton().orgDevTableKey3 != 0)
                            ? FunctionCast(wrapDevTableKey3, singleton().orgDevTableKey3)(k1, k2, k3) : 0;
-    gTKey1 = k1;
-    gTKey2 = k2;
-    gTKey3 = k3;
+    gTKey1 = static_cast<UInt32>(k1);
+    gTKey2 = static_cast<UInt32>(k2);
+    gTKey3 = static_cast<UInt32>(k3);
     gTHit = (ret != 0) ? 1 : 0;
+    // P7i 包I：补记表基址（运行时＝kcSlide+0x478180）与命中记录下标。
+    //  0xa2691 命中时 ret＝运行时记录指针（a26f6: addq 全局重定位增量）；表基址同加 kcSlide ⇒
+    //  下标＝(ret−表基址)/0x50（表步长 0x50、269 条；越界/未命中记 -1＝未取到）。
+    gSTbl = (singleton().kcSlide != 0) ? (singleton().kcSlide + 0x478180ULL) : 0;
+    if (ret != 0 && gSTbl != 0 && ret >= gSTbl && (ret - gSTbl) < (269ULL * 0x50ULL)) {
+        gSIdx = static_cast<SInt64>((ret - gSTbl) / 0x50ULL);
+    } else {
+        gSIdx = -1;
+    }
     return ret;
 }
 
@@ -1277,6 +1318,24 @@ UInt64 X5000HWLibs::wrapDevTableWrite(void* const dev, void* const a2, void* con
     if (nredKernelPtrOk(dev)) {
         gTDE8 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(dev) + 0xE8);
     }
+    return ret;
+}
+
+// P7i 包I：`0xa1c9f`（第一次查表封装）只读钩子。
+//  签名（反汇编确凿）：(void* keySrc=this+0x20) → UInt8 al（命中布尔；调用者 0x8afc1 用
+//  testb %al 判断）。wrapper：调用前读键1/键2（u32 原值，nredKernelPtrOk 守卫）；调用后
+//  记命中 al 与静态表基址（运行时＝kcSlide+0x478180）。逐字透传 al。
+//  ⚠️ 只读：只写标量，不入环、不打印；无 RIP 相对依赖（规避 0xa1cb8 的 R8 扰动风险）。
+UInt8 X5000HWLibs::wrapDevKey1Wrap(void* const keySrc)
+{
+    if (nredKernelPtrOk(keySrc)) {
+        gTKey1a = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(keySrc));
+        gFK2    = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(keySrc) + 0x64);
+    }
+    const UInt8 ret = (singleton().orgDevKey1Wrap != 0)
+                          ? FunctionCast(wrapDevKey1Wrap, singleton().orgDevKey1Wrap)(keySrc) : 0;
+    gFAl = static_cast<UInt32>(ret & 0xFF);
+    gFTbl = (singleton().kcSlide != 0) ? (singleton().kcSlide + 0x478180ULL) : 0;
     return ret;
 }
 
@@ -2380,6 +2439,11 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("dev-write", kDevTableWritePattern, nullptr, arrsize(kDevTableWritePattern),
                                            0xA25DE)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevTableWrite, this->orgDevTableWrite}, "dev-write");
+        }
+        // P7i 包I：route `0xa1c9f`（第一次查表封装；函数入口型；route 失败只打一行不 panic）。
+        if (const auto from = resolveProbe("dev-key1-wrap", kDevKey1WrapPattern, nullptr, arrsize(kDevKey1WrapPattern),
+                                           0xA1C9F)) {
+            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevKey1Wrap, this->orgDevKey1Wrap}, "dev-key1-wrap");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
