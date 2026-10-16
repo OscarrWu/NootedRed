@@ -83,21 +83,15 @@ static UInt64  gP5 = 0xFFFFFFFFFFFFFFFFULL;   // 0x9440f：(type<<32) | ret（�
 // P7d 包D″：真 `m_hTtl`＝加速器侧门面对象 `+0x38`（由 X5000.cpp 的既有 `ttlC:` 块顺带存此；
 //  与 `ttlC: mHttl=` 同一个值）。哨兵 0xFFFFFFFFFFFFFFFF＝尚未采到。取代原先误用的 gLastT30Type5。
 UInt64 gMHttl = 0xFFFFFFFFFFFFFFFFULL;
-// P7e 包E′：判别读数 v3（修复"清理路径覆盖判别值"缺陷；规格 NOTES-尾部.md §6）。
-//  ★分槽原则：判据④那次（`RA==0x9295B`）**首次锁定、永不覆盖**（否则失败清理会在其
-//    之后以 RA=0x92DD4/sub=2 再进一次 `0x929ac`，把判别值冲掉 ⇒ R6 拿不到判据④结果）；
-//    清理（0x92DD4）／派发器（0x92E63）与其它 sub∈{0,2} 入口记**最近一次**（分槽 cln_*）。
-//  哨兵：gABRet=-1、gC4Locked=false、gC4Al/gC4N=0、gClnRA=0 / gClnSub/gClnAl=0xFFFFFFFF。
-//  ⚠️ 限流硬约束：本函数高频 ⇒ 只写标量（不入环、不打印）；其余入口只 ++gC4Other 计数。
-static SInt32  gABRet  = -1;    // `0x928f4`(allocB) 最近一次返回值（0/非 0）
-static UInt32  gABSeq  = 0;     // allocB 调用序号（同轮对齐用）
-static bool    gC4Locked = false;  // 判据④（RA==0x9295B）是否已锁定
-static UInt32  gC4Al   = 0;     // 【锁定】判据④那次返回值的 al 低位（&0xFF）
-static UInt32  gC4N    = 0;     // RA==0x9295B 的调用计数（含锁定后重复进入）
-static UInt64  gClnRA  = 0;     // 【最近】清理/派发器入口的 RA（归零 VM）
-static UInt32  gClnSub = 0xFFFFFFFFU;  // 该次 sub（2＝失败清理）
-static UInt32  gClnAl  = 0xFFFFFFFFU;  // 该次返回值 al 低位
-static UInt32  gC4Other = 0;    // 其余高频入口调用次数（只计数）
+// P7f 包E″：判别读数 v4（**无条件记录** `0x929ac` 前 3 次调用；R6 证明"按假设过滤"全部落空）。
+//  ★三槽不覆盖：gSeq1/2/3 按到达顺序记 (RA, sub, al)；gIpSeqN 为调用总计数（第 4 次起只计数）。
+//  RA＝`__builtin_return_address(0)` 减 kcSlide ⇒ 归零 VM（若 kcSlide==0 记原始 RA，可判读）。
+//  ⚠️ 限流硬约束：本函数高频 ⇒ 只写标量（不入环、不打印）⇒ 判别行不会被挤出 4096 B 片。
+static SInt32  gABRet  = -1;    // `0x928f4`(allocB) 最近一次返回值（由既有 wrapTtlAllocB 写入）
+static UInt32  gIpSeqN = 0;     // `0x929ac` 调用总计数
+static UInt64  gSeq1RA = 0;     static UInt32 gSeq1Sub = 0xFFFFFFFFU; static UInt32 gSeq1Al = 0xFFFFFFFFU;
+static UInt64  gSeq2RA = 0;     static UInt32 gSeq2Sub = 0xFFFFFFFFU; static UInt32 gSeq2Al = 0xFFFFFFFFU;
+static UInt64  gSeq3RA = 0;     static UInt32 gSeq3Sub = 0xFFFFFFFFU; static UInt32 gSeq3Al = 0xFFFFFFFFU;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -236,37 +230,24 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gMHttl));
         if (n3 > 0) { off += (static_cast<size_t>(n3) < cap) ? static_cast<size_t>(n3) : cap; }
     }
-    // P7e 包E③：`[ttlchain2]` 头部戳记（与 `[bringup]`／`[ttlchain]` 并列，同处头部区）。
-    //  判别读数 v2：ab_ret＝allocB 返回值、c4ra/c4sub/c4al＝**判据④入口**那次的调用者返回
-    //  地址/sub/al（按 RA 分辨，见 wrapIpEntrySeq 注释）⇒ 解决"p4=1 却仍 ret=0"的归因歧义。
-    //  P7e 包E′：字段来源改为新槽（c4ra/c4sub＝**最近清理/派发器入口**；c4al＝锁定的判据④）。
-    //  哨兵控制同上（未命中不追加）⇒ 未命中形态输出逐字不变。只读标量，单行 ≤191。
-    if ((gABRet != -1 || gClnRA != 0 || gC4N != 0) && off < sizeof(body)) {
+    // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
+    //  ab＝allocB 返回值（由既有 wrapTtlAllocB 写入）；n＝`0x929ac` 调用总计数；
+    //  k=RA/sub/al＝第 k 次调用的三值（三槽按到达顺序、不覆盖；第 4 次起只计数）。
+    //  ⚠️ 限流硬约束：本函数高频 ⇒ 只写标量（不入环、不打印），判别行不会挤掉别的读数。
+    //  哨兵控制：allocB 未被调用（gABRet==-1）且 `0x929ac` 未被调用（gIpSeqN==0）⇒
+    //  **不追加本行** ⇒ 未命中形态输出逐字不变。只读标量，无新增解引用/SYSLOG。单行 ≤191。
+    if ((gABRet != -1 || gIpSeqN != 0) && off < sizeof(body)) {
         const size_t cap = sizeof(body) - off;
-        const int n4 = snprintf(body + off, cap,
-                                "[ttlchain2] ab_ret=%d c4ra=%llx c4sub=%u c4al=%u p3=%d mHttl=%llx\n",
-                                static_cast<int>(gABRet),
-                                static_cast<unsigned long long>(gClnRA),
-                                static_cast<unsigned>(gClnSub), static_cast<unsigned>(gC4Al),
-                                static_cast<int>(gP3),
-                                static_cast<unsigned long long>(gMHttl));
-        if (n4 > 0) { off += (static_cast<size_t>(n4) < cap) ? static_cast<size_t>(n4) : cap; }
-    }
-    // P7e 包E′④：头部戳记 v3（与 [bringup]／[ttlchain]／[ttlchain2] 并列）。
-    //  判据④的 c4al/c4n 取自**首次锁定**槽（不被其后的失败清理冲掉）；cln_* 为清理/派发器
-    //  入口的最近一次。哨兵控制：allocB 未被调用且判据④未命中且清理未命中 ⇒ 不追加本行
-    //  ⇒ 未命中形态输出逐字不变。只读标量，不强新增解引用/SYSLOG。单行 ≤191。
-    if ((gABRet != -1 || gC4N != 0 || gClnRA != 0) && off < sizeof(body)) {
-        const size_t cap = sizeof(body) - off;
-        const int n5 = snprintf(body + off, cap,
-                                "[ttlchain3] ab_ret=%d c4al=%u c4n=%u cln_ra=%llx cln_sub=%u cln_al=%u p3=%d mHttl=%llx\n",
-                                static_cast<int>(gABRet),
-                                static_cast<unsigned>(gC4Al), static_cast<unsigned>(gC4N),
-                                static_cast<unsigned long long>(gClnRA),
-                                static_cast<unsigned>(gClnSub), static_cast<unsigned>(gClnAl),
-                                static_cast<int>(gP3),
-                                static_cast<unsigned long long>(gMHttl));
-        if (n5 > 0) { off += (static_cast<size_t>(n5) < cap) ? static_cast<size_t>(n5) : cap; }
+        const int n6 = snprintf(body + off, cap,
+                                "[ttlchain4] ab=%d n=%u 1=%llx/%u/%u 2=%llx/%u/%u 3=%llx/%u/%u\n",
+                                static_cast<int>(gABRet), static_cast<unsigned>(gIpSeqN),
+                                static_cast<unsigned long long>(gSeq1RA), static_cast<unsigned>(gSeq1Sub),
+                                static_cast<unsigned>(gSeq1Al),
+                                static_cast<unsigned long long>(gSeq2RA), static_cast<unsigned>(gSeq2Sub),
+                                static_cast<unsigned>(gSeq2Al),
+                                static_cast<unsigned long long>(gSeq3RA), static_cast<unsigned>(gSeq3Sub),
+                                static_cast<unsigned>(gSeq3Al));
+        if (n6 > 0) { off += (static_cast<size_t>(n6) < cap) ? static_cast<size_t>(n6) : cap; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -549,8 +530,8 @@ static const UInt8 kIpiInitPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41
                                         0x53, 0x48, 0x83, 0xEC, 0x18, 0x85, 0xF6, 0x74, 0x60, 0x49, 0x89, 0xD7};
 static const UInt8 kIpEntrySeqPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                            0x53, 0x48, 0x83, 0xEC, 0x28, 0x49, 0x89, 0xD6, 0x41, 0x89, 0xF7, 0x49};
-static const UInt8 kAllocBPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x49, 0x89,
-                                       0xFE, 0xE8, 0x3A, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0xC3, 0x48, 0x85, 0xC0};
+// P7f 包E″：不再新增 wrapAllocB 钩子（0x928f4 已被既有 wrapTtlAllocB 占位），
+//  kAllocBPattern 故删除。
 static const UInt8 kCreateFirmwarePatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                                                    0xFF, 0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0, 0xFF, 0xFF, 0xF0,
                                                    0xF0, 0xFF, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -1189,6 +1170,9 @@ void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
                static_cast<unsigned long long>(e1), static_cast<unsigned long long>(e2),
                static_cast<unsigned long long>(e4));
     }
+    // P7f 包E″：gABRet 改由既有 wrapTtlAllocB 在返回处写入（不再新增 wrapAllocB 钩子，
+    //  因 0x928f4 已被本 hook 占位，第二个 wrapper 不生效）。仅写标量，不新增打印。
+    gABRet = static_cast<SInt32>(reinterpret_cast<UInt64>(ret));
     return ret;
 }
 
@@ -1211,41 +1195,25 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
 {
     const UInt32 ret = (singleton().orgIpEntrySeq != 0)
                            ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
-    // P7e 包E′：**按 RA 分辨入口 ＋ 判据④首次锁定**（`0x929ac` 全库 5 入口）。
-    //  RA＝`__builtin_return_address(0)` 减 kcSlide ⇒ 归零 VM。
-    //  ★判据④（`RA==0x9295B`）：**首次锁定、永不覆盖**（gC4Locked）⇒ 判据④的真结果
-    //    不会被其后的失败清理（RA=0x92DD4/sub=2）冲掉（这是包E 的缺陷）。
-    //  ★清理／派发器（RA==0x92DD4／0x92E63）与 sub∈{0,2} 的其它入口：记**最近一次**到 cln_*。
-    //  ⚠️ 限流硬约束：本函数高频 ⇒ 只写标量（不入环、不打印）；其余入口只 ++gC4Other。
+    // P7f 包E″：**无条件记录前 3 次**（R6 证明"按假设过滤"全部落空 ⇒ 先看真实形态再谈过滤）。
+    //  RA＝`__builtin_return_address(0)` − kcSlide ⇒ 归零 VM；kcSlide==0 时记原始 RA（供判读）。
+    //  ★三槽按到达顺序、不覆盖；第 4 次起只 ++gIpSeqN（限流硬约束：只写标量、不入环、不打印）。
     {
         const UInt64 ra = (singleton().kcSlide != 0)
-            ? (reinterpret_cast<UInt64>(__builtin_return_address(0)) - singleton().kcSlide) : 0;
-        if (ra == 0x9295BULL) {
-            ++gC4N;
-            if (!gC4Locked) { gC4Locked = true; gC4Al = static_cast<UInt32>(ret & 0xFF); }
-        } else if (ra == 0x92DD4ULL || ra == 0x92E63ULL || b == 0 || b == 2) {
-            gClnRA = ra;
-            gClnSub = b;
-            gClnAl = static_cast<UInt32>(ret & 0xFF);
-        } else {
-            ++gC4Other;   // 高频非归属入口：只计数
-        }
+            ? (reinterpret_cast<UInt64>(__builtin_return_address(0)) - singleton().kcSlide)
+            : reinterpret_cast<UInt64>(__builtin_return_address(0));
+        const UInt32 al = static_cast<UInt32>(ret & 0xFF);
+        ++gIpSeqN;
+        if (gSeq1Sub == 0xFFFFFFFFU) { gSeq1RA = ra; gSeq1Sub = b; gSeq1Al = al; }
+        else if (gSeq2Sub == 0xFFFFFFFFU) { gSeq2RA = ra; gSeq2Sub = b; gSeq2Al = al; }
+        else if (gSeq3Sub == 0xFFFFFFFFU) { gSeq3RA = ra; gSeq3Sub = b; gSeq3Al = al; }
     }
     gP4 = static_cast<SInt32>(ret & 0xFF);
     return ret;
 }
 
-// P7e 包E①：`0x928f4`（allocB＝判据 h）只读钩子——记完整 64 位返回值与调用序号。
-//  用途：建立"同一次调用"的边界（与 ② 的 RA/sub 配对）；确认本轮 allocB 是否命中与是否返 0。
-//  ⚠️ 只读：只写两个标量，不打印、不入环、不新增 SYSLOG（限流硬约束）。逐字透传返回值。
-UInt64 X5000HWLibs::wrapAllocB(void* const ctx)
-{
-    const UInt64 ret = (singleton().orgAllocB != 0)
-                           ? FunctionCast(wrapAllocB, singleton().orgAllocB)(ctx) : 0;
-    ++gABSeq;
-    gABRet = static_cast<SInt32>(ret);
-    return ret;
-}
+// P7f 包E″：不再新增 wrapAllocB 钩子（0x928f4 已被既有 wrapTtlAllocB 占位，
+//  第二个 wrapper 不生效）。gABRet 由既有 wrapTtlAllocB 在返回处写入。
 
 bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 {
@@ -2337,11 +2305,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("ip-entry-seq", kIpEntrySeqPattern, nullptr, arrsize(kIpEntrySeqPattern),
                                            0x929AC)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapIpEntrySeq, this->orgIpEntrySeq}, "ip-entry-seq");
-        }
-        // P7e 包E①：route `0x928f4`（allocB；函数入口型；route 失败只打一行不 panic）。
-        if (const auto from = resolveProbe("allocB", kAllocBPattern, nullptr, arrsize(kAllocBPattern),
-                                           0x928F4)) {
-            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapAllocB, this->orgAllocB}, "allocB");
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
