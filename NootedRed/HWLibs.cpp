@@ -92,20 +92,28 @@ static UInt32  gIpSeqN = 0;     // `0x929ac` 调用总计数
 static UInt64  gSeq1RA = 0;     static UInt32 gSeq1Sub = 0xFFFFFFFFU; static UInt32 gSeq1Al = 0xFFFFFFFFU;
 static UInt64  gSeq2RA = 0;     static UInt32 gSeq2Sub = 0xFFFFFFFFU; static UInt32 gSeq2Al = 0xFFFFFFFFU;
 static UInt64  gSeq3RA = 0;     static UInt32 gSeq3Sub = 0xFFFFFFFFU; static UInt32 gSeq3Al = 0xFFFFFFFFU;
-// B95（2026-10-18）：基础启动序列补入（`0xa3138`）的**执行确认通道**标量。
+// B95v2（2026-10-18，换落点到 `0xa2691`）：基础启动序列补入的**执行确认通道**标量。
 //  只写标量（不入环、不打印）⇒ 由 `nredTraceFlush` 的头部区汇总成一行 `[nredInsert]`。
-//  哨兵语义：`gInsApplied==0 && gInsSkip==0` ⇒ 本行不输出 ⇒ **门控关闭态输出逐字不变**。
-static UInt32 gInsApplied = 0;             // 替补成功次数
-static UInt32 gInsIdx     = 0xFFFFFFFFU;   // 最近一次替补的 `idx`（哨兵＝尚未发生）
-static UInt32 gInsSkip    = 0;             // skip 原因码（**只记首次**，免被后续调用覆盖）
+//  ★ O-1（R12 教训）：本行**无条件化**——判据只看"门控是否开"，**不依赖封装是否被调用**。
+//    R12 之所以无法区分"未注册／未执行"，正是因为当时用了 `applied||skip` 这种"跑过才打"的哨兵。
+//  ⇒ 门控开 ⇒ 每片必有一行（哪怕 calls=0）；门控关 ⇒ 一字不变。
+static UInt32 gInsCalls    = 0;             // 本封装被调用总次数（含 Apple 自身命中的）
+static UInt32 gInsAppleHit = 0;             // 其中"Apple 自己命中（返回非 0）"的次数 ⇒ 我方逐字放行
+static UInt32 gInsOurs     = 0;             // 其中"由我方接管（返回我方记录）"的次数
+static UInt32 gInsSkip     = 0;             // skip 原因码（**只记首次**，免被后续调用覆盖）
+static UInt32 gInsK1       = 0;             // 最近一次传入的键1（预期 0x15BF）
+static UInt32 gInsK2       = 0;             // 最近一次传入的键2（预期 9）
+static UInt32 gInsK3       = 0;             // 最近一次传入的键3（预期 0xC7；我方记录在此位取通配）
 enum : UInt32 {
-    kInsSkipNone    = 0,   // 无 skip
-    kInsSkipDev     = 1,   // 本机键不匹配（device_id≠0x15BF 或 revision≠0xC7）
-    kInsSkipIdx     = 2,   // `idx ∉ {0,1}`（Apple 亦在此直接失败；我方不介入）
-    kInsSkipOutNull = 3,   // 出参 `out` 为空
-    kInsSkipOutSet  = 4,   // `*out` 非 0 ⇒ Apple 已装值 ⇒ **不覆盖**（既有纪律）
+    kInsSkipNone = 0,   // 无 skip
+    kInsSkipDev  = 1,   // 键不匹配我方设备（k1≠0x15BF 或 k2≠9）⇒ 不接管
 };
-static const char* const kInsSkipReason[] = {"none", "dev-mismatch", "idx", "out-null", "out-set"};
+static const char* const kInsSkipReason[] = {"none", "dev-mismatch"};
+// B95v2 门控标量（**默认 false**＝关）：由 `processKext` 解析 `-NRedDevTablePatch` 后置位。
+//  ⚠️ 刻意用**文件作用域**而非类成员：`nredTraceFlush` 是**自由函数**（拿不到私有的
+//  `X5000HWLibs::singleton()`），而执行确认戳记（O-1）必须由它输出 ⇒ 单点状态、无重复。
+//  判定处只读本标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
+static bool gDevTablePatch = false;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -266,17 +274,26 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gSeq3Al));
         if (n6 > 0) { off += (static_cast<size_t>(n6) < cap) ? static_cast<size_t>(n6) : cap; }
     }
-    // B95 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
+    // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
-    //  哨兵控制：`gInsApplied==0 && gInsSkip==0` ⇒ **不追加本行** ⇒ **门控关闭态输出逐字不变**。
-    //  ⚠ 只读：只读三个我方标量（由 `wrapDevGetBaseSwipSeq` 写入），**不解引用任何 Apple 对象**、
+    //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
+    //    R12 用 `applied||skip` 这种"跑过才打"的哨兵 ⇒ "未注册"与"未执行"**不可区分**，
+    //    定因因此被拖了一轮。⇒ 现在：门控开 ⇒ **每片必有一行**（哪怕 `calls=0`）；
+    //    门控关 ⇒ **一字不变**（降级正确性）。
+    //    读法：`armed=1` 证明"门控已解析且本行机制在跑"；`calls` 证明"封装被调用过几次"
+    //    （`calls=0` ⇒ 落点仍未走到，需再换落点）；`ours` 证明"我方接管了几次"。
+    //  ⚠ 只读：只读我方标量（由 `wrapDevLookup` 写入），**不解引用任何 Apple 对象**、
     //     不新增 SYSLOG、不增 panic 文本。单行 ≤191。
-    if ((gInsApplied != 0 || gInsSkip != 0) && off < sizeof(body)) {
+    if (gDevTablePatch && off < sizeof(body)) {
         const size_t cap = sizeof(body) - off;
-        const int n7 = snprintf(body + off, cap, "[nredInsert] applied=%u idx=%u skip=%s\n",
-                                static_cast<unsigned>(gInsApplied), static_cast<unsigned>(gInsIdx),
+        const int n7 = snprintf(body + off, cap,
+                                "[nredInsert] armed=1 calls=%u hit=%u ours=%u skip=%s k=%x/%x/%x\n",
+                                static_cast<unsigned>(gInsCalls), static_cast<unsigned>(gInsAppleHit),
+                                static_cast<unsigned>(gInsOurs),
                                 kInsSkipReason[(gInsSkip < (sizeof(kInsSkipReason) / sizeof(kInsSkipReason[0])))
-                                                   ? gInsSkip : 0]);
+                                                   ? gInsSkip : 0],
+                                static_cast<unsigned>(gInsK1), static_cast<unsigned>(gInsK2),
+                                static_cast<unsigned>(gInsK3));
         if (n7 > 0) { off += (static_cast<size_t>(n7) < cap) ? static_cast<size_t>(n7) : cap; }
     }
     const uint32_t n = gTraceRing.count;
@@ -702,7 +719,7 @@ static const UInt8 kMode6430fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 static const UInt8 kIpNbaLimitOriginal[] = {0x8D, 0x51, 0xFF, 0x80, 0xFA, 0x05, 0x0F, 0x87};
 static const UInt8 kIpNbaLimitPatched[]  = {0x8D, 0x51, 0x00, 0x80, 0xFA, 0x08, 0x0F, 0x87};
 // ─────────────────────────────────────────────────────────────────────────────
-// B95（2026-10-18）：基础启动序列（SWIP）补入 —— 我方静态序表 ＋ `0xa3138` 的 pattern。
+// B95v2（2026-10-18）：基础启动序列（SWIP）补入 —— 我方静态序表／记录 ＋ `0xa2691` 的 pattern。
 //
 // 【为什么需要】Apple 内嵌设备信息表（`0x478180`，步长 0x50、269 条／83 键）里**没有 `0x15BF` 的记录**
 //  ⇒ `ttlDevGetBaseSwipSeq`（`0xa3138`）取不到基础启动序列 ⇒ `dev+0xE8=0` ⇒ TTL 电源服务实例建立失败
@@ -763,13 +780,60 @@ static constexpr NRedSwipSeqItem kNRedSwipSeq0[] = {
     {10, 0, 1, kSubDmcu},         // DMCU【选择项 B】
     {0,  0, 0, nullptr},          // 终止项（client_id==0）
 };
-// 模式 1 序表：**与 Apple 共用模式 1 表（`0x45191c40`）同形同义**——本卡实测其内容仅
-//  `{client 3, count 0}` ＋ 终止项。本机 boot=0 ⇒ 运行期不走这张；提供它是为了
-//  `idx==1` 时**不做**"复制 Apple 地址"这类不必要的耦合（复制会让我方表依赖 Apple 数据段布局）。
+// 模式 1 序表：本机 `boot=0`（实测）⇒ 运行期只走模式 0。本表与 Apple 共用模式 1 表
+//  （`0x45191c40`：`{client 3, count 0}` ＋ 终止项）**逐字节同形**；技术经理裁定用我方自建
+//  （零 slide 依赖、无保真损失）——理由：该字段只在 `idx==1` 时被读，本机根本不读。
 static constexpr NRedSwipSeqItem kNRedSwipSeq1[] = {
     {3, 0, 0, nullptr},           // BGM
     {0, 0, 0, nullptr},           // 终止项
 };
+
+// ── 我方记录（0x50）——按 `甲-prime 整合与记录定稿 §3.2` 字段级定稿 ──────────────
+//  ⚠ 布局：8 个 u64 槽（+0x00…+0x48）。前 5 个是标量/键，后 5 个是指针。
+//  ⚠ **全部指针都指向我方自己的静态数据 ⇒ 零运行期重定位、零硬编码绝对地址**
+//    （技术经理 2026-10-18 裁定：`+0x40` 用本地 nullptr[8]；`+0x38`/`+0x48` 用本地副本；
+//     `+0x28`/`+0x30` 用我方序表 ⇒ 整条记录保持纯静态，无基址依赖）。
+//  ⚠ 绝不写 chained-fixup 编码值——那套编码只在 Apple 镜像里成立。
+struct NRedDevRecord {
+    UInt64       f00;   // +0x00 = 0x8e（同族模板 idx82/84；非 0 ＝ 在用标志）
+    UInt64       f08;   // +0x08 = 0x82（同族模板；两处查表都不读它，语义【未解出】）
+    UInt64       f10;   // +0x10 = 0x15BF  ← 键1：**真机实测**（device_id）
+    UInt64       f18;   // +0x18 = 9       ← 键2：**真机实测**（M-1 定稿＝真值 9）
+    UInt64       f20;   // +0x20 = 0xDEADCAFE（通配；M-2 保守取通配，收紧条件见定稿 §3.2）
+    const void*  f28;   // +0x28 → 我方模式 0 序表（`0xa3138` idx=0 ／ `0xa26ff` 模式 0 只读它）
+    const void*  f30;   // +0x30 → 我方模式 1 序表（`0xa3138` idx=1；本机 boot=0 ⇒ 运行期不读）
+    const void*  f38;   // +0x38 → 我方本地副本（7 位能力字节，Apple 原址 0x45191c7c）
+    const void*  f40;   // +0x40 → 我方本地 nullptr[8]（Apple 原址 0x451e16c0，未见读取者）
+    const void*  f48;   // +0x48 → 我方本地副本（Apple 原址 0x45191e00，与 type=0x8e 对应那一支）
+};
+
+// `+0x38` 的本地副本（16 B）：Apple 原址 `0x45191c7c` 的头 16 字节逐字节照抄
+//  （`41 00 00 00 | 0a 00 00 00 | 6e 00 00 00 | 00 00 00 00`）。
+//  判据：读者只有 6 个定长位读器（`0xa1d12` 等，只读 `[0]` 的 bit0..6；按字索引的
+//  `0xa1d3c` 全库零调用者）⇒ 只需 `[0]` 正确 ⇒ 本地副本功能等价。
+static constexpr UInt64 kRecF38[2] = {0x0000000a00000041ULL, 0x000000000000006eULL};
+// `+0x48` 的本地副本（16 B）：Apple 原址 `0x45191e00`（`type=0x8e` 对应那一支）头 16 字节
+//  （`12 00 00 00 | 00…`）。判据：**未发现任何读取者**，本地等价。
+static constexpr UInt64 kRecF48[2] = {0x0000000000000012ULL, 0x0000000000000000ULL};
+// `+0x40`：**本地 nullptr[8]**（不照抄）。判据：①未见读取者；②Apple 原址是指针数组、
+//  元素又指向语义未解出的数据 ⇒ 本地化无法"搬内容"；③零数组使整条记录保持纯静态。
+//  止损：若下一轮出现与该字段相关的新崩点 ⇒ 改回"照抄 Apple 原表 = base + 0x47d6c0"。
+static constexpr UInt64 kRecF40[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+// 我方记录（唯一一条）。`const` 而**非** `constexpr`：含指针成员，地址在链接期确定。
+static const NRedDevRecord kNRedDevRecord = {
+    0x8e,            // +0x00 同族模板
+    0x82,            // +0x08 同族模板
+    0x15BF,          // +0x10 键1＝真机实测 device_id
+    9,               // +0x18 键2＝真机实测（M-1）
+    0xDEADCAFE,      // +0x20 通配（M-2：保守取通配）
+    kNRedSwipSeq0,   // +0x28 我方模式 0 序表
+    kNRedSwipSeq1,   // +0x30 我方模式 1 序表
+    kRecF38,         // +0x38 本地副本
+    kRecF40,         // +0x40 本地 nullptr[8]
+    kRecF48,         // +0x48 本地副本
+};
+static_assert(sizeof(NRedDevRecord) == 0x50, "B95v2: 我方记录必须是 0x50 字节（Apple 步长）");
 
 // ── 编译期校验（权威件 §3.4 六条自检 ＋ M-4）────────────────────────────────
 //  ② 记录级／③ 序表级／③′ M-4 全在**编译期**完成 ⇒ 真机上不存在"结构不合法却仍写入"的可能。
@@ -811,11 +875,14 @@ static_assert(nredSwipTableOk(kNRedSwipSeq1, sizeof(kNRedSwipSeq1) / sizeof(kNRe
 static_assert(sizeof(NRedSwipSeqItem) == 24, "B95: 序表项必须是 24 字节（Apple 布局）");
 }  // namespace
 
-// `0xa3138`（`ttlDevGetBaseSwipSeq`）入口 20 B —— **全 macho 唯一命中**（fileoff 0xa4138 = vmaddr 0xa3138）。
-//  实测：18 B 有 12 处命中（不可用）⇒ 取 20 B（23/26/30/34 B 亦唯一，取最短）。
-static const UInt8 kDevGetBaseSwipSeqPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50,
-                                                  0x49, 0x89, 0xD6, 0x89, 0xF3, 0x49, 0x89, 0xFF, 0xE8, 0x98};
-static_assert(arrsize(kDevGetBaseSwipSeqPattern) == 20, "B95: kDevGetBaseSwipSeqPattern must be 20 bytes");
+// `0xa2691`（第二次三键查表）入口 20 B —— **全 macho 唯一命中**（fileoff 0xa3691 = vmaddr 0xa2691）。
+//  实测：18／20／24／28 B 均**唯一**（全库仅此一处）⇒ 取 20 B。
+//  与反汇编逐字对应：`a2691 pushq %rbp`／`a2692 movq %rsp,%rbp`／
+//  `a2695 leaq 4020964(%rip),%r8`（表基址 0x478180）／`a269c cmpq $0,(%r8)`／`a26a0 je`／
+//  `a26a2 movl $1,%r11d`。
+static const UInt8 kDevLookupPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x4C, 0x8D, 0x05, 0xE4, 0x5A, 0x3D,
+                                          0x00, 0x49, 0x83, 0x38, 0x00, 0x74, 0x50, 0x41, 0xBB, 0x01};
+static_assert(arrsize(kDevLookupPattern) == 20, "B95v2: kDevLookupPattern must be 20 bytes");
 
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -1665,57 +1732,53 @@ bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
     }
     return ret;
 }
-// B95（2026-10-18）：`0xa3138`（`ttlDevGetBaseSwipSeq`）**介入封装**。
+// B95v2（2026-10-18）：`0xa2691`（**第二次三键查表**）**介入封装** —— 换落点后的新落点。
 //
-// 【真实签名（本卡亲手复核，见 tmp/prog/交付-…-2026-10-18.md §1）】
-//   `bool ttlDevGetBaseSwipSeq(void* obj, u32 idx, void** out)`
-//   依据：`a3142 movq %rdx,%r14`（第 3 参＝出参槽）／`a3145 movl %esi,%ebx`（第 2 参＝**u32**）／
-//         `a3147 movq %rdi,%r15`（第 1 参）／`a3152 xorl %eax,%eax`＋`a318c movb $1,%al` ⇒ **bool**；
-//         调用点 `93fb9 testb %al,%al` 按字节判。`a3154 cmpl $1,%ebx / ja` ⇒ `idx` 只能取 0/1。
-//   CALL xrefs：**全库唯一调用者 `0x93fb4`（∈ `0x93f76`）** —— 复核通过。
+// 【为什么换】R12 真机轮证明旧落点 `0xa3138` **不在失败路径上**：`0x93f76` 内
+//  `93f93 callq 0x95e9f` → `93f9b testq %rax,%rax` → **`93f9e je 0x94003`**（失败出口）
+//  ⇒ `93fb4 callq 0xa3138` 只有 `0x95e9f` **成功后**才到达；而 `0x95e9f` 失败的根因
+//  正是"三键查表未命中" ⇒ 旧落点位于根因**下游两跳**，必然空跑（R12 `[nredInsert]` 0 处）。
+//  ⇒ 新落点 `0xa2691` 就是那个"未命中返 0"的查表本身，即 **`dev+0xE8 = 0` 的产生处**。
 //
-// 【介入方式＝最小面】**仅在原函数失败（返回 false）时**替补：
-//   · 原函数失败的两条路径（`a3179 movq $0,(%r14)` 与 `a3189` 写值后被 `a318e` 判 0）
-//     ⇒ **两种情况下 `*out` 都是 0** ⇒ 我方写入我方序表并改返回 true，**正是"在失败路径上补一步"**；
-//   · **`ret == true` 的路径逐字原样放行**：返回值、控制流、日志量全部不变。
-//   · **不覆盖 Apple 已装值**：若 `*out != 0`（理论上原函数成功时才会如此）⇒ **不介入**（既有纪律）。
+// 【真实签名（本卡亲手复核）】`void* a2691(u64 k1, u64 k2, u64 k3)`
+//   依据：`a26b8 cmpq %rdi,16(%r8,%rax)`（第 1 参＝键1，64 位比较）／
+//         `a26c4 cmpq %rsi,24(%r8,%rax)`（第 2 参＝键2）／`a26d3 cmpq %rdx,32(%r8,%rax)`（第 3 参＝键3）；
+//         返回：`a26f6 addq 4008203(%rip),%rax`（命中＝表基址 + 记录偏移）或 `a26f2 xorl %eax,%eax`（未命中＝0）。
+//   CALL xrefs：**全库唯一调用者 `a260e`（∈ `0xa25de`）**；`0xa25de` 的唯一调用者 `96553`（∈ `0x95e9f`）。
 //
-// 【门控】`-NRedDevTablePatch`（**默认关**；关闭时**本 hook 根本不注册** ⇒ 行为与现状逐字一致）。
-//  判定处只读 `devTablePatchEnabled` 标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
+// 【装配由 Apple 自动完成】`0xa25de`：`a260e callq 0xa2691` → 非 0 ⇒ **`a261b movq %r14,232(%rbx)`**
+//  （写 `dev+0xE8`）→ `a2677 callq 0xa26ff`（把序表展开到 `dev+0xF0`）⇒ 我方**只返回记录指针**即可。
 //
-// 【不改 ABI】只改"返回值"与"出参指向的内容"，**不改**参数个数/宽度/返回类型/调用约定。
-bool X5000HWLibs::wrapDevGetBaseSwipSeq(void* const obj, const UInt32 idx, void** const out)
+// 【介入语义＝最小面】**仅在原函数返 0（未命中）且传入键匹配我方设备**时返回我方记录指针：
+//   · 原函数已命中（返回非 0）⇒ **逐字放行**（既有纪律：绝不覆盖 Apple 已装值）；
+//   · 键不匹配 ⇒ 不接管（本机性判据：k1==0x15BF ∧ k2==9，均为真机实测值）。
+//   ⚠ 键3 `k3` **不作**接管条件：我方记录在 `+0x20` 取**通配** `0xDEADCAFE`（M-2），
+//     而 Apple 查表的键3 比较是"相等 或 通配" ⇒ 任意 k3 都能命中我方记录（这正是通配的意义）。
+//
+// 【不改 ABI】只改返回值，**不改**参数个数/宽度/返回类型/调用约定。
+void* X5000HWLibs::wrapDevLookup(const UInt64 k1, const UInt64 k2, const UInt64 k3)
 {
-    const bool ret = FunctionCast(wrapDevGetBaseSwipSeq, singleton().orgDevGetBaseSwipSeq)(obj, idx, out);
-    // ① 门控（默认关 ⇒ 本 hook 未注册，此分支永不执行）
-    // ② 原函数成功 ⇒ **逐字放行**（零扰动）
-    if (!singleton().devTablePatchEnabled || ret) { return ret; }
-    // ③ 本机匹配：只用真机实测的 device_id（与既有 HWLibs.cpp 改表同源：`NRed::singleton().getDeviceID()`）。
-    //    ⚠ 不做"伪造键匹配"——`0xa3138` 的替补不需要键作条件：表内无 `0x15BF` ⇒ 原函数必失败。
-    if (NRed::singleton().getDeviceID() != 0x15BF) {
+    void* const ret = FunctionCast(wrapDevLookup, singleton().orgDevLookup)(k1, k2, k3);
+    if (!gDevTablePatch) { return ret; }
+    // O-2：查表读数（**只写标量**，不入环、不打印 ⇒ 由头部戳记汇总成一行）。
+    gInsCalls += 1;
+    gInsK1 = static_cast<UInt32>(k1);
+    gInsK2 = static_cast<UInt32>(k2);
+    gInsK3 = static_cast<UInt32>(k3);
+    // ① Apple 自己命中 ⇒ **逐字放行**（零扰动）
+    if (ret != nullptr) {
+        gInsAppleHit += 1;
+        return ret;
+    }
+    // ② 键不匹配我方设备 ⇒ 不接管（只认本机：k1/k2 均为真机实测值）
+    if (k1 != 0x15BF || k2 != 9) {
         if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipDev; }
         return ret;
     }
-    // ④ `idx` 必须是 0/1（Apple 在 `a3154 cmpl $1,%ebx / ja` 处直接失败；我方不介入别的 idx）
-    if (idx > 1) {
-        if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipIdx; }
-        return ret;
-    }
-    // ⑤ 出参槽必须可写（第四道"指针级"）
-    if (out == nullptr || !nredKernelPtrOk(out)) {
-        if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipOutNull; }
-        return ret;
-    }
-    // ⑥ 绝不覆盖 Apple 已装的值（既有纪律：B94 `wrapTtlRegIface` 同款 `*slotE0 == nullptr` 判据）
-    if (*out != nullptr) {
-        if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipOutSet; }
-        return ret;
-    }
-    // ⑦ 替补：写我方序表并报告成功。idx=0 ⇒ 模式 0 表；idx=1 ⇒ 模式 1 表（Apple 只有这两张）。
-    *out = const_cast<NRedSwipSeqItem*>((idx == 0) ? kNRedSwipSeq0 : kNRedSwipSeq1);
-    gInsApplied += 1;
-    gInsIdx = idx;
-    return true;
+    // ③ 未命中 ＋ 键匹配 ⇒ 接管：返回我方记录（0x50）。
+    //    后续"写 `dev+0xE8` + 展开序表"全部由 Apple 自己的 `0xa25de` 完成，我方不代劳。
+    gInsOurs += 1;
+    return const_cast<NRedDevRecord*>(&kNRedDevRecord);
 }
 
 void* X5000HWLibs::wrapTlsSwInit(void* const obj)
@@ -2136,7 +2199,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // B95 门控（**默认关**）：开启后在 `0xa3138` 的失败路径上补入我方基础启动序列表。
     //  解析一次存标量，判定处只读标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
     //  ⚠ 关闭态 ⇒ 该 hook **根本不注册**（见下方注册处）⇒ 行为与现状逐字一致。
-    singleton().devTablePatchEnabled = checkKernelArgument("-NRedDevTablePatch");
+    gDevTablePatch = checkKernelArgument("-NRedDevTablePatch");
 
     NRed::singleton().hwLateInit();
 
@@ -2507,15 +2570,14 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                            0x929AC)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapIpEntrySeq, this->orgIpEntrySeq}, "ip-entry-seq");
         }
-        // B95 介入挂点：`0xa3138`（`ttlDevGetBaseSwipSeq`；全库唯一调用者 `0x93fb4`）。
+        // B95v2 介入挂点：`0xa2691`（第二次三键查表；**全库唯一调用者 `a260e`** ∈ `0xa25de`）。
         //  ⚠️ **仅在门控开启时注册** ⇒ 关闭态该 wrapper 完全不存在（降级正确性：行为与现状逐字一致）。
-        //  ⚠️ 不改返回值以外的 ABI；只改"返回值"与"出参指向的内容"（且仅在原函数失败时）。
-        if (singleton().devTablePatchEnabled) {
-            if (const auto from = resolveProbe("dev-get-base-swip-seq", kDevGetBaseSwipSeqPattern, nullptr,
-                                               arrsize(kDevGetBaseSwipSeqPattern), 0xA3138)) {
-                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevGetBaseSwipSeq,
-                                                            this->orgDevGetBaseSwipSeq},
-                          "dev-get-base-swip-seq");
+        //  ⚠️ 只改返回值（未命中时返回我方记录指针），**不改 ABI**。
+        if (gDevTablePatch) {
+            if (const auto from = resolveProbe("dev-lookup", kDevLookupPattern, nullptr,
+                                               arrsize(kDevLookupPattern), 0xA2691)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevLookup, this->orgDevLookup},
+                          "dev-lookup");
             }
         }
 

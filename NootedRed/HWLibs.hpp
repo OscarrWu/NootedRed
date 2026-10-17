@@ -102,10 +102,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgTtlInit{0};     // 0x8af60 ttl_initialize（B67；无符号内部函数，地址路由）
     mach_vm_address_t                                            orgTtlRegIface{0};  // 0x8b9a5 接口表注册（idx/值）
     mach_vm_address_t                                            orgTlsCreate{0};    // 0x93f76 TlsCreateInstance 判据
-    mach_vm_address_t                                            orgDevGetBaseSwipSeq{0};   // 0xa3138 取基础启动序列（B95 介入挂点）
-    // B95：`-NRedDevTablePatch` 门控（**默认关**）。在 processKext 早期解析一次存标量，
-    //  判定处只读标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
-    bool                                                         devTablePatchEnabled{false};
+    mach_vm_address_t                                            orgDevLookup{0};    // 0xa2691 第二次三键查表（B95v2 介入挂点）
     mach_vm_address_t                                            orgTlsSwInit{0};    // 0x95e9f TlsSwInit 内部创建
     mach_vm_address_t                                            kcSlide{0};         // 本 kext 运行时 slide（供探针换算内部全局地址）
     // 第八步观测（2026-09-28 第二十五轮）：`bgm_create` 内层步骤（只读）
@@ -164,9 +161,10 @@ private:
     static UInt32 wrapTtlInit(void* a1, void* a2);   // B67：ttl_initialize 出入口两读（零行为改动）
     // 第八步观测（2026-09-28 第二十一轮）：接口表注册函数 `0x8b9a5(table, idx, obj, val)`（只读）
     static void wrapTtlRegIface(void* table, UInt32 idx, void* obj, void* val);
-    // B95（2026-10-18）：`0xa3138`（`ttlDevGetBaseSwipSeq`）介入封装——仅在原函数**失败**时
-    //  把其出参替换为我方基础启动序列表并报告成功（正常路径逐字放行）。见 HWLibs.cpp 实现处注释。
-    static bool wrapDevGetBaseSwipSeq(void* obj, UInt32 idx, void** out);
+    // B95v2（2026-10-18）：`0xa2691` 第二次三键查表封装——仅在**原函数未命中（返 0）且键匹配本机**
+    //  时返回我方记录指针；其余逐字放行。装配（写 `dev+0xE8` + 展开序表）由 Apple 自己的
+    //  `0xa25de` 完成；我方不代劳。见 HWLibs.cpp 实现处注释。
+    static void* wrapDevLookup(UInt64 k1, UInt64 k2, UInt64 k3);
     // 第八步观测（2026-09-28 第二十三轮）：TlsCreateInstance(0x93f76) 与 TlsSwInit 内部创建(0x95e9f)（只读）
     static bool  wrapTlsCreate(void* obj, void* slots);
     static void* wrapTlsSwInit(void* obj);
