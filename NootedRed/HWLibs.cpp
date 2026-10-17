@@ -140,6 +140,31 @@ static UInt32 gBisS2c = 0, gBisS3c = 0;
 struct Bis9440f { UInt32 client, stage, ret; };
 static Bis9440f gBis9440f[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
 static UInt32 gBis9440fN = 0;
+// ── R33 扩读（2026-10-18）：9 个纯标量，取运行期值以三态定案 ──────────────────────
+//  规格：`tmp/tech-manager/R33-后段性质与发轮口径-2026-10-18.md` §4（**本卡权威依据**；
+//  与 R29 §④ 冲突处以 R33 为准）。
+//  背景：`ipi_gvm_sw_init`（`0x98125`）的第五出口失败，其返回码与一条**能力位校验**
+//  （`0xa3014` 读 `o3+176` 的位 0/1/2）有关；该值来自**运行期记录** ⇒ 只能上机取。
+//  ★ 本卡**只取证**：严禁任何"能力位置位"或行为改动。
+//  ⚠ 全部为**纯内存读**；每一级解引用**自备空守卫**，短路即出、写哨兵。
+//  哨兵口径：`kBisNone64 = 0xFFFFFFFFFFFFFFFF`（指针级）／`kBisNone32 = 0xFFFFFFFF`（u32 级）。
+static const UInt64 kBisNone64 = 0xFFFFFFFFFFFFFFFFULL;
+static const UInt32 kBisNone32 = 0xFFFFFFFFU;
+static UInt64 gBisO3 = 0, gBisO4 = 0, gBisObj14 = 0, gBisFn112 = 0;
+static UInt64 gBisFn600 = 0, gBisFn616 = 0, gBisSub = 0, gBisHost = 0;
+static UInt32 gBisV176 = kBisNone32, gBisA = kBisNone32, gBisX = kBisNone32;
+static UInt32 gBisHit = 0;   // 本扩读是否命中（1＝走到了 client5/stage0 且各前置非空；0＝未命中/未走到）
+static UInt32 gBisShort = 0; // 短路原因码（**只记首次**）：0=无
+enum : UInt32 {
+    kBisShortNone   = 0,   // 无短路（全部读到）
+    kBisShortArg    = 1,   // L0：`wrapMode9440f` 的 arg0 为空 ⇒ 无从下手
+    kBisShortSub    = 2,   // L1：`subobj = *(a+48)`（＝`0x98050(a)`）为空
+    kBisShortHost   = 3,   // L1b：`host = *(subobj)` 为空
+    kBisShortSlot1  = 4,   // L2：`slot1 = 0x8b4bf(host)`（＝`*(host)+16+1*24`）为空
+    kBisShortRoot   = 5,   // L3a：`root = *(host)` 为空
+    kBisShortRec    = 6,   // L3b：`record = 0x958d8(host,5)` 为空
+};
+static const char* const kBisShortReason[] = {"none", "arg", "sub", "host", "slot1", "root", "rec"};
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -336,7 +361,9 @@ int nredTraceFlush(int secTag)
         const int n8 = snprintf(body + off, cap,
                                 "[ttlbisect] c4n=%u c4r=%u c4a4=%u c4b4=%u c4c4=%u site=%c off=%llx "
                                 "Ee8=%llx r28=%llx r30=%llx s2c=%u s3c=%u "
-                                "p1=%u/%u/%u p2=%u/%u/%u p3=%u/%u/%u\n",
+                                "p1=%u/%u/%u p2=%u/%u/%u p3=%u/%u/%u "
+                                "o3=%llx o4=%llx c14=%llx f112=%llx f600=%llx f616=%llx "
+                                "v176=%08x a=%u x=%u hit=%u sh=%s\n",
                                 static_cast<unsigned>(gC4n), static_cast<unsigned>(gC4ret),
                                 static_cast<unsigned>(gC4a4), static_cast<unsigned>(gC4b4),
                                 static_cast<unsigned>(gC4c4),
@@ -354,7 +381,18 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gBis9440f[1].ret),
                                 static_cast<unsigned>(gBis9440f[2].client),
                                 static_cast<unsigned>(gBis9440f[2].stage),
-                                static_cast<unsigned>(gBis9440f[2].ret));
+                                static_cast<unsigned>(gBis9440f[2].ret),
+                                static_cast<unsigned long long>(gBisO3),
+                                static_cast<unsigned long long>(gBisO4),
+                                static_cast<unsigned long long>(gBisObj14),
+                                static_cast<unsigned long long>(gBisFn112),
+                                static_cast<unsigned long long>(gBisFn600),
+                                static_cast<unsigned long long>(gBisFn616),
+                                static_cast<unsigned>(gBisV176),
+                                static_cast<unsigned>(gBisA), static_cast<unsigned>(gBisX),
+                                static_cast<unsigned>(gBisHit),
+                                kBisShortReason[(gBisShort < (sizeof(kBisShortReason) / sizeof(kBisShortReason[0])))
+                                                    ? gBisShort : 0]);
         if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
     }
     const uint32_t n = gTraceRing.count;
@@ -2084,6 +2122,123 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
         gBis9440f[gBis9440fN].stage  = c;
         gBis9440f[gBis9440fN].ret    = ret;
         ++gBis9440fN;
+    }
+    // R33 扩读（2026-10-18）：9 个纯标量（**只取证，严禁任何置位/行为改动**）。
+    //  【为什么挂在这里】`ipi_gvm_sw_init`（`0x98125`）**没有任何 `callq` 调用者**——本卡亲核：
+    //  它是被 `0x9440f` 的**跳转表**尾跳进入的（`0x9440f` client=5／stage=0 分支：
+    //  `94571`→stage 表 `0x94e00`[0]=`0x94a5b`：`movq %r14,%rdi ; callq 0x98050 ; jmp 0x98125`）。
+    //  ⇒ **`0x98125` 的入参 `rdi` ＝ `0x98050(a)` ＝ `*(a + 8 + 5*8)` ＝ `*(a+48)`**，
+    //     其中 `a` 就是**本 wrapper 的 arg0**。⇒ 本处可逐字复现整条链，**无需新增 wrapper**。
+    //  【读链（全部逐字核对反汇编，逐级自备空守卫、短路即出）】
+    //    subobj = 0x98050(a)                 = *(a+48)                    ; L1（Apple 侧有守卫，我方自备）
+    //    host   = *(subobj)                                               ; L1b
+    //    slot1  = 0x8b4bf(host) = 0x8bbc4(*(host),1) = *(*(host)+16+1*24) ; L2（Apple 双重守卫）
+    //    root   = *(host)                                                 ; L3a（= 0x8bbc4 的 base）
+    //    o3     = *(root+88)    = *(root + 16 + 3*24)                     ; TTL 资源槽 3
+    //    o4     = *(root+112)   = *(root + 16 + 4*24)                     ; TTL 资源槽 4
+    //    obj14  = *(o4+0x78)    = 0x93980(o4,14) = *(o4 + 8 + 14*8)       ; 客户端槽 14（MES）
+    //    fn112  = *(obj14+112)                                            ; 提交方法指针
+    //    v176   = *(u32*)(o3+176)                                         ; **能力位**（本轮主目标）
+    //    record = 0x958d8(host,5) = *(u32*)… 池记录（sub 号 A／载荷 X）
+    //    A = *(u32*)(record+4) ; X = *(u32*)(record+44)
+    //    fn600/fn616 = *(u64*)(slot1+600) / *(u64*)(slot1+616)            ; 第五出口的 ctx 与提交函数
+    //  ⚠ **纯内存读**：不加 SYSLOG、不新增 wrapper、不改任何返回值/ABI、不参与时序。
+    //  ⚠ 只在 client==5 && stage==0 时读（那正是 `0x98125` 的入口形态）⇒ 语义对齐、零多余扰动。
+    if (gTtlBisect && b == 5 && c == 0 && gBisHit == 0) {
+        const auto setShort = [](const UInt32 r) {
+            if (gBisShort == kBisShortNone) { gBisShort = r; }
+        };
+        if (!nredKernelPtrOk(a)) { setShort(kBisShortArg); }
+        else {
+            const UInt8* const A = static_cast<const UInt8*>(a);
+            // L1：subobj = *(a+48)（等价于 Apple 的 `0x98050(a)`）
+            void* subobj = reinterpret_cast<void*>(*reinterpret_cast<const UInt64*>(A + 48));
+            if (!nredKernelPtrOk(subobj)) { setShort(kBisShortSub); subobj = nullptr; }
+            if (subobj != nullptr) {
+                gBisSub = reinterpret_cast<UInt64>(subobj);
+                // L1b：host = *(subobj)
+                void* host = *reinterpret_cast<void* const*>(subobj);
+                if (!nredKernelPtrOk(host)) { setShort(kBisShortHost); host = nullptr; }
+                if (host != nullptr) {
+                    gBisHost = reinterpret_cast<UInt64>(host);
+                    const UInt8* const H = static_cast<const UInt8*>(host);
+                    // L3a：root = *(host)（0x8bbc4 的 base 口径）
+                    void* root = *reinterpret_cast<void* const*>(host);
+                    // L2：slot1 = 0x8b4bf(host) = 0x8bbc4(*(host), 1) = *(root + 16 + 1*24)
+                    void* slot1 = nullptr;
+                    if (nredKernelPtrOk(root)) {
+                        const UInt8* const R = static_cast<const UInt8*>(root);
+                        slot1 = reinterpret_cast<void*>(*reinterpret_cast<const UInt64*>(R + 16 + 1 * 24));
+                    }
+                    if (!nredKernelPtrOk(slot1)) { setShort(kBisShortSlot1); slot1 = nullptr; }
+                    if (slot1 != nullptr) {
+                        const UInt8* const S = static_cast<const UInt8*>(slot1);
+                        gBisFn600 = *reinterpret_cast<const UInt64*>(S + 600);
+                        gBisFn616 = *reinterpret_cast<const UInt64*>(S + 616);
+                    }
+                    if (!nredKernelPtrOk(root)) { setShort(kBisShortRoot); root = nullptr; }
+                    if (root != nullptr) {
+                        const UInt8* const R = static_cast<const UInt8*>(root);
+                        gBisO3 = *reinterpret_cast<const UInt64*>(R + 88);
+                        gBisO4 = *reinterpret_cast<const UInt64*>(R + 112);
+                        // obj14 = *(o4+0x78)（＝ `0x93980(o4,14)`）
+                        void* o4 = reinterpret_cast<void*>(gBisO4);
+                        if (nredKernelPtrOk(o4)) {
+                            const UInt8* const O4 = static_cast<const UInt8*>(o4);
+                            gBisObj14 = *reinterpret_cast<const UInt64*>(O4 + 0x78);
+                            void* obj14 = reinterpret_cast<void*>(gBisObj14);
+                            if (nredKernelPtrOk(obj14)) {
+                                gBisFn112 = *reinterpret_cast<const UInt64*>(
+                                    static_cast<const UInt8*>(obj14) + 112);
+                            }
+                        }
+                        // v176 = *(u32*)(o3+176)（主目标；o3 为空则保持哨兵）
+                        void* o3 = reinterpret_cast<void*>(gBisO3);
+                        if (nredKernelPtrOk(o3)) {
+                            gBisV176 = *reinterpret_cast<const UInt32*>(
+                                static_cast<const UInt8*>(o3) + 176);
+                        }
+                    }
+                    // record = 0x958d8(host, 5)：**逐字复刻 Apple 的算式**（本卡亲核 `958eb..95921`）：
+                    //   pool = 0x8bb9f(*(host), 7) = *( *(*(host)) + 16 + 7*24 )    ; `958eb..958f3`
+                    //   idx  = *(u32*)(pool + (5<<5))                                ; `95902/95906`
+                    //   idx == 0xFFFFFFFF ⇒ 未装配（返 0）                            ; `9590e/95911`
+                    //   **record = *(u64*)(pool+608) + 3652 * idx**                  ; `95913/9591a`
+                    //     ⚠ 与"pool + 608*idx"**不是**同一式（我先前写错过，已按机器码改正）。
+                    void* pool = nullptr;
+                    {
+                        void* inner = *reinterpret_cast<void* const*>(host);
+                        if (nredKernelPtrOk(inner)) {
+                            const UInt8* const IN = static_cast<const UInt8*>(inner);
+                            // 0x8bb9f(rdi=*(host), 7) = *(  *( *(host) ) + 16 + 7*24 )
+                            void* base = reinterpret_cast<void*>(*reinterpret_cast<const UInt64*>(IN));
+                            if (nredKernelPtrOk(base)) {
+                                pool = reinterpret_cast<void*>(
+                                    *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(base) + 16 + 7 * 24));
+                            }
+                        }
+                    }
+                    if (!nredKernelPtrOk(pool)) { setShort(kBisShortRec); }
+                    else {
+                        const UInt8* const P = static_cast<const UInt8*>(pool);
+                        const UInt32 idx = *reinterpret_cast<const UInt32*>(P + (5 << 5));
+                        if (idx == 0xFFFFFFFFU) { setShort(kBisShortRec); }
+                        else {
+                            const UInt64 recAddr = *reinterpret_cast<const UInt64*>(P + 608)
+                                                 + 3652ULL * static_cast<UInt64>(idx);
+                            void* rec = reinterpret_cast<void*>(recAddr);
+                            if (!nredKernelPtrOk(rec)) { setShort(kBisShortRec); }
+                            else {
+                                const UInt8* const RC = static_cast<const UInt8*>(rec);
+                                gBisA = *reinterpret_cast<const UInt32*>(RC + 4);
+                                gBisX = *reinterpret_cast<const UInt32*>(RC + 44);
+                            }
+                        }
+                    }
+                }
+            }
+            gBisHit = 1;   // 已走过一次（不覆盖，取"第一次"形态）
+        }
     }
     // 只读观测：`0x9440f` 模式 20B 入口，返回 0=失败、非 0=成功。门控 `-NRedAccelLog`。
     //
