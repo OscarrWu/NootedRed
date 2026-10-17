@@ -153,6 +153,12 @@ static const UInt32 kBisNone32 = 0xFFFFFFFFU;
 static UInt64 gBisO3 = 0, gBisO4 = 0, gBisObj14 = 0, gBisFn112 = 0;
 static UInt64 gBisFn600 = 0, gBisFn616 = 0, gBisSub = 0, gBisHost = 0;
 static UInt32 gBisV176 = kBisNone32, gBisA = kBisNone32, gBisX = kBisNone32;
+// ★ R34 要求：`v176` 的"**是否真读过**"标志。
+//  为什么需要：R15 的 `v176=ffffffff` 既可能是"真值恰为 0xFFFFFFFF"也可能是"未读的哨兵"
+//  ⇒ **两者不可区分**，本轮判读困难的一半原因即在此。
+//  ⇒ 语义：`vb=1` ⇒ `v176` 是**真读到的值**（哪怕它恰等于 0xFFFFFFFF）；
+//          `vb=0` ⇒ `v176` 是**初始哨兵**，不得当作任何真值使用。
+static UInt32 gBisV176Read = 0;
 static UInt32 gBisHit = 0;   // 本扩读是否命中（1＝走到了 client5/stage0 且各前置非空；0＝未命中/未走到）
 static UInt32 gBisShort = 0; // 短路原因码（**只记首次**）：0=无
 enum : UInt32 {
@@ -160,11 +166,15 @@ enum : UInt32 {
     kBisShortArg    = 1,   // L0：`wrapMode9440f` 的 arg0 为空 ⇒ 无从下手
     kBisShortSub    = 2,   // L1：`subobj = *(a+48)`（＝`0x98050(a)`）为空
     kBisShortHost   = 3,   // L1b：`host = *(subobj)` 为空
-    kBisShortSlot1  = 4,   // L2：`slot1 = 0x8b4bf(host)`（＝`*(host)+16+1*24`）为空
+    kBisShortSlot1  = 4,   // L2：`slot1 = *( *(root) + 40 )` 为空（R34 修正①）
     kBisShortRoot   = 5,   // L3a：`root = *(host)` 为空
     kBisShortRec    = 6,   // L3b：`record = 0x958d8(host,5)` 为空
+    kBisShortRootIn = 7,   // ★R34 新增级：`rootIn = *(root)`（`0x8b4bf` 内那一次解引用）为空
+    kBisShortCtx    = 8,   // ★R34 新增级：`ctx = *(slot1+600)` 为空
+    kBisShortBase3  = 9,   // ★R34 新增级：`base3 = *(ctx)`（`0x8b8e7` 内那一次解引用）为空
 };
-static const char* const kBisShortReason[] = {"none", "arg", "sub", "host", "slot1", "root", "rec"};
+static const char* const kBisShortReason[] = {"none", "arg", "sub", "host", "slot1", "root", "rec",
+                                              "rootIn", "ctx", "base3"};
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -363,7 +373,7 @@ int nredTraceFlush(int secTag)
                                 "Ee8=%llx r28=%llx r30=%llx s2c=%u s3c=%u "
                                 "p1=%u/%u/%u p2=%u/%u/%u p3=%u/%u/%u "
                                 "o3=%llx o4=%llx c14=%llx f112=%llx f600=%llx f616=%llx "
-                                "v176=%08x a=%u x=%u hit=%u sh=%s\n",
+                                "v176=%08x vb=%u a=%u x=%u hit=%u sh=%s\n",
                                 static_cast<unsigned>(gC4n), static_cast<unsigned>(gC4ret),
                                 static_cast<unsigned>(gC4a4), static_cast<unsigned>(gC4b4),
                                 static_cast<unsigned>(gC4c4),
@@ -388,7 +398,7 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gBisFn112),
                                 static_cast<unsigned long long>(gBisFn600),
                                 static_cast<unsigned long long>(gBisFn616),
-                                static_cast<unsigned>(gBisV176),
+                                static_cast<unsigned>(gBisV176), static_cast<unsigned>(gBisV176Read),
                                 static_cast<unsigned>(gBisA), static_cast<unsigned>(gBisX),
                                 static_cast<unsigned>(gBisHit),
                                 kBisShortReason[(gBisShort < (sizeof(kBisShortReason) / sizeof(kBisShortReason[0])))
@@ -2162,13 +2172,30 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                 if (host != nullptr) {
                     gBisHost = reinterpret_cast<UInt64>(host);
                     const UInt8* const H = static_cast<const UInt8*>(host);
-                    // L3a：root = *(host)（0x8bbc4 的 base 口径）
+                    // ★ R34 修正（2026-10-18）：本块原链**少一层解引用**，R15 的"槽系"7 个读数
+                    //   （o3/o4/c14/f112/f600/f616/v176）因此**全部无效**。两处偏差（本卡逐字亲核）：
+                    //   偏差① `slot1`：Apple `982ad..982b3` 传 **root＝*(host)** 给 `0x8b4bf`，
+                    //          而 `0x8b4bf` **内部再解一次引用**（`8b4c8: movq (%rdi),%rdi`）
+                    //          ⇒ **slot1 ＝ *( *(root) + 16 + 1*24 ) ＝ *( *(root) + 40 )**；
+                    //          原实现读 `*(root+40)` ⇒ 少一层（这正是 R15 `sh=slot1` 短路的原因）。
+                    //   偏差② `o3/o4`：Apple `0xa3014(ctx)` 经 `0x8b8e7(ctx)` ⇒ **`base3 ＝ *(ctx)`**
+                    //          ⇒ **o3 ＝ *( base3 + 16 + 3*24 ) ＝ *( *(ctx) + 88 )**；
+                    //          原实现误用 `root` 作 base ⇒ base 完全不同。
+                    //  （R33 §4.1 的规格此处本身有误，已由 R34 §0.4 更正 ⇒ 以本实现的机器码为准。）
+                    // L3a：root = *(host)
                     void* root = *reinterpret_cast<void* const*>(host);
-                    // L2：slot1 = 0x8b4bf(host) = 0x8bbc4(*(host), 1) = *(root + 16 + 1*24)
+                    if (!nredKernelPtrOk(root)) { setShort(kBisShortRoot); root = nullptr; }
+                    // ★新增级：`rootIn = *(root)`（对应 `0x8b4bf` 内部那一次解引用）⇒ 自备守卫
+                    void* rootIn = nullptr;
+                    if (root != nullptr) {
+                        rootIn = *reinterpret_cast<void* const*>(root);
+                        if (!nredKernelPtrOk(rootIn)) { setShort(kBisShortRootIn); rootIn = nullptr; }
+                    }
+                    // L2：slot1 = 0x8b4bf(root) = *( *(root) + 40 )
                     void* slot1 = nullptr;
-                    if (nredKernelPtrOk(root)) {
-                        const UInt8* const R = static_cast<const UInt8*>(root);
-                        slot1 = reinterpret_cast<void*>(*reinterpret_cast<const UInt64*>(R + 16 + 1 * 24));
+                    if (rootIn != nullptr) {
+                        slot1 = reinterpret_cast<void*>(
+                            *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(rootIn) + 16 + 1 * 24));
                     }
                     if (!nredKernelPtrOk(slot1)) { setShort(kBisShortSlot1); slot1 = nullptr; }
                     if (slot1 != nullptr) {
@@ -2176,12 +2203,24 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                         gBisFn600 = *reinterpret_cast<const UInt64*>(S + 600);
                         gBisFn616 = *reinterpret_cast<const UInt64*>(S + 616);
                     }
-                    if (!nredKernelPtrOk(root)) { setShort(kBisShortRoot); root = nullptr; }
-                    if (root != nullptr) {
-                        const UInt8* const R = static_cast<const UInt8*>(root);
-                        gBisO3 = *reinterpret_cast<const UInt64*>(R + 88);
-                        gBisO4 = *reinterpret_cast<const UInt64*>(R + 112);
-                        // obj14 = *(o4+0x78)（＝ `0x93980(o4,14)`）
+                    // ctx = *(slot1+600)（第五出口的 rdi；`982b8: movq 600(%rax),%r14`）
+                    void* ctx = nullptr;
+                    if (slot1 != nullptr) {
+                        ctx = reinterpret_cast<void*>(
+                            *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(slot1) + 600));
+                        if (!nredKernelPtrOk(ctx)) { setShort(kBisShortCtx); ctx = nullptr; }
+                    }
+                    // ★新增级：base3 = *(ctx)（对应 `0x8b8e7` 内部那一次解引用）⇒ 自备守卫
+                    void* base3 = nullptr;
+                    if (ctx != nullptr) {
+                        base3 = *reinterpret_cast<void* const*>(ctx);
+                        if (!nredKernelPtrOk(base3)) { setShort(kBisShortBase3); base3 = nullptr; }
+                    }
+                    if (base3 != nullptr) {
+                        const UInt8* const B3 = static_cast<const UInt8*>(base3);
+                        gBisO3 = *reinterpret_cast<const UInt64*>(B3 + 16 + 3 * 24);
+                        gBisO4 = *reinterpret_cast<const UInt64*>(B3 + 16 + 4 * 24);
+                        // obj14 = *(o4+0x78)（＝ `0x93980(o4,14)`＝`0x9bff9`）
                         void* o4 = reinterpret_cast<void*>(gBisO4);
                         if (nredKernelPtrOk(o4)) {
                             const UInt8* const O4 = static_cast<const UInt8*>(o4);
@@ -2192,11 +2231,13 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                                     static_cast<const UInt8*>(obj14) + 112);
                             }
                         }
-                        // v176 = *(u32*)(o3+176)（主目标；o3 为空则保持哨兵）
+                        // v176 = *(u32*)(o3+176)：**主目标**。
+                        //  ⚠ R34 要求：必须能区分"真读过"与"未读的哨兵" ⇒ 另置 `gBisV176Read`。
                         void* o3 = reinterpret_cast<void*>(gBisO3);
                         if (nredKernelPtrOk(o3)) {
                             gBisV176 = *reinterpret_cast<const UInt32*>(
                                 static_cast<const UInt8*>(o3) + 176);
+                            gBisV176Read = 1;   // ← 真读过（v176 从此可信，即使值恰为 0xFFFFFFFF）
                         }
                     }
                     // record = 0x958d8(host, 5)：**逐字复刻 Apple 的算式**（本卡亲核 `958eb..95921`）：
