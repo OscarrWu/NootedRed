@@ -92,6 +92,20 @@ static UInt32  gIpSeqN = 0;     // `0x929ac` 调用总计数
 static UInt64  gSeq1RA = 0;     static UInt32 gSeq1Sub = 0xFFFFFFFFU; static UInt32 gSeq1Al = 0xFFFFFFFFU;
 static UInt64  gSeq2RA = 0;     static UInt32 gSeq2Sub = 0xFFFFFFFFU; static UInt32 gSeq2Al = 0xFFFFFFFFU;
 static UInt64  gSeq3RA = 0;     static UInt32 gSeq3Sub = 0xFFFFFFFFU; static UInt32 gSeq3Al = 0xFFFFFFFFU;
+// B95（2026-10-18）：基础启动序列补入（`0xa3138`）的**执行确认通道**标量。
+//  只写标量（不入环、不打印）⇒ 由 `nredTraceFlush` 的头部区汇总成一行 `[nredInsert]`。
+//  哨兵语义：`gInsApplied==0 && gInsSkip==0` ⇒ 本行不输出 ⇒ **门控关闭态输出逐字不变**。
+static UInt32 gInsApplied = 0;             // 替补成功次数
+static UInt32 gInsIdx     = 0xFFFFFFFFU;   // 最近一次替补的 `idx`（哨兵＝尚未发生）
+static UInt32 gInsSkip    = 0;             // skip 原因码（**只记首次**，免被后续调用覆盖）
+enum : UInt32 {
+    kInsSkipNone    = 0,   // 无 skip
+    kInsSkipDev     = 1,   // 本机键不匹配（device_id≠0x15BF 或 revision≠0xC7）
+    kInsSkipIdx     = 2,   // `idx ∉ {0,1}`（Apple 亦在此直接失败；我方不介入）
+    kInsSkipOutNull = 3,   // 出参 `out` 为空
+    kInsSkipOutSet  = 4,   // `*out` 非 0 ⇒ Apple 已装值 ⇒ **不覆盖**（既有纪律）
+};
+static const char* const kInsSkipReason[] = {"none", "dev-mismatch", "idx", "out-null", "out-set"};
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -251,6 +265,19 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gSeq3RA), static_cast<unsigned>(gSeq3Sub),
                                 static_cast<unsigned>(gSeq3Al));
         if (n6 > 0) { off += (static_cast<size_t>(n6) < cap) ? static_cast<size_t>(n6) : cap; }
+    }
+    // B95 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
+    //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
+    //  哨兵控制：`gInsApplied==0 && gInsSkip==0` ⇒ **不追加本行** ⇒ **门控关闭态输出逐字不变**。
+    //  ⚠ 只读：只读三个我方标量（由 `wrapDevGetBaseSwipSeq` 写入），**不解引用任何 Apple 对象**、
+    //     不新增 SYSLOG、不增 panic 文本。单行 ≤191。
+    if ((gInsApplied != 0 || gInsSkip != 0) && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n7 = snprintf(body + off, cap, "[nredInsert] applied=%u idx=%u skip=%s\n",
+                                static_cast<unsigned>(gInsApplied), static_cast<unsigned>(gInsIdx),
+                                kInsSkipReason[(gInsSkip < (sizeof(kInsSkipReason) / sizeof(kInsSkipReason[0])))
+                                                   ? gInsSkip : 0]);
+        if (n7 > 0) { off += (static_cast<size_t>(n7) < cap) ? static_cast<size_t>(n7) : cap; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -674,6 +701,121 @@ static const UInt8 kMode6430fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  ⚠️ 勘误（2026-10-12 张力钉死）：本补丁非 step2 失败点修复——第 62 轮「链路全通」归因已被证伪（失败在 G/0x929ac/0x9440f）；nba 校验在真机路径被前置跳过分支先行跳过，补丁作用未证实（保留无害）。详见 kb/技术草案/第62轮与B21B22张力钉死-2026-10-12.md。
 static const UInt8 kIpNbaLimitOriginal[] = {0x8D, 0x51, 0xFF, 0x80, 0xFA, 0x05, 0x0F, 0x87};
 static const UInt8 kIpNbaLimitPatched[]  = {0x8D, 0x51, 0x00, 0x80, 0xFA, 0x08, 0x0F, 0x87};
+// ─────────────────────────────────────────────────────────────────────────────
+// B95（2026-10-18）：基础启动序列（SWIP）补入 —— 我方静态序表 ＋ `0xa3138` 的 pattern。
+//
+// 【为什么需要】Apple 内嵌设备信息表（`0x478180`，步长 0x50、269 条／83 键）里**没有 `0x15BF` 的记录**
+//  ⇒ `ttlDevGetBaseSwipSeq`（`0xa3138`）取不到基础启动序列 ⇒ `dev+0xE8=0` ⇒ TTL 电源服务实例建立失败
+//  ⇒ `m_hTtl` 恒 0 ⇒ panic（`Failed to get TTL RTS from HW Services`）。本卡在**唯一落点**上补一步。
+//
+// 【数据来源纪律（不得伪造）】
+//  · 序表项的**值**（client 代号与子项编号）：取自 **Apple 全表一致的客户端定义**——本卡把 Apple
+//    13 张模式 0 序表全部展开后，按"与 Apple 最近代模板 T12/T13 逐字一致"取定，**无一处我方臆造**。
+//    两处"选择项"已在下方逐项标注（client 2＝SDMA 的 `[35]`；client 10＝DMCU 的 `[16]`）。
+//  · **键值**（`0x15BF`／`9`／`0xC7`）：**全部来自本机真机实测**（`lspci-nn.txt` 的 `1002:15bf`、
+//    `sysfs-device.txt` 的 `revision=0xc7`；三键见 R10 `[ttlkey]`）。
+//  · 可复现：见 `tmp/prog/交付-Programmer-基础启动序列补入-2026-10-18.md` §3.3 的两条命令。
+//
+// 【结构（24 B/项，`client_id==0` 终止）—— 本卡亲手复核，与权威件 M-3 定稿一致】
+//    +0x00 u32 client_id ； +0x04 u32 reserved(=0) ； +0x08 u64 sub_count ； +0x10 u64 sub_ids 指针
+//  ⚠ **子项元素＝u32（不是 u64）**：Apple 表内 client 5（count=6）按 u64 读出是
+//    `0x1b0000000b / 0x4600000022 / …`（每个 u64 塞两个小整数），按 u32 读才是 `[11,27,34,70,66,28]`。
+//
+// 【Apple 19 值集合（M-4 校验用）】把 13 张模式 0 表全部展开后，Apple 用到的子项编号共 19 个：
+//    {4,11,12,15,16,26,27,28,33,34,35,36,37,39,66,70,75,76,77}
+//  我方 12 个值（35/11/27/34/70/66/28/75/4/12/16/33）全部 ∈ 该集合 ⇒ M-4 通过。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 子项编号数组（元素＝u32 ⇒ 4 字节对齐即满足；表自身因含 u64 成员天然 8 字节对齐）。
+//  ⚠ 顺序＝Apple `0x451db960`（101 条记录在用，表内最主流的一张）的**逐字顺序** `[3,5,6,8,7,2,14,9,15,10]`，
+//  ⚠ `constexpr`（非仅 `const`）：编译期校验要在常量表达式里读取它们；放只读段也正合 Apple 只读语义。
+static constexpr UInt32 kSubGvm[6]  = {11, 27, 34, 70, 66, 28};   // client 5 = GVM（13/13 表逐字一致）
+static constexpr UInt32 kSubPsp[1]  = {75};                       // client 6 = PSP
+static constexpr UInt32 kSubSmu[1]  = {4};                        // client 8 = SMU
+static constexpr UInt32 kSubGc[1]   = {11};                       // client 7 = GC（13/13 表）
+static constexpr UInt32 kSubSdma[1] = {35};                       // client 2 = SDMA【⚠ 选择项 A：备选 [35,36]】
+static constexpr UInt32 kSubMes[3]  = {11, 27, 33};               // client 14 = MES（L0 已证本机有 mes_v11_0）
+static constexpr UInt32 kSubVcn[1]  = {12};                       // client 9 = VCN（L0 已证 vcn_v4_0）
+static constexpr UInt32 kSubJpeg[1] = {12};                       // client 15 = JPEG（L0 已证 jpeg_v4_0）
+static constexpr UInt32 kSubDmcu[1] = {16};                       // client 10 = DMCU【⚠ 选择项 B：备选 [15]】
+
+// 序表项（24 B/项）。与 Apple 的布局逐字一致：{u32 client_id; u32 reserved; u64 count; u64 subs_ptr}。
+//  ⚠ `subs` 直接声明为 `const UInt32*`（而非 `const void*`）：既与"子项元素＝u32"的事实一致，
+//    又让编译期校验不必做常量表达式里非法的 `void*`→`UInt32*` 转换。
+struct NRedSwipSeqItem {
+    UInt32         clientId;
+    UInt32         reserved;
+    UInt64         count;
+    const UInt32*  subs;
+};
+
+// 模式 0 序表（本机实测 boot=0 ⇒ 运行期只走这张）。10 项 ＋ 终止项。
+static constexpr NRedSwipSeqItem kNRedSwipSeq0[] = {
+    {3,  0, 0, nullptr},          // BGM（恒在客户端；13/13 表；名单恒为空）
+    {5,  0, 6, kSubGvm},          // GVM
+    {6,  0, 1, kSubPsp},          // PSP
+    {8,  0, 1, kSubSmu},          // SMU
+    {7,  0, 1, kSubGc},           // GC
+    {2,  0, 1, kSubSdma},         // SDMA【选择项 A】
+    {14, 0, 3, kSubMes},          // MES
+    {9,  0, 1, kSubVcn},          // VCN
+    {15, 0, 1, kSubJpeg},         // JPEG
+    {10, 0, 1, kSubDmcu},         // DMCU【选择项 B】
+    {0,  0, 0, nullptr},          // 终止项（client_id==0）
+};
+// 模式 1 序表：**与 Apple 共用模式 1 表（`0x45191c40`）同形同义**——本卡实测其内容仅
+//  `{client 3, count 0}` ＋ 终止项。本机 boot=0 ⇒ 运行期不走这张；提供它是为了
+//  `idx==1` 时**不做**"复制 Apple 地址"这类不必要的耦合（复制会让我方表依赖 Apple 数据段布局）。
+static constexpr NRedSwipSeqItem kNRedSwipSeq1[] = {
+    {3, 0, 0, nullptr},           // BGM
+    {0, 0, 0, nullptr},           // 终止项
+};
+
+// ── 编译期校验（权威件 §3.4 六条自检 ＋ M-4）────────────────────────────────
+//  ② 记录级／③ 序表级／③′ M-4 全在**编译期**完成 ⇒ 真机上不存在"结构不合法却仍写入"的可能。
+//  （① 文件级不适用：无数据文件，我方数据是编译期常量。）
+namespace {
+constexpr bool nredSwipSubOk(const UInt32* const p, const UInt64 n)
+{
+    for (UInt64 i = 0; i < n; i += 1) {
+        const UInt32 v = p[i];
+        // M-4：子项编号必须 ∈ Apple 既有 19 值集合（不得出现 Apple 不认识的编号）。
+        if (v != 4 && v != 11 && v != 12 && v != 15 && v != 16 && v != 26 && v != 27 && v != 28 &&
+            v != 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 39 && v != 66 && v != 70 &&
+            v != 75 && v != 76 && v != 77) {
+            return false;
+        }
+    }
+    return true;
+}
+constexpr bool nredSwipTableOk(const NRedSwipSeqItem* const t, const UInt64 n)
+{
+    if (n == 0 || n > 32) { return false; }                 // 自检 3：项数 ≤ 32（`0x93fe3 cmpq $32,%rsi`）
+    if (t[0].clientId == 0) { return false; }               // 自检 1 首项非终止
+    if (t[n - 1].clientId != 0) { return false; }           // 自检 5 以 client_id==0 终止
+    for (UInt64 i = 0; i < n - 1; i += 1) {
+        const NRedSwipSeqItem& it = t[i];
+        if (it.clientId == 0 || it.clientId > 15) { return false; }   // 自检 1：client ∈ [1,15]
+        if (it.reserved != 0) { return false; }                       // 自检 5：reserved == 0
+        if (it.count > 64) { return false; }                          // 自检 2：子项数 ≤ 64
+        if (it.count != 0 && (it.subs == nullptr || !nredSwipSubOk(it.subs, it.count))) {
+            return false;                                             // M-4
+        }
+    }
+    return true;
+}
+static_assert(nredSwipTableOk(kNRedSwipSeq0, sizeof(kNRedSwipSeq0) / sizeof(kNRedSwipSeq0[0])),
+              "B95: 我方模式 0 序表未过编译期校验（记录级/序表级/M-4）");
+static_assert(nredSwipTableOk(kNRedSwipSeq1, sizeof(kNRedSwipSeq1) / sizeof(kNRedSwipSeq1[0])),
+              "B95: 我方模式 1 序表未过编译期校验（记录级/序表级/M-4）");
+static_assert(sizeof(NRedSwipSeqItem) == 24, "B95: 序表项必须是 24 字节（Apple 布局）");
+}  // namespace
+
+// `0xa3138`（`ttlDevGetBaseSwipSeq`）入口 20 B —— **全 macho 唯一命中**（fileoff 0xa4138 = vmaddr 0xa3138）。
+//  实测：18 B 有 12 处命中（不可用）⇒ 取 20 B（23/26/30/34 B 亦唯一，取最短）。
+static const UInt8 kDevGetBaseSwipSeqPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50,
+                                                  0x49, 0x89, 0xD6, 0x89, 0xF3, 0x49, 0x89, 0xFF, 0xE8, 0x98};
+static_assert(arrsize(kDevGetBaseSwipSeqPattern) == 20, "B95: kDevGetBaseSwipSeqPattern must be 20 bytes");
 
 static const UInt8 kCailAsicCapsTableHWLibsPattern[] = {0x6E, 0x00, 0x00, 0x00, 0x98, 0x67, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -1523,6 +1665,58 @@ bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
     }
     return ret;
 }
+// B95（2026-10-18）：`0xa3138`（`ttlDevGetBaseSwipSeq`）**介入封装**。
+//
+// 【真实签名（本卡亲手复核，见 tmp/prog/交付-…-2026-10-18.md §1）】
+//   `bool ttlDevGetBaseSwipSeq(void* obj, u32 idx, void** out)`
+//   依据：`a3142 movq %rdx,%r14`（第 3 参＝出参槽）／`a3145 movl %esi,%ebx`（第 2 参＝**u32**）／
+//         `a3147 movq %rdi,%r15`（第 1 参）／`a3152 xorl %eax,%eax`＋`a318c movb $1,%al` ⇒ **bool**；
+//         调用点 `93fb9 testb %al,%al` 按字节判。`a3154 cmpl $1,%ebx / ja` ⇒ `idx` 只能取 0/1。
+//   CALL xrefs：**全库唯一调用者 `0x93fb4`（∈ `0x93f76`）** —— 复核通过。
+//
+// 【介入方式＝最小面】**仅在原函数失败（返回 false）时**替补：
+//   · 原函数失败的两条路径（`a3179 movq $0,(%r14)` 与 `a3189` 写值后被 `a318e` 判 0）
+//     ⇒ **两种情况下 `*out` 都是 0** ⇒ 我方写入我方序表并改返回 true，**正是"在失败路径上补一步"**；
+//   · **`ret == true` 的路径逐字原样放行**：返回值、控制流、日志量全部不变。
+//   · **不覆盖 Apple 已装值**：若 `*out != 0`（理论上原函数成功时才会如此）⇒ **不介入**（既有纪律）。
+//
+// 【门控】`-NRedDevTablePatch`（**默认关**；关闭时**本 hook 根本不注册** ⇒ 行为与现状逐字一致）。
+//  判定处只读 `devTablePatchEnabled` 标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
+//
+// 【不改 ABI】只改"返回值"与"出参指向的内容"，**不改**参数个数/宽度/返回类型/调用约定。
+bool X5000HWLibs::wrapDevGetBaseSwipSeq(void* const obj, const UInt32 idx, void** const out)
+{
+    const bool ret = FunctionCast(wrapDevGetBaseSwipSeq, singleton().orgDevGetBaseSwipSeq)(obj, idx, out);
+    // ① 门控（默认关 ⇒ 本 hook 未注册，此分支永不执行）
+    // ② 原函数成功 ⇒ **逐字放行**（零扰动）
+    if (!singleton().devTablePatchEnabled || ret) { return ret; }
+    // ③ 本机匹配：只用真机实测的 device_id（与既有 HWLibs.cpp 改表同源：`NRed::singleton().getDeviceID()`）。
+    //    ⚠ 不做"伪造键匹配"——`0xa3138` 的替补不需要键作条件：表内无 `0x15BF` ⇒ 原函数必失败。
+    if (NRed::singleton().getDeviceID() != 0x15BF) {
+        if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipDev; }
+        return ret;
+    }
+    // ④ `idx` 必须是 0/1（Apple 在 `a3154 cmpl $1,%ebx / ja` 处直接失败；我方不介入别的 idx）
+    if (idx > 1) {
+        if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipIdx; }
+        return ret;
+    }
+    // ⑤ 出参槽必须可写（第四道"指针级"）
+    if (out == nullptr || !nredKernelPtrOk(out)) {
+        if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipOutNull; }
+        return ret;
+    }
+    // ⑥ 绝不覆盖 Apple 已装的值（既有纪律：B94 `wrapTtlRegIface` 同款 `*slotE0 == nullptr` 判据）
+    if (*out != nullptr) {
+        if (gInsSkip == kInsSkipNone) { gInsSkip = kInsSkipOutSet; }
+        return ret;
+    }
+    // ⑦ 替补：写我方序表并报告成功。idx=0 ⇒ 模式 0 表；idx=1 ⇒ 模式 1 表（Apple 只有这两张）。
+    *out = const_cast<NRedSwipSeqItem*>((idx == 0) ? kNRedSwipSeq0 : kNRedSwipSeq1);
+    gInsApplied += 1;
+    gInsIdx = idx;
+    return true;
+}
 
 void* X5000HWLibs::wrapTlsSwInit(void* const obj)
 {
@@ -1939,6 +2133,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // A-27（甲）线读数门控（默认关）：C2 出口延迟读 clk_mgr 读数（`gClkMgrPtr` 由
     //  `X6000FB::wrapDcClkMgrCreate` 入口存入）。解析一次存标量，仅观测、不写、不发送。
     singleton().smu13ClkLayoutEnabled = checkKernelArgument("-NRedClkLayoutReadout");
+    // B95 门控（**默认关**）：开启后在 `0xa3138` 的失败路径上补入我方基础启动序列表。
+    //  解析一次存标量，判定处只读标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
+    //  ⚠ 关闭态 ⇒ 该 hook **根本不注册**（见下方注册处）⇒ 行为与现状逐字一致。
+    singleton().devTablePatchEnabled = checkKernelArgument("-NRedDevTablePatch");
 
     NRed::singleton().hwLateInit();
 
@@ -2308,6 +2506,17 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("ip-entry-seq", kIpEntrySeqPattern, nullptr, arrsize(kIpEntrySeqPattern),
                                            0x929AC)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapIpEntrySeq, this->orgIpEntrySeq}, "ip-entry-seq");
+        }
+        // B95 介入挂点：`0xa3138`（`ttlDevGetBaseSwipSeq`；全库唯一调用者 `0x93fb4`）。
+        //  ⚠️ **仅在门控开启时注册** ⇒ 关闭态该 wrapper 完全不存在（降级正确性：行为与现状逐字一致）。
+        //  ⚠️ 不改返回值以外的 ABI；只改"返回值"与"出参指向的内容"（且仅在原函数失败时）。
+        if (singleton().devTablePatchEnabled) {
+            if (const auto from = resolveProbe("dev-get-base-swip-seq", kDevGetBaseSwipSeqPattern, nullptr,
+                                               arrsize(kDevGetBaseSwipSeqPattern), 0xA3138)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapDevGetBaseSwipSeq,
+                                                            this->orgDevGetBaseSwipSeq},
+                          "dev-get-base-swip-seq");
+            }
         }
 
         // ─── 构建身份自证（2026-10-12）：消除「部署的 kext ≠ 运行的 kext」盲区 ─────────
