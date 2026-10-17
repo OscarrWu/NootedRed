@@ -114,6 +114,32 @@ static const char* const kInsSkipReason[] = {"none", "dev-mismatch"};
 //  `X5000HWLibs::singleton()`），而执行确认戳记（O-1）必须由它输出 ⇒ 单点状态、无重复。
 //  判定处只读本标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
 static bool gDevTablePatch = false;
+
+// ── H1 观测集（2026-10-18）：`-NRedTtlBisect`（**默认关**）的四组只读读数 ──────────────
+//  目的：R13 已证"记录被采纳并使用"，但链仍断在 ③`0x9405e` 或 ④`0x929ac` 之一，
+//  离线无法再二分 ⇒ 用一轮只读观测把断点定死（规格：`tmp/tech-manager/H1时序假设与观测轮规格-2026-10-18.md` §2）。
+//  ★ 本卡**零行为**：不改任何返回值/控制流/ABI；**不新增任何 wrapper**；全部读数只写 `g*` 标量
+//    （唯一例外＝N-3 的守卫式只读解引用，与既有 `tls-swinit` 同类）。
+//  ⚠ 关态纪律：零标量写入、零戳记行、零新增解引用 ⇒ 与现状逐字一致。
+static bool gTtlBisect = false;
+// 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
+//  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
+static UInt64 gHwlibsSlide = 0;
+// N-2：`0x929ac`（判据④）的调用总次数／最近返回值／最近调用点档位／分档计数。
+//  ⚠ 调用点判别：该函数有**三个**调用点（`92956`＝判据④、`92dcf`、`92e5e`），
+//    只记"总次数/返回值"**无法归属** ⇒ 用 `__builtin_return_address(0)` 减基址后比对三档。
+//  ⚠ 纯标量、零解引用（`__builtin_return_address` 取的是寄存器，不解引用）。
+static UInt32 gC4n = 0, gC4ret = 0, gC4a4 = 0, gC4b4 = 0, gC4c4 = 0;
+static UInt64 gC4off = 0;      // 最近一次归零后的 RA 偏移（未匹配三档时供追加判据）
+static UInt32 gC4site = 0;     // 0=? ／1=判据④(0x9295B) ／2=0x92dbe(0x92DD4) ／3=0x92e28(0x92E63)
+static const char kC4Site[] = {'?', '4', 'B', 'C'};
+// N-3：`0x93f76`（tls-create）**出口**读 `Ee8/r28/r30/s2c/s3c`（在原函数返回之后读 ⇒ 取写入后的值）。
+static UInt64 gBisEe8 = 0, gBisR28 = 0, gBisR30 = 0;
+static UInt32 gBisS2c = 0, gBisS3c = 0;
+// N-4：`0x9440f` 前三次 (client, stage, ret)。该回调曾在 B25 double-fault 栈上 ⇒ 门控关时立即 return。
+struct Bis9440f { UInt32 client, stage, ret; };
+static Bis9440f gBis9440f[3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+static UInt32 gBis9440fN = 0;
 // B19：`NRED_TRACE` 的 SYSLOG 通道静音标志（默认 false）。置位/复位＝fw::NredSyslogMuteGuard
 //  （NRedFwBringupHook.hpp，仅 `-NRedFwBringup` 的 bringup 期内为真）⇒ 见 HWLibs.hpp 该符号声明处注释。
 bool gNredTraceSyslogMuted = false;
@@ -295,6 +321,41 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gInsK1), static_cast<unsigned>(gInsK2),
                                 static_cast<unsigned>(gInsK3));
         if (n7 > 0) { off += (static_cast<size_t>(n7) < cap) ? static_cast<size_t>(n7) : cap; }
+    }
+    // H1 观测集（2026-10-18）：`[ttlbisect]` 头部戳记 —— 把断点二分到 ③`0x9405e` 或 ④`0x929ac`。
+    //  **位置**：头部区（保头丢尾 ⇒ 每片必现），紧跟 `[nredInsert]` 之后、环遍历之前。
+    //  **只在门控开时产出**（关态一字不变）。
+    //  判读（规格 §3）：
+    //    · `c4a4==0` ⇒ 判据④ **从未被调用** ⇒ 断在 ③（`0x9405e`）；
+    //    · `c4a4>0 ∧ c4ret==0` ⇒ 断在 ④（`0x929ac`）；
+    //    · `Ee8≠0 ∧ r28≠0` ⇒ 我方记录已被采纳并写入 `dev+0xE8`（与 `[nredInsert] ours>0` 互证）；
+    //    · `site=?` 占多数 ⇒ 返回值语义/基址与反汇编不符 ⇒ 保留证据上报，不擅改判据。
+    //  ⚠ 零行为：只读我方标量（由三个**既有** wrapper 写入），本处**零解引用**、零 SYSLOG、零 panic 文本。
+    if (gTtlBisect && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n8 = snprintf(body + off, cap,
+                                "[ttlbisect] c4n=%u c4r=%u c4a4=%u c4b4=%u c4c4=%u site=%c off=%llx "
+                                "Ee8=%llx r28=%llx r30=%llx s2c=%u s3c=%u "
+                                "p1=%u/%u/%u p2=%u/%u/%u p3=%u/%u/%u\n",
+                                static_cast<unsigned>(gC4n), static_cast<unsigned>(gC4ret),
+                                static_cast<unsigned>(gC4a4), static_cast<unsigned>(gC4b4),
+                                static_cast<unsigned>(gC4c4),
+                                kC4Site[(gC4site < (sizeof(kC4Site) / sizeof(kC4Site[0]))) ? gC4site : 0],
+                                static_cast<unsigned long long>(gC4off),
+                                static_cast<unsigned long long>(gBisEe8),
+                                static_cast<unsigned long long>(gBisR28),
+                                static_cast<unsigned long long>(gBisR30),
+                                static_cast<unsigned>(gBisS2c), static_cast<unsigned>(gBisS3c),
+                                static_cast<unsigned>(gBis9440f[0].client),
+                                static_cast<unsigned>(gBis9440f[0].stage),
+                                static_cast<unsigned>(gBis9440f[0].ret),
+                                static_cast<unsigned>(gBis9440f[1].client),
+                                static_cast<unsigned>(gBis9440f[1].stage),
+                                static_cast<unsigned>(gBis9440f[1].ret),
+                                static_cast<unsigned>(gBis9440f[2].client),
+                                static_cast<unsigned>(gBis9440f[2].stage),
+                                static_cast<unsigned>(gBis9440f[2].ret));
+        if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -1420,6 +1481,24 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
         else if (gSeq2Sub == 0xFFFFFFFFU) { gSeq2RA = ra; gSeq2Sub = b; gSeq2Al = al; }
         else if (gSeq3Sub == 0xFFFFFFFFU) { gSeq3RA = ra; gSeq3Sub = b; gSeq3Al = al; }
     }
+    // H1 观测集 N-2（2026-10-18）：判据④ 的**调用点判别**（二分 ③/④ 的关键读数）。
+    //  为什么必须按调用点分档：`0x929ac` 有**三个**调用点，分属三个函数：
+    //    `92956`（∈`0x928f4`＝**判据④**）／`92dcf`（∈`0x92dbe`）／`92e5e`（∈`0x92e28`）
+    //  ⇒ 只记"总次数/返回值"**无法归属**（R13 的 `n=2` 就是这样被误读成"④跑过"的）。
+    //  返回地址（反汇编逐字核对）：`9295b testb %al,%al`／`92dd4 movl %eax,%r14d`／`92e63 movl (%rbx),%ecx`。
+    //  ⚠ **纯标量、零解引用**：`__builtin_return_address(0)` 取的是寄存器值，不解引用任何内存。
+    //  ⚠ 门控关 ⇒ 零写入（不进本块）。
+    if (gTtlBisect) {
+        const UInt64 ra = reinterpret_cast<UInt64>(__builtin_return_address(0));
+        const UInt64 off = (gHwlibsSlide != 0) ? (ra - gHwlibsSlide) : ra;
+        gC4off = off;
+        ++gC4n;
+        gC4ret = static_cast<UInt32>(ret & 0xFF);   // 判据④ 的真实语义＝布尔低位（调用者 `testb %al,%al`）
+        if (off == 0x9295B) { gC4site = 1; ++gC4a4; }        // ← **判据④**（`0x928f4` 内）
+        else if (off == 0x92DD4) { gC4site = 2; ++gC4b4; }   // `0x92dbe`
+        else if (off == 0x92E63) { gC4site = 3; ++gC4c4; }   // `0x92e28`
+        else { gC4site = 0; }                                 // 未匹配 ⇒ 记 `off` 原值供追加判据
+    }
     gP4 = static_cast<SInt32>(ret & 0xFF);
     return ret;
 }
@@ -1593,58 +1672,11 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
                            static_cast<unsigned long long>(t30_0));
             }
         }
-        // B59 c3dump3：判据链**修正读址**后的完整四跳读点（只读；逐跳门）。
-        //  【反汇编·确凿·逐指令依据】
-        //   0x93f76: movq %rdi,%r15 ; movq (%r15),%rbx        ⇒ A2 o1 = *(obj)
-        //   0x93faf: movq %rbx,%rdi ; 0x93fb4 callq 0xa3138   ⇒ 0xa3138 的 arg0 = *obj
-        //   0xa314a: callq 0x8b8e7                            ⇒ rdi 仍 = *obj（未被改写）
-        //   0x8b8e7: movq (%rdi),%rdi                         ⇒ A3 B  = *(*obj)   ← 早前漏掉的一跳
-        //   0x8bbc4: movq 16(%rdi,%rax,8),%rax（rax=3*3）      ⇒ A4 E  = *(B+0x58)
-        //   0xa315e: movq 232(%rcx),%rax（232=0xe8）           ⇒ A6 Ee8= *(E+0xe8)
-        //   0xa3173/a3182: addq $40 / $48                      ⇒ 表基址 = Ee8+0x28 / +0x30
-        //   0xa3186: movq (%rax),%rcx                          ⇒ 表首项
-        //   0xa3154: cmpl $1,%ebx ; ja ⇒ 失败                  ⇒ A5 arg1（>1 直接失败，必打）
-        //  ⚠️ R2：每一跳先 nredKernelPtrOk；任一不过 ⇒ 后续字段保持 0（不打哨兵行——
-        //     同一行已含各跳值，0 即"该跳未过"的可机读判据）；不解引用不合法指针。
-        if (checkKernelArgument("-NRedAccelLog")) {
-            void* const o1 = (nredKernelPtrOk(p1)) ? *reinterpret_cast<void**>(p1) : nullptr;
-            void* const B  = (nredKernelPtrOk(o1)) ? *reinterpret_cast<void**>(o1) : nullptr;
-            UInt64 E = 0, Ee8 = 0, base28 = 0, base30 = 0, t28_0 = 0, t30_0 = 0, Em0 = 0;
-            if (nredKernelPtrOk(B)) {
-                E   = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(B) + 0x58);
-                Em0 = *reinterpret_cast<UInt64*>(B);
-            }
-            void* const Ep = reinterpret_cast<void*>(E);
-            if (nredKernelPtrOk(Ep)) {
-                Ee8 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(Ep) + 0xe8);
-            }
-            void* const f = reinterpret_cast<void*>(Ee8);
-            if (nredKernelPtrOk(f)) {
-                base28 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(f) + 0x28);
-                base30 = *reinterpret_cast<UInt64*>(static_cast<UInt8*>(f) + 0x30);
-            }
-            if (nredKernelPtrOk(reinterpret_cast<void*>(base28))) {
-                t28_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base28));
-            }
-            if (nredKernelPtrOk(reinterpret_cast<void*>(base30))) {
-                t30_0 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(base30));
-            }
-            // ⚠️ 诚实标注：`param`＝本 wrapper 的**第 2 个参数（指针值）**；判据真正的
-            //   `arg1`（`0xa3154 cmpl $1,%ebx` 判的那个标量＝`0xa250b` 的返回值）在
-            //   `0x93f76` **内部**算出、wrapper 拿不到 ⇒ 本处**不伪称 arg1**，只打 param。
-            NRED_TRACE("c3dump3: obj=%llx o1=%llx B=%llx E=%llx param=%llx Ee8=%llx base28=%llx t28_0=%llx base30=%llx t30_0=%llx Em0=%llx",
-                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(p1)),
-                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(o1)),
-                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(B)),
-                       static_cast<unsigned long long>(E),
-                       static_cast<unsigned long long>(reinterpret_cast<UInt64>(param)),
-                       static_cast<unsigned long long>(Ee8),
-                       static_cast<unsigned long long>(base28),
-                       static_cast<unsigned long long>(t28_0),
-                       static_cast<unsigned long long>(base30),
-                       static_cast<unsigned long long>(t30_0),
-                       static_cast<unsigned long long>(Em0));
-        }
+        // B59 c3dump3：**已于 2026-10-18 退役**（H1 观测集卡）。
+        //  退役理由：它挂在 `0xA285F`（`wrapTtlCheckD`）上，取到的对象与 `0xa3138` 的取址链
+        //  **不同源** ⇒ 第 2 跳即断（R13 实测 `B=0`）⇒ 之后 `E/Ee8/base28/…` 全是守卫默认值 0，
+        //  **零信息**且每轮污染判读（R13 已被它误导一次）。其读数已由 **N-3**（挂既有 `tls-create`，
+        //  与 `0xa3138` 同源）取代。⇒ 删除后**净减少**一处多跳解引用，扰动面变小。
     }
     return ret;
 }
@@ -1729,6 +1761,37 @@ bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(slots)), static_cast<unsigned>(s0),
                static_cast<unsigned>(s1), static_cast<unsigned>(s2), ret ? 1 : 0);
+    }
+    // H1 观测集 N-3（2026-10-18）：`dev+0xE8` 采纳证据 ＋ 序表字段（**在原函数返回之后**读
+    //  ⇒ 取到的就是 `0x95e9f`→`0xa25de`→`a261b` 写入**之后**的值）。
+    //  为什么挂在这里（而不是旧 `c3dump3` 挂的 `0xA285F`）：本 wrapper 的 `obj` 与 `0xa3138`
+    //  的取址链**同源**（`93f98 movq (%r15),%rbx`）；旧探针挂错对象 ⇒ 第 2 跳 `B=0` ⇒ 读数全是
+    //  守卫默认值（`B=0` 伪读数已在 R13 误导过一次）⇒ 本卡同时退役 `c3dump3`。
+    //  读链（逐跳 `nredKernelPtrOk` 守卫，任一跳不过 ⇒ 后续字段保持 0）：
+    //    obj → o1=*(obj) → B=*(o1) → dev=*(B+0x58) → Ee8=*(dev+0xE8)
+    //    r28/r30 = *(Ee8+0x28/+0x30)（我方序表地址）; s2c/s3c = *(dev+0xF0+2*16/+3*16)（槽 2/3 的子项个数）
+    //  ⚠ 守卫式**只读**解引用，与既有 `tls-swinit`／旧 `c3dump` 同类；门控关 ⇒ 零解引用。
+    if (gTtlBisect) {
+        UInt64 ee8 = 0, r28 = 0, r30 = 0;
+        UInt32 s2c = 0, s3c = 0;
+        const void* const o1 = (nredKernelPtrOk(obj)) ? *reinterpret_cast<void* const*>(obj) : nullptr;
+        const void* const B  = (nredKernelPtrOk(o1)) ? *reinterpret_cast<void* const*>(o1) : nullptr;
+        void* dev = nullptr;
+        if (nredKernelPtrOk(B)) {
+            dev = reinterpret_cast<void*>(*reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(B) + 0x58));
+        }
+        if (nredKernelPtrOk(dev)) {
+            const UInt8* const d = static_cast<const UInt8*>(dev);
+            ee8 = *reinterpret_cast<const UInt64*>(d + 0xE8);
+            s2c = *reinterpret_cast<const UInt32*>(d + 0xF0 + 2 * 16);
+            s3c = *reinterpret_cast<const UInt32*>(d + 0xF0 + 3 * 16);
+        }
+        if (nredKernelPtrOk(reinterpret_cast<void*>(ee8))) {
+            const UInt8* const e = static_cast<const UInt8*>(reinterpret_cast<void*>(ee8));
+            r28 = *reinterpret_cast<const UInt64*>(e + 0x28);
+            r30 = *reinterpret_cast<const UInt64*>(e + 0x30);
+        }
+        gBisEe8 = ee8; gBisR28 = r28; gBisR30 = r30; gBisS2c = s2c; gBisS3c = s3c;
     }
     return ret;
 }
@@ -2011,6 +2074,17 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
     const UInt32 ret = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
+    // H1 观测集 N-4（2026-10-18）：记**前三次** `(client, stage, ret)`（**零解引用**，只写标量）。
+    //  ⚠️ 门控关 ⇒ 本块整段不执行（零写入、零成本）—— 本回调曾在 B25 的 double-fault 栈上
+    //  （`wrapMode9440f+0x67`）⇒ 关态绝不能增加任何栈/时间开销（规格 §2.4 硬要求）。
+    //  ⚠️ 刻意**放在既有 `-NRedAccelLog` 观测块之前、且不做早退**：早退会让关态丢掉既有日志
+    //  （违反"关态与现状逐字一致"）⇒ 用 `if (gTtlBisect)` 包住即可，两条路径互不影响。
+    if (gTtlBisect && gBis9440fN < 3) {
+        gBis9440f[gBis9440fN].client = b;
+        gBis9440f[gBis9440fN].stage  = c;
+        gBis9440f[gBis9440fN].ret    = ret;
+        ++gBis9440fN;
+    }
     // 只读观测：`0x9440f` 模式 20B 入口，返回 0=失败、非 0=成功。门控 `-NRedAccelLog`。
     //
     // ⚠️ 深栈安全约束（2026-10-12，B25 Double fault 实证）：
@@ -2200,6 +2274,13 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  解析一次存标量，判定处只读标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
     //  ⚠ 关闭态 ⇒ 该 hook **根本不注册**（见下方注册处）⇒ 行为与现状逐字一致。
     gDevTablePatch = checkKernelArgument("-NRedDevTablePatch");
+    // H1 观测集门控（**默认关**）：换落点后链仍断在 ③／④ 之一 ⇒ 用一轮只读观测把断点二分。
+    //  解析一次存标量；判定处只读标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
+    //  ⚠ 关态：零标量写入、零戳记行、零新增解引用 ⇒ 与现状逐字一致。
+    gTtlBisect = checkKernelArgument("-NRedTtlBisect");
+    // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
+    //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
+    gHwlibsSlide = static_cast<UInt64>(slide);
 
     NRed::singleton().hwLateInit();
 
