@@ -158,6 +158,17 @@ struct NRedGvmSwLast {
     int    ret;                         // 最近一次返回值
 };
 static NRedGvmSwLast gGvmSwLast = {0, 0, 0, 0, 0, 0, 0};
+// ── 观测通道修复（R64）：TTL 阶段起点强制刷一次头部记录 ＋ 确定性标记行 ────────────────────────
+//  背景（R20 实测）：8 个分片的头部四行全为 0／哨兵；根因＝**崩溃时刻没有新的刷写**（最后一次
+//  刷写 19 s、崩溃 ≈26 s）⇒ 头部区不是崩溃时刻的快照。⇒ 在本驱动**已有**包装 `wrapIpEntrySeq`
+//  （包 `0x929ac`）入口，该门控打开时：**先置幂等标志 → 写一行静态常量标记**（纯内存，保证内存环
+//  非空 ⇒ 随后的刷写**必然产出分片**）→ **触发一次刷写**。
+//  ⚠ 门控**默认关** ⇒ 关态一行都不执行（与现状逐字一致）；**不新增机器码挂钩点**；不改既有观测行
+//    的格式与语义（本卡不新增任何头部行，头部区字节数不变）。
+static bool gTraceAtIpSeq = false;    // `-NRedTraceAtIpSeq`（**默认关**；存在即开、无取值）
+static bool gFlushedAtIpSeq = false;  // 幂等：每轮最多触发一次（R6：不得刷写风暴）
+// 确定性标记文本（**静态常量、无格式符、无运行期数值**；R64 §11.3 约束①）。
+static char kIpSeqMark[] = "ip-seq: reached 0x929ac entry (trace-at-ipseq)\n";
 // N-2：`0x929ac`（判据④）的调用总次数／最近返回值／最近调用点档位／分档计数。
 //  ⚠ 调用点判别：该函数有**三个**调用点（`92956`＝判据④、`92dcf`、`92e5e`），
 //    只记"总次数/返回值"**无法归属** ⇒ 用 `__builtin_return_address(0)` 减基址后比对三档。
@@ -1657,6 +1668,14 @@ UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
 //  判假条件（同 §D.5）：逐项 `0x9440f(*(obj+8), ids[i], sub, out)` 任一项返 0 ⇒ 断言 ttl_tls.c:357 ⇒ 返 0。
 UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c)
 {
+    // 观测通道修复（R64）：该门控开时——先置幂等标志，再写一行确定性标记（纯内存 ⇒ 保证内存环非空），
+    //  最后触发一次刷写（返回值**不检查**，失败静默丢弃）；关态短路 ⇒ 零行为（R3）。
+    //  ⚠ 位置＝函数体第一行之前（早于 org 调用）；不触碰 `a`／`b`／`c`／`ret` ⇒ 返回值/控制流/ABI 不变。
+    if (gTraceAtIpSeq && !gFlushedAtIpSeq) {
+        gFlushedAtIpSeq = true;
+        nredTraceLine(kIpSeqMark, static_cast<int>(sizeof(kIpSeqMark) - 1));
+        nredTraceFlush();
+    }
     const UInt32 ret = (singleton().orgIpEntrySeq != 0)
                            ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
     // P7f 包E″：**无条件记录前 3 次**（R6 证明"按假设过滤"全部落空 ⇒ 先看真实形态再谈过滤）。
@@ -3257,6 +3276,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  ⚠ 值型启动参数 ⇒ 用 `PE_boot_args()` 逐字解析（本文件既有 B70 同源）；判定处只读位掩码标量
     //    （遵守"探针内不调 checkKernelArgument"纪律 ⇒ 此处解析一次）。
     nredSwInitIdsParse();
+    // 观测通道修复门控（**默认关**）：纯开关（存在即开、无取值）⇒ 用既有 `checkKernelArgument`。
+    //  ⚠ 判定处只读标量 `gTraceAtIpSeq`（不在包装内调用 `checkKernelArgument`，遵守既有纪律）。
+    gTraceAtIpSeq = checkKernelArgument("-NRedTraceAtIpSeq");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
