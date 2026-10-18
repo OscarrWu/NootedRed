@@ -136,6 +136,12 @@ static bool   gGvmSwInitPass = false;   // `-NRedGvmSwInitPass`（**放行开关
 static UInt32 gSwInitIdsMask = (1U << 5); // `-NRedSwInitIds` 解析结果（1..15 位掩码）＝**默认只启用模块 5**
 static UInt32 gGvmSwCalls    = 0;       // 全部调用次数（`[gvmsw] n=`；上一张卡已交付，保持语义）
 static UInt32 gSwCallN[16]   = {0};     // 各模块被调用次数（`[swi] n=`＝**按模块号计数**；索引＝模块号 1..15）
+// R98 §1（R99 S1）：**按模块结果戳记**的两个标量数组（只读；写入点＝统一入口算完 `res` 之后）。
+//  `r[id]`＝该模块**最近一次**我方实现的返回值；**初值 `0xFF`＝该 id 从未被调到我方实现**
+//    （与"返回了 255"不可混淆：`kSwRes*` 最大为 8）。
+//  `n[id]`＝该模块被调到我方实现的次数（**饱和 255**，防溢出回绕）。
+static UInt8 gSwResById[16] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+static UInt8 gSwCntById[16] = {0};
 static UInt32 gSwLastId      = 0;       // 最近一次送达的模块号（1-based；0＝从未被调到）
 static UInt32 gGvmSwInsCode  = 0;       // 安装结果码：0＝未执行（总开关关/未启用/熔断）；1＝已安装；
                                         //  2＝跳过（槽内已是我方）；3＝形态变化（三重校验③失败）；
@@ -611,6 +617,24 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gSwS1f24),
                                 static_cast<unsigned long long>(gSwHandleAddr));
         if (nH > 0) { off += (static_cast<size_t>(nH) < capH) ? static_cast<size_t>(nH) : capH; }
+    }
+    // R98 §1（R99 S1）：**按模块结果戳记** —— 与既有 `[gvmsw]`／`[swi]`／`[swihand]` 同区、同一门控。
+    //  **口径**：`r`＝16 个模块**最近一次**我方实现的返回值（`ff`＝从未被调到；`kSwRes*` 最大 8 ⇒ 不与 `ff` 混淆）；
+    //   `n`＝16 个模块的调用次数（**饱和 255**）。两串均为 16×2 位小写 hex，顺序＝模块号 0..15。
+    //  ⚠ 只读我方 BSS 标量、**零解引用**；hex 缓冲为 **static**（不占栈）；既有各行格式一字不改。
+    if ((gGvmSwInstall || gGvmSwInitPass) && off < sizeof(body)) {
+        const size_t capR = sizeof(body) - off;
+        static char rHex[33];
+        static char nHex[33];
+        static const char kHexDig[] = "0123456789abcdef";
+        for (UInt32 i = 0; i < 16; i += 1) {
+            const UInt8 rv = gSwResById[i]; rHex[i * 2] = kHexDig[rv >> 4]; rHex[i * 2 + 1] = kHexDig[rv & 0xFU];
+            const UInt8 nv = gSwCntById[i]; nHex[i * 2] = kHexDig[nv >> 4]; nHex[i * 2 + 1] = kHexDig[nv & 0xFU];
+        }
+        rHex[32] = '\0';
+        nHex[32] = '\0';
+        const int nR = snprintf(body + off, capR, "[swres] r=%s n=%s\n", rHex, nHex);
+        if (nR > 0) { off += (static_cast<size_t>(nR) < capR) ? static_cast<size_t>(nR) : capR; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -2995,6 +3019,11 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
             case 5: res = nredGvmSwInit(info, out, o8init); break;   // 模块 5＝GVM（A1–A11）
             default: break;                                          // 其余模块：**显式未实现**
         }
+    }
+    // R98 §1（S1）：按模块留存**最近一次返回值**与**调用次数**（`0xFF`＝从未被调到；计数饱和 255）。
+    if (clientId < 16) {
+        gSwResById[clientId] = static_cast<UInt8>(res);
+        if (gSwCntById[clientId] != 255) { ++gSwCntById[clientId]; }
     }
     nredSwLogCall(clientId, info, out, o8init, res);
     return res;
