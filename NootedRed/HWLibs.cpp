@@ -161,7 +161,8 @@ static UInt32 gM8N     = 0;                       // 我方模块 8 本体被进
 // R143（D2）：模块 8 的**硬件侧/回读观测**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
 //  依据 R141 §4（`[swhw8]` 字段表）＋复核 Q6（**补 `h+1736`＝槽 1、`h+1960`＝槽 29**）——正是"槽 1..29 未装"
 //  与"槽 29 未取得"的**直接读数**；**不含** `*(*(h+16)+72)` 的解引用（复核 Q6 明确禁止）。
-static UInt32 gM8H720  = 0xFFFFFFFFU;             // `*(u32*)(h+720)`（**D2 不设** ⇒ 回读应为 0，R141 §3.2）
+static UInt8  gM8H720  = 0xFFU;                   // `*(u8*)(h+720)`＝**字节标志**（**D2 不设** ⇒ 回读应为 0）；
+                                                  //  **R145/N-2**：原按 u32 读会带上相邻 3 字节、可能误判"非 0"
 static UInt64 gM8H888  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+888)`（D2-1 清零后回读）
 static UInt64 gM8H896  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+896)`（同上）
 static UInt64 gM8H904  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+904)`（同上）
@@ -708,22 +709,24 @@ int nredTraceFlush(int secTag)
         if (nm > 0) { off += (static_cast<size_t>(nm) < capM) ? static_cast<size_t>(nm) : capM; }
     }
     // R143（D2）：`[swhw8]` —— **模块 8 的硬件侧/回读观测**（R141 §4 ＋ 复核 Q6），紧跟 `[swm8]` 之后。
-    //  **产出条件＝`gM8N != 0`**（模块 8 本体真被进入）⇒ 关态一行不多；`ffffffff`／`ffffffffffffffff`＝**未读到**。
+    //  **产出条件＝`gM8N != 0`**（模块 8 本体真被进入）⇒ 关态一行不多；`ff`／`ffffffff`／`ffffffffffffffff`＝**未读到**。
+    //  ⚠ **R145/N-1 缩短**：**去掉**与 `[swm8]` 重复的 `h712`／`h1728` 两字段（同一 boot 只在其一处更省）⇒
+    //    行长落回 ≤191；`h1736`（**槽 1**）与 `h1960`（**槽 29**）**必须保留**（"槽是否被填"的直接读数）。
     //  判读要点：`h720` 应＝**0**（**D2 不设 `h+720`**，R141 §3.2——不得宣告"SMU 上下文已就绪"）；
     //    `h888/896/904/912` 应＝**0**（D2-1 清零后的回读，＝D2-2 的机械证据）；
-    //    `h1712 ≠ 0`（子对象已建）；`h1736`（**槽 1**）与 `h1960`（**槽 29**）＝"槽 1..29 未装"与
-    //    "uCode 常量未取得"的**直接读数**（两者为 0 ⇒ 坐实；复核 N-2／Q6）。
+    //    `h1712 ≠ 0`（子对象已建）；`h1736`（**槽 1**）／`h1960`（**槽 29**）为 `0` ⇒ "槽 1..29 未装"／
+    //    "uCode 常量未取得"**坐实**（复核 N-2／Q6）；`h712`／`h1728` 的判读见上一行 `[swm8]`。
     //  ⚠ **不含** `*(*(h+16)+72)` 的解引用（复核 Q6 明确禁止）；只读我方 BSS、零解引用。
     if (gM8N != 0 && off < sizeof(body)) {
         const size_t capW = sizeof(body) - off;
         const int nw = snprintf(body + off, capW,
-            "[swhw8] n=%u h712=%08x h720=%08x h888=%llx h896=%llx h904=%llx h912=%llx "
-            "h1712=%llx h1728=%llx h1736=%llx h1960=%llx\n",
+            "[swhw8] n=%u h720=%02x h888=%llx h896=%llx h904=%llx h912=%llx "
+            "h1712=%llx h1736=%llx h1960=%llx\n",
             static_cast<unsigned>(gM8N),
-            static_cast<unsigned>(gM8H712), static_cast<unsigned>(gM8H720),
+            static_cast<unsigned>(gM8H720),
             static_cast<unsigned long long>(gM8H888), static_cast<unsigned long long>(gM8H896),
             static_cast<unsigned long long>(gM8H904), static_cast<unsigned long long>(gM8H912),
-            static_cast<unsigned long long>(gM8H1712), static_cast<unsigned long long>(gM8H1728),
+            static_cast<unsigned long long>(gM8H1712),
             static_cast<unsigned long long>(gM8H1736), static_cast<unsigned long long>(gM8H1960));
         if (nw > 0) { off += (static_cast<size_t>(nw) < capW) ? static_cast<size_t>(nw) : capW; }
     }
@@ -3148,6 +3151,15 @@ static int nredSmuSwInit(void* const info, void* const out)
     __builtin_memset(L, 0, kSmuLocalBytes);                                        // #1（`64334/64339`）bzero(local,1968)
     if (I == nullptr || O == nullptr) { return kSwResNullArg; }                    // #2（`64343..6434f`）⇒ 2
     gM8N += 1;                                                                    // R129：戳记"跑过"判据
+    // R145/N-3：**入口重置**这 11 枚读数——同一 boot 内模块 8 若被进入 ≥2 次且后一次早退，戳记必须只反映
+    //  **本次**的值 ⇒ 每次进入先归哨兵，再由流程按需写入（哨兵：`0xFF`／`0xFFFFFFFF`／`0xFFFFFFFFFFFFFFFF`）。
+    gM8V612 = 0xFFFFFFFFU;
+    gM8H712 = 0xFFFFFFFFU; gM8H720 = 0xFFU;
+    gM8H1728 = 0xFFFFFFFFFFFFFFFFULL;
+    gM8H888 = 0xFFFFFFFFFFFFFFFFULL; gM8H896 = 0xFFFFFFFFFFFFFFFFULL;
+    gM8H904 = 0xFFFFFFFFFFFFFFFFULL; gM8H912 = 0xFFFFFFFFFFFFFFFFULL;
+    gM8H1712 = 0xFFFFFFFFFFFFFFFFULL;
+    gM8H1736 = 0xFFFFFFFFFFFFFFFFULL; gM8H1960 = 0xFFFFFFFFFFFFFFFFULL;
     if (*reinterpret_cast<const UInt32*>(I + 0) != 704) {                          // #3（`6435a/64361`）
         gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
     }
@@ -3278,7 +3290,7 @@ static int nredSmuSwInit(void* const info, void* const out)
     *reinterpret_cast<UInt64*>(H + 912) = 0;
     // ── D2 观测读数（戳记与下面的回读核对**共用**；全部只读，偏移 ≤ `1960+8` ⇒ 都在 1968 B 对象内）────────
     gM8H712  = *reinterpret_cast<const UInt32*>(H + 712);
-    gM8H720  = *reinterpret_cast<const UInt32*>(H + 720);
+    gM8H720  = *reinterpret_cast<const UInt8*>(H + 720);                           // R145/N-2：**按 u8 读**
     gM8H888  = *reinterpret_cast<const UInt64*>(H + 888);
     gM8H896  = *reinterpret_cast<const UInt64*>(H + 896);
     gM8H904  = *reinterpret_cast<const UInt64*>(H + 904);
