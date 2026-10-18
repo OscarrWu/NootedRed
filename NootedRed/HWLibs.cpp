@@ -125,6 +125,25 @@ static bool gTtlBisect = false;
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
 static UInt64 gHwlibsSlide = 0;
+// ── GVM 软件初始化替换（卡面 2026-10-18）：门控与"头部戳记"用的标量 ──────────────────────────
+//  门控（**默认全关**）：`-NRedGvmSwInstall`＝是否安装我方实现；`-NRedGvmSwInitPass`＝软件初始化
+//  全部真实成功后是否放行（返 0）。⚠ 关态 ⇒ 不安装、不介入、零新增日志（行为与现状逐字一致）。
+//  ⚠ 为什么放在文件头区：头部戳记在 `NRedTraceFlush*` 的头部区（本文件上方）读它们，位置早于
+//    实现本体 ⇒ 依本文件既有惯例（`gTtlBisect`／`gDevTablePatch`／`gHwlibsSlide` 同此）前置。
+static bool   gGvmSwInstall  = false;   // `-NRedGvmSwInstall`（默认关）
+static bool   gGvmSwInitPass = false;   // `-NRedGvmSwInitPass`（默认关）
+static UInt32 gGvmSwCalls    = 0;       // 我方实现被调用次数 n（**全部**调用；头部戳记主判据）
+static UInt32 gGvmSwInsCode  = 0;       // 安装动作结果码：0＝未执行（门控关/熔断）；1＝已安装；
+                                        //  2＝跳过（槽内已是我方）；3＝形态变化（三重校验③失败）；4＝subobj 非法
+static void*  gOrigGvmSwInit = nullptr; // 被替换的 Apple 实现指针（＝0x191dc＋本 kext slide）
+// 头部戳记的"**最近一次**"调用摘要：口径＝只反映**最后一次**调用（全部次数见 `gGvmSwCalls`）。
+//  ⚠ 由 `nredGvmSwLogCall` 统一更新 ⇒ **不依赖尾段日志通道**（尾段"保头丢尾"会被截断）。
+struct NRedGvmSwLast {
+    UInt64 i3656, i3664, r0, r1, o8;   // 入参摘要（最近一次）：`info+3656`／`info+3664`／记录区前 16 B／out+8 初值
+    UInt32 o0;                          // `out+0` 初值（最近一次；我方**从不写**该字段）
+    int    ret;                         // 最近一次返回值
+};
+static NRedGvmSwLast gGvmSwLast = {0, 0, 0, 0, 0, 0, 0};
 // N-2：`0x929ac`（判据④）的调用总次数／最近返回值／最近调用点档位／分档计数。
 //  ⚠ 调用点判别：该函数有**三个**调用点（`92956`＝判据④、`92dcf`、`92e5e`），
 //    只记"总次数/返回值"**无法归属** ⇒ 用 `__builtin_return_address(0)` 减基址后比对三档。
@@ -463,6 +482,32 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gBisRecib2),
                                 static_cast<unsigned>(gBisRecib2Read));
         if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
+    }
+    // GVM 软件初始化替换（2026-10-18）：`[gvmsw]` **头部戳记** —— 执行确认通道的**主判据**。
+    //  **位置**：头部区（先写、保头丢尾 ⇒ 每片归档必现），紧跟既有 `[ttlbisect]` 之后、环遍历之前。
+    //  **为什么必须在头部**（项目经理补充要求，2026-10-18）：本段"保头丢尾"，逐次日志落在尾段，
+    //   既有归档里已被实测截断（2 片尾部损坏）⇒ "我方实现有没有被调到"不能只靠尾段日志。
+    //  **口径**：`n`＝**全部**调用次数；其余字段＝**最近一次**调用的值（`n=0` ⇒ 从未被调到，
+    //   其余字段无意义）。`ins`／`orig`＝安装动作结果码与被替换的 Apple 实现地址（未安装时 orig=0）。
+    //  **只在门控开时产出**（关态一字不变；与既有 `[ttlbisect]` 同纪律：只读我方标量、零解引用）。
+    //  判读：`n>=1` ⇒ 已被调到；`ins=1` ⇒ 安装生效；`ins∈{2,3,4}` ⇒ 未安装（原因码见
+    //   `gGvmSwInsCode` 注释）；`ret=` ⇒ 最近一次返回值（0＝放行；8＝有步骤未完成；7＝门控未开…）。
+    if ((gGvmSwInstall || gGvmSwInitPass) && off < sizeof(body)) {
+        const size_t capG = sizeof(body) - off;
+        const int nG = snprintf(body + off, capG,
+                                "[gvmsw] n=%u ins=%u orig=%llx ret=%d i3656=%llx i3664=%llx "
+                                "r0=%016llx r1=%016llx o0=%u o8=%llx\n",
+                                static_cast<unsigned>(gGvmSwCalls),
+                                static_cast<unsigned>(gGvmSwInsCode),
+                                static_cast<unsigned long long>(reinterpret_cast<UInt64>(gOrigGvmSwInit)),
+                                gGvmSwLast.ret,
+                                static_cast<unsigned long long>(gGvmSwLast.i3656),
+                                static_cast<unsigned long long>(gGvmSwLast.i3664),
+                                static_cast<unsigned long long>(gGvmSwLast.r0),
+                                static_cast<unsigned long long>(gGvmSwLast.r1),
+                                static_cast<unsigned>(gGvmSwLast.o0),
+                                static_cast<unsigned long long>(gGvmSwLast.o8));
+        if (nG > 0) { off += (static_cast<size_t>(nG) < capG) ? static_cast<size_t>(nG) : capG; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -2195,17 +2240,15 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
 //    只写 `out+8`（**绝不写 `out+0`**）。返回值：2＝入参空；3＝已存在无需初始化；0＝软件初始化
 //    全部真实成功 ∧ 放行门控开；4/5/6＝我方簿记失败；7＝成功但门控未开；8＝有步骤未完成。
 //  ⚠ 栈纪律（R6）：簿记体在 BSS、日志缓冲为 static（见 `gGvmSwLog` 注释）⇒ 本块**零栈占用**。
+//  ⚠ 执行确认通道（R5；项目经理补充 2026-10-18）：**主判据＝头部戳记 `[gvmsw]`**（flush 头部区
+//    固定行，"保头丢尾" ⇒ 每片归档必现）；逐次日志（内存环尾段）保留但**不作为唯一依据**。
 //  上游对照源（行号可能漂移）：`srcs/linux-amdgpu-ref/drivers/gpu/drm/amd/amdgpu/gmc_v11_0.c`
 //   `744-866`＝`gmc_v11_0_sw_init`（逐步对照）；`723-742`＝`gmc_v11_0_gart_init`。
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-// 门控解析值（在 `processKext` 内解析一次；判定处只读标量——遵守"探针内不调 checkKernelArgument"）
-static bool  gGvmSwInstall  = false;   // `-NRedGvmSwInstall`（默认关）
-static bool  gGvmSwInitPass = false;   // `-NRedGvmSwInitPass`（默认关）
-static bool  gGvmSwFused    = false;   // 一次性熔断：回滚过 ⇒ 不再安装（R56 §C15 额外保险）
-static void* gGvmSwSlot     = nullptr; // 我方写入的槽地址（＝subobj+8），供幂等回滚
-static void* gOrigGvmSwInit = nullptr; // 被替换的 Apple 实现指针（＝0x191dc＋本 kext slide）
-static UInt32 gGvmSwCalls   = 0;       // 执行确认通道：调用序号 n
+// 安装侧内部状态（门控与头部戳记用的标量已前置在文件头区，见 `gGvmSwInstall` 处注释）：
+static bool  gGvmSwFused = false;   // 一次性熔断：回滚过 ⇒ 不再安装（R56 §C15 额外保险）
+static void* gGvmSwSlot  = nullptr; // 我方写入的槽地址（＝subobj+8），供幂等回滚
 
 // 记录区条目口径（Apple 侧同型扫描＝`0x1a9d0`／`0x1dcc9`／`0x1adf4`／`0x3d0cc`，步长 20）：
 static const UInt32 kGvmRecBytes    = 3648;  // 记录区长度（`info+4` 起；R57 §C14.1）
@@ -2253,26 +2296,41 @@ static char gGvmSwLog[192];
 
 static int nredGvmSwInit(void* info, void* out);
 
-// 执行确认通道（R5）：每次被调一行；**日志失败静默丢弃**（不改返回值、不改控制流、不改 ABI）。
-//  ⚠ 只做 snprintf＋内存环 push（零 FS／零 SYSLOG／零堆分配）；本函数自身只有几个标量。
+// 执行确认通道（R5）：① 更新"**最近一次**"摘要（供**头部戳记**；与日志通道成败无关）；
+//  ② 逐次日志一行（尾段通道，**不是**唯一依据——尾段会被截断，见头部戳记注释）。
+//  ⚠ 只做 snprintf＋内存环 push（零 FS／零 SYSLOG／零堆分配）；日志失败**静默丢弃**。
 static void nredGvmSwLogCall(const UInt32 n, const void* const info, const void* const out,
                              const UInt64 o8init, const int ret)
 {
+    UInt64 i3656 = 0, i3664 = 0, r0 = 0, r1 = 0;
+    UInt32 o0 = 0;
+    const bool ok = (info != nullptr && out != nullptr);
+    if (ok) {
+        const UInt8* const I = static_cast<const UInt8*>(info);
+        const UInt8* const O = static_cast<const UInt8*>(out);
+        i3656 = *reinterpret_cast<const UInt64*>(I + 3656);
+        i3664 = *reinterpret_cast<const UInt64*>(I + 3664);
+        r0    = *reinterpret_cast<const UInt64*>(I + 4);
+        r1    = *reinterpret_cast<const UInt64*>(I + 12);
+        o0    = *reinterpret_cast<const UInt32*>(O);
+    }
+    // 头部戳记摘要：**先存**（日志行是否落盘不影响它）
+    gGvmSwLast.i3656 = i3656; gGvmSwLast.i3664 = i3664;
+    gGvmSwLast.r0 = r0;       gGvmSwLast.r1 = r1;
+    gGvmSwLast.o0 = o0;       gGvmSwLast.o8 = o8init;  gGvmSwLast.ret = ret;
     int m = 0;
-    if (info == nullptr || out == nullptr) {
+    if (!ok) {
         m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] n=%u in=null out=null ret=%d\n",
                      static_cast<unsigned>(n), ret);
     } else {
-        const UInt8* const I = static_cast<const UInt8*>(info);
-        const UInt8* const O = static_cast<const UInt8*>(out);
         m = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
                      "[gvmsw] n=%u i3656=%llx i3664=%llx r0=%016llx r1=%016llx o0=%u o8=%llx ret=%d f=%x p=%x\n",
                      static_cast<unsigned>(n),
-                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 3656)),
-                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 3664)),
-                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 4)),
-                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 12)),
-                     static_cast<unsigned>(*reinterpret_cast<const UInt32*>(O)),
+                     static_cast<unsigned long long>(i3656),
+                     static_cast<unsigned long long>(i3664),
+                     static_cast<unsigned long long>(r0),
+                     static_cast<unsigned long long>(r1),
+                     static_cast<unsigned>(o0),
                      static_cast<unsigned long long>(o8init), ret,
                      static_cast<unsigned>(gGvmBook.failMask | gGvmBook.pendingMask),
                      static_cast<unsigned>(gGvmBook.omittedMask));
@@ -2305,13 +2363,15 @@ static void nredGvmSwUninstallSlot(void)
 
 // R2 安装动作（与本体分离：后续若确认"回调槽每客户一份"，只需扩本函数）。
 //  三重前置（缺一不装）：`subobj != 0` ∧ `orig != 0` ∧ `orig == 0x191dc＋slide`；幂等；失败记一行。
+//  结果码（`gGvmSwInsCode`，头部戳记 `ins=` 即此）：1 已安装／2 跳过（已是）／3 形态变化／4 subobj 非法。
 static void nredGvmSwInstallSlot(void* const ttlRoot)
 {
     if (ttlRoot == nullptr || gGvmSwFused) { return; }
     const void* const subobj = *reinterpret_cast<void* const*>(static_cast<const UInt8*>(ttlRoot) + 48);
     int m = 0;
     if (!nredKernelPtrOk(subobj)) {
-        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: skip r=3 subobj=%llx\n",
+        gGvmSwInsCode = 4;
+        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: skip r=4 subobj=%llx\n",
                      static_cast<unsigned long long>(reinterpret_cast<UInt64>(subobj)));
         if (m > 0) { nredTraceLine(gGvmSwLog, m); }
         return;
@@ -2320,14 +2380,16 @@ static void nredGvmSwInstallSlot(void* const ttlRoot)
         const_cast<UInt8*>(static_cast<const UInt8*>(subobj)) + 8);
     void* const cur = *slot;
     if (cur == reinterpret_cast<void*>(&nredGvmSwInit)) {   // 幂等：槽内已是我方实现 ⇒ 跳过
-        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: skip r=1 already\n");
+        gGvmSwInsCode = 2;
+        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: skip r=2 already\n");
         if (m > 0) { nredTraceLine(gGvmSwLog, m); }
         return;
     }
     const UInt64 want = 0x191dcULL + gHwlibsSlide;         // Apple 实现 `0x191dc` 的运行期地址
     if (cur == nullptr || gHwlibsSlide == 0 || reinterpret_cast<UInt64>(cur) != want) {
+        gGvmSwInsCode = 3;
         m = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
-                     "[gvmsw] install: skip r=2 form-change orig=%llx want=%llx\n",
+                     "[gvmsw] install: skip r=3 form-change orig=%llx want=%llx\n",
                      static_cast<unsigned long long>(reinterpret_cast<UInt64>(cur)),
                      static_cast<unsigned long long>(want));
         if (m > 0) { nredTraceLine(gGvmSwLog, m); }
@@ -2336,7 +2398,8 @@ static void nredGvmSwInstallSlot(void* const ttlRoot)
     gOrigGvmSwInit = cur;
     gGvmSwSlot     = slot;
     *slot          = reinterpret_cast<void*>(&nredGvmSwInit);
-    m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: orig=%llx new=%llx slot=%llx\n",
+    gGvmSwInsCode  = 1;
+    m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: r=1 orig=%llx new=%llx slot=%llx\n",
                  static_cast<unsigned long long>(reinterpret_cast<UInt64>(gOrigGvmSwInit)),
                  static_cast<unsigned long long>(reinterpret_cast<UInt64>(&nredGvmSwInit)),
                  static_cast<unsigned long long>(reinterpret_cast<UInt64>(slot)));
