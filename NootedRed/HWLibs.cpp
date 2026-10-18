@@ -2998,6 +2998,67 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     return kSwResPass;                                  // ★ 真实成功（R80 起**恢复可达**）
 }
 
+// ── 模块 8（SMU）本体：**阶段 1**（R98 §2.6）──────────────────────────────────────────────────
+//  被替换实现＝`0x6430f`（装配点 `0x9e4c9`，【反汇编·确凿】）；真实动作（R98 亲读头部）：
+//   ① *(u32*)(info+0)==704 ∧ *(u32*)(info+8)==1 ∧ *(u32*)(out+0)==80
+//      ∧ (v=*(u32*)(info+612)：若 bit3 置位，则要求 ((v>>2)|(v>>4))&1 为 1)
+//   ② 缓冲+16 ← info+696 ；缓冲+8 ← info+688
+//   ③ `0x649ee(缓冲, 1968, 1, &out)`（取/建，**需书面授权**）
+//   ④ 其后子步骤＝【未解出】  ⑤ 句柄槽＝`subobj+40`（【转引·R73】）
+//  ⚠ **阶段 1 只做 ①② 的只读部分**：③④⑤ 与句柄供给**如实登记为省略** ⇒ **恒返 6（fail-closed）**；
+//    **不得**为凑 `res=7` 而放宽（红线）。
+static int nredSmuSwInit(void* const info, void* const out)
+{
+    const UInt8* const I = static_cast<const UInt8*>(info);
+    UInt8* const O = static_cast<UInt8*>(out);
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    if (*reinterpret_cast<const UInt32*>(I + 0) != 704) { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt32*>(I + 8) != 1)   { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt32*>(O + 0) != 80)  { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
+    const UInt32 v = *reinterpret_cast<const UInt32*>(I + 612);
+    if ((v & 8U) != 0 && ((((v >> 2) | (v >> 4)) & 1U) == 0)) { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
+    // ② 两个入参字段（纯读；阶段 1 只做非零登记，不搬进对象）
+    if (*reinterpret_cast<const UInt64*>(I + 688) == 0 || *reinterpret_cast<const UInt64*>(I + 696) == 0) {
+        gGvmBook.failMask |= (1U << 15); return kSwResParseFail;
+    }
+    gGvmBook.omittedMask |= (1U << 14);   // ③ 取/建（`0x649ee`）——需书面授权，本阶段不做
+    gGvmBook.omittedMask |= (1U << 15);   // ④ 后续子步骤（【未解出】）
+    gGvmBook.omittedMask |= (1U << 16);   // ⑤ 句柄/对象未供给（`subobj+40`）
+    gGvmBook.failMask    |= (1U << 18);   // ★ fail-closed：全过也不得报成功
+    return kSwResStepFail;                // 6
+}
+
+// ── 模块 6（PSP）本体：**阶段 1**（R96 §1.2／R98 §4）──────────────────────────────────────────
+//  被替换实现＝苹果 `0x48f9c`（【转引·R58 §1.3】）；其真实动作（R96 亲读）：
+//   ① 形状校验：*(u32*)(info+0)==632 ∧ *(u32*)(info+8)==1 ∧ *(u64*)(info+616)!=0
+//                ∧ *(u64*)(info+624)!=0 ∧ *(u32*)(out+0)==16
+//   ② *(u64*)(out+8)=0（先清）
+//   ③ 取/建 PSP 对象（`0x4beba`，id 0x7E50）④ 用 `info+624` 初始化（`0x4c024`）
+//   ⑤ memcpy(obj+48, info+4, 608)   ⑥ 按版本 9..13 分派子步骤（`0x49580` 统一失败出口）
+//  ⚠ **阶段 1 只做 ①②**（零新苹果调用）；③④⑤⑥ 与"`subobj+64` 句柄供给"**如实登记为省略**
+//    ⇒ "全过"不成立 ⇒ **必然 fail-closed（返 6）**；**不得**为凑 `res=7` 而放宽（红线）。
+static int nredPspSwInit(void* const info, void* const out)
+{
+    const UInt8* const I = static_cast<const UInt8*>(info);
+    UInt8* const O = static_cast<UInt8*>(out);
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    // ① 形状校验（逐条对齐苹果 `0x48f9c` 的 `48fe0..49008`）
+    if (*reinterpret_cast<const UInt32*>(I + 0) != 632)      { gGvmBook.failMask |= (1U << 10); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt32*>(I + 8) != 1)        { gGvmBook.failMask |= (1U << 10); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt64*>(I + 616) == 0)      { gGvmBook.failMask |= (1U << 10); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt64*>(I + 624) == 0)      { gGvmBook.failMask |= (1U << 10); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt32*>(O + 0) != 16)       { gGvmBook.failMask |= (1U << 10); return kSwResParseFail; }
+    // ② 与苹果同序：先清 out+8（`4900e`）
+    *reinterpret_cast<UInt64*>(O + 8) = 0;
+    // ③④⑤⑥ 与句柄供给：**本阶段如实省略**（不调用任何苹果函数；不做硬件动作）
+    gGvmBook.omittedMask |= (1U << 10);   // 取/建 PSP 对象（0x4beba）
+    gGvmBook.omittedMask |= (1U << 11);   // 用 info+624 初始化（0x4c024）
+    gGvmBook.omittedMask |= (1U << 12);   // memcpy(obj+48, info+4, 608)
+    gGvmBook.omittedMask |= (1U << 13);   // 版本 9..13 子步骤
+    gGvmBook.failMask    |= (1U << 14);   // ★ 句柄/对象未供给 ⇒ **fail-closed（不得报成功）**
+    return kSwResStepFail;                // 6
+}
+
 // ── 统一入口（**唯一**）：按模块号分派（R60 需求 1.2）─────────────────────────────────────
 //  · 计数：`gGvmSwCalls`（全部）与 `gSwCallN[id]`（按模块号，供 `[swi] n=`）；`gSwLastId`＝本次模块号。
 //  · 模块 5 ⇒ 本体；**其余模块 ⇒ 显式"未实现"**（只记日志 ＋ **如实返回非 0**；禁止空壳成功）。
@@ -3017,6 +3078,8 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
     else {
         switch (clientId) {
             case 5: res = nredGvmSwInit(info, out, o8init); break;   // 模块 5＝GVM（A1–A11）
+            case 6: res = nredPspSwInit(info, out); break;           // 模块 6＝PSP（R96 阶段 1）
+            case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R98 阶段 1）
             default: break;                                          // 其余模块：**显式未实现**
         }
     }
