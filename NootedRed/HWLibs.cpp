@@ -158,17 +158,37 @@ struct NRedGvmSwLast {
     int    ret;                         // 最近一次返回值
 };
 static NRedGvmSwLast gGvmSwLast = {0, 0, 0, 0, 0, 0, 0};
-// ── 观测通道修复（R64）：TTL 阶段起点强制刷一次头部记录 ＋ 确定性标记行 ────────────────────────
-//  背景（R20 实测）：8 个分片的头部四行全为 0／哨兵；根因＝**崩溃时刻没有新的刷写**（最后一次
-//  刷写 19 s、崩溃 ≈26 s）⇒ 头部区不是崩溃时刻的快照。⇒ 在本驱动**已有**包装 `wrapIpEntrySeq`
-//  （包 `0x929ac`）入口，该门控打开时：**先置幂等标志 → 写一行静态常量标记**（纯内存，保证内存环
-//  非空 ⇒ 随后的刷写**必然产出分片**）→ **触发一次刷写**。
-//  ⚠ 门控**默认关** ⇒ 关态一行都不执行（与现状逐字一致）；**不新增机器码挂钩点**；不改既有观测行
-//    的格式与语义（本卡不新增任何头部行，头部区字节数不变）。
-static bool gTraceAtIpSeq = false;    // `-NRedTraceAtIpSeq`（**默认关**；存在即开、无取值）
-static bool gFlushedAtIpSeq = false;  // 幂等：每轮最多触发一次（R6：不得刷写风暴）
-// 确定性标记文本（**静态常量、无格式符、无运行期数值**；R64 §11.3 约束①）。
-static char kIpSeqMark[] = "ip-seq: reached 0x929ac entry (trace-at-ipseq)\n";
+// ── 观测通道修复（R64 ＋ 需求 v2「标记阶梯」）：三段标记，每段"先置标志 → 写一行静态标记 → 刷写" ──
+//  背景（R20 实测）：8 个分片的头部四行全为 0／哨兵；根因＝**崩溃时刻没有新的刷写**（最后一次刷写
+//  19 s、崩溃 ≈26 s）⇒ 头部区不是崩溃时刻的快照。且 v1（只在 `0x929ac` 包装入口刷一次）位于
+//  "**按模块逐个处理之前**" ⇒ 在那里刷写读到的必然是"处理之前"的旧值（0）⇒ 等于重复本轮盲点。
+//  ⇒ 本卡改为**标记阶梯**（需求 v2 R1-v2／R7–R10）：同一门控下按推进顺序**最多刷写 3 次**，每次
+//  先写一行互不相同的静态标记（纯内存 ⇒ 保证内存环非空 ⇒ 刷写**必然产出分片**）再刷写：
+//    **M1**＝`wrapIpEntrySeq` 入口（证明"进入了 TTL 阶段"）；
+//    **M2**＝`wrapMode9440f` 入口且该次调用属**模块 5**（**不额外限制 stage**；证明"安装时机出现了"；
+//      **安装动作之后** ⇒ 该片头部区能读到安装侧真实值）；
+//    **M3**＝我方替换实现被调用（唯一入口 `NRedSwInitDispatch` 函数体入口；**决定性的一条**）。
+//  ⚠ 门控**默认关** ⇒ 关态三处**一行都不执行**（与现状逐字一致）；**不新增机器码挂钩点**（M1／M2 用
+//    既有包装入口、M3 在我方自有函数体内）；**既有观测行格式与语义一字不改**（不新增任何头部行）。
+static bool gTraceAtIpSeq = false;      // `-NRedTraceAtIpSeq`（**默认关**；存在即开、无取值）
+static bool gFlushedAtIpSeq = false;    // M1 幂等：该段只触发一次
+static bool gFlushedAtIpSeqM2 = false;  // M2 幂等：该段只触发一次
+static bool gFlushedAtIpSeqM3 = false;  // M3 幂等：该段只触发一次
+// 三段标记文本（**静态常量、互不相同、分别含 M1／M2／M3 字样、无格式符、无运行期数值**；v2 R8）。
+static char kMarkM1[] = "M1: ip-seq entry reached (0x929ac)\n";
+static char kMarkM2[] = "M2: install point reached (module5)\n";
+static char kMarkM3[] = "M3: our sw-init implementation invoked\n";
+
+// 标记动作（三段共用）：**先置标志 → 写一行静态标记 → 刷写**（需求 v2 R7／R10）。
+//  ⚠ 门控判断在各**调用点**（关态连本函数都不进 ⇒ 零执行）；本函数只做这三步，
+//    **不检查刷写返回值**（失败静默丢弃，绝不影响调用方的返回值/控制流/ABI）。
+static void nredTraceMark(bool& done, char* const mark, const int len)
+{
+    if (done) { return; }
+    done = true;
+    nredTraceLine(mark, len);
+    nredTraceFlush();
+}
 // N-2：`0x929ac`（判据④）的调用总次数／最近返回值／最近调用点档位／分档计数。
 //  ⚠ 调用点判别：该函数有**三个**调用点（`92956`＝判据④、`92dcf`、`92e5e`），
 //    只记"总次数/返回值"**无法归属** ⇒ 用 `__builtin_return_address(0)` 减基址后比对三档。
@@ -1668,14 +1688,9 @@ UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
 //  判假条件（同 §D.5）：逐项 `0x9440f(*(obj+8), ids[i], sub, out)` 任一项返 0 ⇒ 断言 ttl_tls.c:357 ⇒ 返 0。
 UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c)
 {
-    // 观测通道修复（R64）：该门控开时——先置幂等标志，再写一行确定性标记（纯内存 ⇒ 保证内存环非空），
-    //  最后触发一次刷写（返回值**不检查**，失败静默丢弃）；关态短路 ⇒ 零行为（R3）。
+    // 观测通道修复（需求 v2）**M1：进入 TTL 阶段**（`0x929ac` 包装入口）⇒ 门控开时打标记并刷一次。
     //  ⚠ 位置＝函数体第一行之前（早于 org 调用）；不触碰 `a`／`b`／`c`／`ret` ⇒ 返回值/控制流/ABI 不变。
-    if (gTraceAtIpSeq && !gFlushedAtIpSeq) {
-        gFlushedAtIpSeq = true;
-        nredTraceLine(kIpSeqMark, static_cast<int>(sizeof(kIpSeqMark) - 1));
-        nredTraceFlush();
-    }
+    if (gTraceAtIpSeq) { nredTraceMark(gFlushedAtIpSeq, kMarkM1, static_cast<int>(sizeof(kMarkM1) - 1)); }
     const UInt32 ret = (singleton().orgIpEntrySeq != 0)
                            ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
     // P7f 包E″：**无条件记录前 3 次**（R6 证明"按假设过滤"全部落空 ⇒ 先看真实形态再谈过滤）。
@@ -2844,6 +2859,9 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
 //  · 入参为空 ⇒ 返 2（与苹果那版同值）。
 static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* const out)
 {
+    // 观测通道修复（需求 v2）**M3：我方替换实现被调到**（决定性的一条）⇒ 在本入口打标记并刷一次。
+    //  ⚠ 本函数是**唯一**分派入口（R60 §1.2）⇒ 任何模块的调用都会在此打标记；该分片的戳记行给出送达的模块号。
+    if (gTraceAtIpSeq) { nredTraceMark(gFlushedAtIpSeqM3, kMarkM3, static_cast<int>(sizeof(kMarkM3) - 1)); }
     gGvmSwCalls += 1;
     if (clientId < 16) { gSwCallN[clientId] += 1; }
     gSwLastId = clientId;
@@ -2867,6 +2885,12 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  门控关（默认）⇒ 本行不成立＝零行为；哪些模块安装由 `-NRedSwInitIds` 决定（默认只模块 5）。
     //  ⚠ 必须在 org（`0x9440f`）执行**之前**——否则苹果已在 handler 内读过 `*(subobj+8)`（R60 §1.1）。
     if (gGvmSwInstall) { nredSwInstallSlot(a, b, c); }
+    // 观测通道修复（需求 v2）**M2：安装点出现**（`wrapMode9440f` 入口且属**模块 5**，**不额外限制 stage**）
+    //  ⇒ 打标记并刷一次；⚠ 刻意放在**安装动作之后**（上面那行）⇒ 该片头部区能读到安装侧真实值
+    //  （`ins=`／`got=`／`exp=`）。
+    if (gTraceAtIpSeq && b == 5) {
+        nredTraceMark(gFlushedAtIpSeqM2, kMarkM2, static_cast<int>(sizeof(kMarkM2) - 1));
+    }
     const UInt32 ret = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
     // H1 观测集 N-4（2026-10-18）：记**前三次** `(client, stage, ret)`（**零解引用**，只写标量）。
     //  ⚠️ 门控关 ⇒ 本块整段不执行（零写入、零成本）—— 本回调曾在 B25 的 double-fault 栈上
