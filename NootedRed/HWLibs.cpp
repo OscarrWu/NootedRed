@@ -2329,13 +2329,13 @@ static bool gGvmSwFused = false;   // 一次性熔断：回滚过 ⇒ 不再安�
 
 // 返回值错误码（R60 §1.2；沿用模块 5 约定）
 enum : int {
-    kSwResPass        = 0,   // 全部步骤**达可用层** ∧ 放行开关开（R70：当前不可达——A8 未达可用层）
+    kSwResPass        = 0,   // 全部步骤**真实做成** ∧ 放行开关开（R80：A8 已移出判据 ⇒ 本码**恢复可达**）
     kSwResNullArg     = 2,   // 入参为空（与苹果那版同值）
     kSwResExists      = 3,   // 已存在、无需初始化（与苹果那版同值）
     kSwResAllocFail   = 4,   // 我方簿记/结构建立失败（并熔断回滚）
     kSwResParseFail   = 5,   // 记录区解析失败
     kSwResStepFail    = 6,   // 某软件初始化步骤失败（并熔断回滚）
-    kSwResPassGateOff = 7,   // 全部步骤达可用层但放行开关未开（R70：当前不可达——失败位恒非 0）
+    kSwResPassGateOff = 7,   // 全部步骤真实做成但放行开关未开（R80：失败位不再恒非 0 ⇒ 可达）
     kSwResUnimpl      = 8,   // 该模块尚未实现（本轮：模块 5 之外）
 };
 
@@ -2700,18 +2700,74 @@ static void nredSwInstallSlot(void* const obj, const UInt32 id, const UInt32 sta
     }
 }
 
+// 句柄构造所需常量与请求缓冲（R80 §3.2）：尺寸 **3776** ＝苹果 `0x19bfa` 的 size 实参／`0x1a622` 的尺寸。
+//  ⚠ 缓冲用 **BSS**（静态）：苹果那版用 3776 B **栈**缓冲（`191e5 subq $3784,%rsp`）；本项目栈纪律
+//    （帧 ≤128 B）⇒ **不照搬**（与既有"栈缓冲改 static"先例同理）。
+//  ⚠ 重入：本缓冲同一时刻只服务一次调用；本路径（TTL 初始化、模块 5）为**单线程串行**。若将来有并发
+//    调用同一实现 ⇒ **必须**改为栈缓冲或加互斥（R80 §7.3 已登记）。
+static const UInt32 kGvmHandleBytes = 3776;
+static UInt8 gGvmHandleReq[kGvmHandleBytes];
+
 // ── 模块 5（GVM）本体：A1–A11（对照 `gmc_v11_0.c:744-866`）───────────────────────────────
 //  返回值由本函数给出（错误码见 `kSwRes*`）；**计数、日志与戳记由统一入口负责**（单点）。
-//  ⚠ 契约：只读 `info` 三处（+3656／+3664／+4..+3651）；**只写 `out+8`**；不调用任何苹果函数。
+//  ⚠ 契约：只读 `info` 三处（+3656／+3664／+4..+3651）；**只写 `out+8`**；
+//    **唯一例外＝调用苹果 `0x19bfa`**（框架通用"取/建句柄"查询；理由与依据见下方 S0 块注释）。
 //  ⚠ 本函数在 FW bringup 深栈上被苹果间接调用 ⇒ 日志只走内存环（由统一入口调 `nredTraceLine`）。
 static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
 {
     const UInt8* const I = static_cast<const UInt8*>(info);
-    // 3＝已存在、无需初始化：苹果把 GVM 簿记句柄存于 `out+8`（`0x191dc` 的 `1925d` 写 0／`19281`
-    //  写指针；`0x98125` 的 X4 段 `9829e movq -48(%rbp),%rax ; 982a2 movq %rax,40(%rbx)` 搬进
-    //  `subobj+40`）⇒ 初值非 0 ⇒ 此前已初始化过。
+    // 3＝已存在、无需初始化（**我方判据**）：读入参 `out+8` 的**初值**——非 0 ⇒ 此前已初始化过
+    //  （`0x98125` 的 X4 段 `9829e movq -48(%rbp),%rax ; 982a2 movq %rax,40(%rbx)` 会把该值搬进
+    //  `subobj+40`）。
+    //  ⚠ **与苹果实现语义不同（如实写明）**：苹果的"已存在"判据来自框架 `0x19bfa` 返 1，且它在该分支
+    //    把 `out+8` **清 0** 后返 3（`1925d/19265/1926a`）；我方**保留现行判据**且**不主动清 `out+8`**
+    //    （R80 U-2 裁决）。两者的**共同点**：**都不推进链条**（返 3 被上游判为失败）⇒ **不改变链条状态**。
     if (o8init != 0) { return kSwResExists; }
     gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    // ── S0 句柄构造与回填（R80 C-4；照 `0x191dc` 的顺序，与苹果逐字一致）──────────────────────
+    //  依据：R80 §2.1（亲读 `kb/序列数据/反汇编/HWLibs_full.asm` 行 27460–27560 的 `191fa..192ae`）。
+    //  ⚠ **唯一"我方调用苹果函数"处**＝`0x19bfa`（框架通用"取/建句柄"查询）：它构造的请求**不含任何
+    //    世代表征**（R55 §1.3／R57 §1 判"可复用"），且**被替换实现自己就是这么做的**（全库仅此一处调用点）。
+    //  ⚠ **顺序不可换**：苹果把"句柄构造＋回填"放在**四个子步骤之前**（`1927d..192ae` 早于 `192b3`）。
+    //  ⚠ **不得**自建对象充当句柄（N-7）：该句柄会被苹果的清理路径 `0x19324(handle)` 按序释放。
+    if (gHwlibsSlide == 0) {                            // S0-a：kext 基址未解析 ⇒ 不可能安全调用
+        gGvmBook.failMask |= (1U << 6);
+        nredSwFini();
+        return kSwResAllocFail;
+    }
+    const UInt64 slot1 = *reinterpret_cast<const UInt64*>(I + 3664);          // info+3664（＝slot1）
+    const bool   s1ok  = nredKernelPtrOk(reinterpret_cast<const void*>(slot1));
+    const UInt64 s1f8  = s1ok ? *reinterpret_cast<const UInt64*>(slot1 + 8)  : 0;
+    const UInt64 s1f16 = s1ok ? *reinterpret_cast<const UInt64*>(slot1 + 16) : 0;
+    if (!s1ok || s1f8 == 0 || s1f16 == 0) {             // S0-b：前置校验（R80 §2.2）⇒ 不调、如实失败
+        gGvmBook.failMask |= (1U << 6);
+        nredSwFini();
+        return kSwResAllocFail;
+    }
+    __builtin_memset(gGvmHandleReq, 0, sizeof(gGvmHandleReq));                // ①请求缓冲清零（`191fa`）
+    *reinterpret_cast<UInt64*>(gGvmHandleReq + 3664) = slot1;                 // ②透传（`0x19bfa` 要读它）
+    *reinterpret_cast<UInt64*>(gGvmHandleReq + 3656) = *reinterpret_cast<const UInt64*>(I + 3656);
+    void* handle = nullptr;
+    using NRedHwlibsGetOrCreate = int (*)(void*, UInt64, UInt32, void**);
+    const NRedHwlibsGetOrCreate fnGetOrCreate =
+        reinterpret_cast<NRedHwlibsGetOrCreate>(gHwlibsSlide + 0x19bfa);      // ★ 唯一"调用苹果"处
+    const int goc = fnGetOrCreate(gGvmHandleReq, kGvmHandleBytes, 1, &handle); // ③取/建（框架）
+    if (goc == 1) {                                     // 苹果同分支（`19258/1925d/1926a`）：
+        *reinterpret_cast<UInt64*>(static_cast<UInt8*>(out) + 8) = 0;         //   出参清 0 ＋ 返 3
+        return kSwResExists;
+    }
+    if (!nredKernelPtrOk(handle)) {                     // 框架没给对象 ⇒ 如实失败
+        gGvmBook.failMask |= (1U << 6);
+        nredSwFini();
+        return kSwResAllocFail;
+    }
+    __builtin_memset(handle, 0, kGvmHandleBytes);                             // ④＝`0x1a622` 等价（R80 §2.3）
+    *reinterpret_cast<UInt64*>(static_cast<UInt8*>(out) + 8) =
+        reinterpret_cast<UInt64>(handle);                                     // ⑤回填出参（`1927d/19281`）
+    *reinterpret_cast<UInt64*>(static_cast<UInt8*>(handle) + 3664) = slot1;   // ⑥**关键**（`19285/1928c`）
+    *reinterpret_cast<UInt64*>(static_cast<UInt8*>(handle) + 3656) =
+        *reinterpret_cast<const UInt64*>(I + 3656);                           // ⑦（`19293/1929a`）
+    __builtin_memcpy(static_cast<UInt8*>(handle) + 8, I + 4, kGvmRecBytes);   // ⑧记录区 3648 B（`192a1..ae`）
 
     // ── A1 记录区解析（真实数据；对照 R57 A1）────────────────────────────────────────────
     //  条目布局＝{u32 键0, u32 键1, …}；本机世代键取自上游**本驱动自身的版本列表**
@@ -2738,9 +2794,11 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
         return kSwResParseFail;
     }
 
-    // ── A4 显存几何（对照 `:755-760`）——**本轮省略**（R57 明确"暂可省"）─────────────────────
-    //  省略理由：显存几何源＝`AmdAtomVramInfo`（由 X6000FB 阶段解析 atom/固件产生），在本回调
-    //  时点**不可达**；不做臆造值 ⇒ 如实留 0＋`omittedMask`，**不计入失败**（须在交付中写明）。
+    // ── A4 显存几何（对照 `:755-760`）——**本轮如实省略**（R57 明确"暂可省"；R80 U-3 裁决）──────────
+    //  **省略了什么**：显存几何＝`vram_width`／`vram_type`／`vram_vendor` **三步全未做**（本回调用点拿不到
+    //  数据源：它由 X6000FB 阶段解析 atom/固件产生）⇒ 字段如实留 0 ＋ `omittedMask` bit3；
+    //  **且未做任何"硬件就绪确认"**（本轮不读寄存器——红线）。⇒ **不计入失败**，但**不得**据此推断
+    //  "几何已就绪"。
     gGvmBook.vramWidth = 0; gGvmBook.vramType = 0; gGvmBook.vramVendor = 0;
     gGvmBook.vramOmitted = 1;
     gGvmBook.omittedMask |= (1U << 3);
@@ -2821,7 +2879,7 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     gGvmBook.vmidTotal    = 16;
     gGvmBook.vmRegistered = 1;      // 登记一个 VM（簿记级自检）
 
-    // ── A8 中断登记（**本轮真实实现**；对照 `gmc_v11_0.c:801-821`／`amdgpu_irq.c:422-457`）──────
+    // ── A8 中断登记（**额外步骤：不属于被替换实现的契约 ⇒ 不参与成功判定**；R76 定案／R80 R1）────
     //  上游三条（`gmc_v11_0.c:802`／`:809`／`:817`；`ih_v6_1.c:556` 属 IH 初始化阶段，不在 GMC
     //  sw_init 内 ⇒ 不做）：
     //   ① VMC(0x12) ＋ VMC_1_0__SRCID__VM_FAULT(0)  → 源＝VM fault
@@ -2838,32 +2896,31 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
         nredSwIrqAddId(kIhClientDf, kIhSrcDfEcc, kIrqSrcEcc)) {
         gIrqRegistered = 1;                                  // 三条**全部真实写入**
     }
-    // ── A8 完成判据：**只达"簿记层"，未达"可用层"** ⇒ **无条件计入未完成**（R70 M-1／需求 R1）──────
-    //  · **簿记层**：结果只写进我方簿记体（`gGvmBook`），**没有任何外部消费者**；
-    //  · **可用层**（R70 §2.1 定义）：① 有一个真实存在且身份已明的消费者；② 该消费者能据此完成其
-    //    职责；③ 有可观测判据证明"消费发生了"。
-    //  ⚠ **当前"中断登记"未达可用层**：我方登记表 `gIrqEntries[]` **没有消费者**（苹果侧中断分发器
-    //    身份【未解出】）⇒ 按需求 R1"簿记层不得计入成功"⇒ **失败位恒置位**（下面的登记动作本身照做，
-    //    不改登记逻辑；只改"它的判定层次"）。
-    //  ⚠ **恢复条件**：当"消费者身份已明 ∧ 能触发一次真实分发 ∧ 有可观测判据"三者齐备时，把下一行
-    //    换回按 `gIrqRegistered` 判定（即 `if (gIrqRegistered == 0)`）。
+    // ── A8 的结论（R80 C-3）：**登记照旧真实执行并记录，但不置任何失败位**──────────────────────
+    //  机器码依据（R76）：被替换实现 `0x191dc` 全段 82 条**不含任何 (client,src) 登记**；本 kext 内
+    //    **无 IH／SRCID 家族**（文件名串家族仅 `ipi_*.c`／`ttl_*.c`；185 条"中断"串全属 SMU/PPP 电源
+    //    管理侧）⇒ A8 是本项目按**上游 Linux 语义**多加的一步 ⇒ 它的缺失**不能让"照被替换实现做事"
+    //    被判为失败**（已删除原"置 A8 失败位（bit7）"那一行）。
+    //  ⚠ **不得**因此宣称"中断可用"：我方登记表当前**没有消费者**（苹果侧中断分发器身份【未解出】）。
+    //  ⚠ **恢复条件**（若将来要把它纳入判据）：消费者身份已明 ∧ 能触发一次真实分发 ∧ 有可观测判据齐备
+    //     ⇒ 才可换回"**按 `gIrqRegistered` 置 A8 失败位（bit7）**"的判定。
+    //  ⚠ **不得**把这三条登记改挂到 SMU/PPP 族的 `register*Interrupt` 接口（语义不等价＝红线）。
     gGvmBook.irqCount      = gIrqEntryN;               // 真实计数（写入成功几条就是几条，供判读）
     gGvmBook.irqRegistered = gIrqRegistered;
-    gGvmBook.failMask |= (1U << 7);                    // ★ 仅达簿记层（**无消费者**）⇒ 恒计未完成
-
-    // ── A9 RAS 簿记（对照 `:861`）——卡面明确"可省" ⇒ 本轮跳过并如实登记（不计入失败）──────────
+    // ── A9 RAS 簿记（对照 `:861`）——**本轮如实省略**（R57 判"可省"；R80 U-3 裁决）────────────────
+    //  **省略了什么**：RAS 簿记（错误上报相关结构）**整体未实现**（`amdgpu_gmc_ras_sw_init` 等价物），
+    //  如实登记 `rasSkipped=1` ＋ `omittedMask` bit8；**且未做任何硬件就绪确认**（不读寄存器——红线）。
+    //  ⇒ **不计入失败**，但**不得**据此推断"RAS 可用"。
     gGvmBook.rasSkipped = 1;
     gGvmBook.omittedMask |= (1U << 8);
 
-    // ── A10 回填（对照苹果 `0x1937f` 段／R57 A10）——**自 R70 起暂不回填**（M-3）────────────────
-    //  为什么不回填（三条理由，逐条对应 R70 §4.1）：
-    //   ① **诚实性**：当前"未真实完成"（A8 未达可用层）⇒ **不应把不完整对象交给下游**；
-    //   ② **双保险**：出参 `+8` 保持 0 ⇒ 苹果侧 `0x9831c`（`*(obj+40)==0`）与 `0x19324` 会**安全早退**
-    //      ⇒ 即便将来某路径意外返成功也不崩（R69 §3 #2【反汇编·确凿】）；
-    //   ③ **契约未解出**：`+3664` 只是已知的第一个要求，`0x19324` 四个前置子调对 handle 的其它要求
-    //      ＝【未解出】⇒ 现在回填＝盲交不完整对象（红线）。
-    //  ⚠ **恢复条件**：解出 handle 完整契约（`+3664` ＋ 四个前置子调）后，恢复此处的一行回填。
-    //  ⇒ 本函数**不再写 `out`**（只读契约三处与出参初值）。
+    // ── A10 回填：**已前移到 S0（照苹果顺序）**（R80 C-5）──────────────────────────────────────
+    //  `0x191dc` 的回填发生在**四个子步骤之前**（`1927d..192ae`）⇒ 我方 S0 块已逐条照做：
+    //  `out+8 = handle`（⑤）／`handle+3664 ← info+3664`（⑥，**关键**：下游 `0x19c7d` 会**无空判**读它）／
+    //  `handle+3656 ← info+3656`（⑦）／`handle+8 起 3648 B ← info+4 起`（⑧）。
+    //  ⚠ **旧 A10（`0x1937f` 段的六字段回填 `3672/3680/3688/3692/3696/3704`）不在本卡范围**：
+    //    那段代码属**另一个回调槽** `funcs[3]=0x1936e`（R57 旧 A10；R80 §2.4 亲读函数边界）⇒ 仍由苹果
+    //    自带实现执行，我方**不需要**补这六个字段。
 
     // ── 返回值判定（R60 §1.2／§2.4）：任一失败步 ⇒ 非 0；全部真实成功 ∧ 放行门控开 ⇒ 0 ──────────
     if (gGvmBook.failMask != 0) {                       // 失败 ⇒ 熔断回滚（按模块）＋对称清理（A11）
@@ -2872,15 +2929,14 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
         nredSwFini();
         return kSwResStepFail;
     }
-    // ⚠ **放行开关保留**（R70 §3／需求 R3）：`-NRedGvmSwInitPass` 的语义＝"**仅当全部步骤均达可用层**时，
-    //   才允许把成功报给苹果"。当前因上面 M-1 已使失败位恒非 0（A8 未达可用层）⇒ **本行功能上不可达**
-    //   （保留位置与语义，便于将来补齐可用层后逐轮单变量放行）。
+    // ⚠ **放行开关**（R70 §3／需求 R3）：`-NRedGvmSwInitPass` 的语义＝"**全部步骤真实做成之后**，是否
+    //    允许把成功报给苹果"的**最终闸门**（默认关 ⇒ 逐轮单变量对照）。
     if (!gGvmSwInitPass) { return kSwResPassGateOff; }
-    // ⚠ **双保险**（R70 M-2）：**"报成功"当前不可达**——M-1 使失败位恒非 0（A8 未达可用层），再加本行
-    //   也返回失败码 ⇒ **"成功码"（本枚举中值为 0 者）在当前代码中没有任何可达出口**。
-    //   **保留其位置与语义**，待"可用层"补齐后恢复"成功码"返回。
-    //   待补项：R69 #1（`out+8` 对象的 `+3664` 契约）＋ 未解出项 U-1（handle 完整契约）。
-    return kSwResStepFail;                              // 待可用层补齐后恢复"成功码"返回
+    // ★ **成功出口**（R80 C-6／需求 R1＋R3）：走到这里 ⇒ 上面每一步都**真实做成**——S0（框架取/建句柄
+    //    ＋清零＋回填出参＋两个字段搬移＋记录区拷贝）＋ A1／A2／A3／A5／A6／A7 全部成功；
+    //    A4／A9 为**如实登记的省略项**（不计入失败；注释已写明省略内容与"未做硬件就绪确认"）；
+    //    A8 为**不参与判定的额外步骤**（登记照做、无消费者、不得宣称"中断可用"）⇒ 报成功（0）。
+    return kSwResPass;                                  // ★ 真实成功（R80 起**恢复可达**）
 }
 
 // ── 统一入口（**唯一**）：按模块号分派（R60 需求 1.2）─────────────────────────────────────
