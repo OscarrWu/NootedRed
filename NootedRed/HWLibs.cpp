@@ -2178,8 +2178,352 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
     return ret;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// 【GVM 软件初始化替换】我方实现（本体）＋ 安装/回滚动作（2026-10-18；卡面 §三 R1–R7）
+//  为什么：`0x98125`（Apple 的 GVM sw_init 主函数）唯一剩余失败出口＝它调用的回调返非 0
+//   （R51/R52）；该回调槽 `subobj+8` 现值＝Apple 自家实现 `0x191dc`，对 RDNA3 结构性不成立
+//   （R54/R57）⇒ 由我方承担"软件初始化"职责：把软件状态与内存结构准备好（尺寸、缓冲对象、
+//   地址转换表结构及其**内存可见表项**、虚拟内存、中断簿记、回填），**不含硬件上电**（R4 口径）。
+//  ⚠ 门控（R1，**默认全关**）：`-NRedGvmSwInstall`＝是否安装；`-NRedGvmSwInitPass`＝软件初始化
+//    全部真实成功后是否放行（返 0）。默认 ⇒ 不安装、不介入、零新增日志（行为与现状逐字一致）。
+//  ⚠ 安装落点（R2）：`wrapMode9440f` 入口的 client5/stage0 分支（＝`0x94a5b` 被进入的那次调用）。
+//    为什么不挂 `0x94a5b` 本体：该处"根对象"在 `%r14`（**非入参寄存器**），而本仓库的 route 机制
+//    只把入参寄存器交给 C 侧 wrapper ⇒ 在那里取不到对象；而 `wrapMode9440f` 的 arg0 就是同一个根
+//    对象（`0x9440f: 9442d movq %rdi,%r14`），时序＝"进入 client5/stage0 之后、`0x98125` 读
+//    `*(subobj+8)` 之前" ⇒ 与 R56 §3.1 落点规格**等价**（唯一性／时序／抗重装配的幂等三者同）。
+//  ⚠ 契约（R3）：`int(void* info, void* out)`；只读 `info` 的 +3656／+3664／+4..+3651；
+//    只写 `out+8`（**绝不写 `out+0`**）。返回值：2＝入参空；3＝已存在无需初始化；0＝软件初始化
+//    全部真实成功 ∧ 放行门控开；4/5/6＝我方簿记失败；7＝成功但门控未开；8＝有步骤未完成。
+//  ⚠ 栈纪律（R6）：簿记体在 BSS、日志缓冲为 static（见 `gGvmSwLog` 注释）⇒ 本块**零栈占用**。
+//  上游对照源（行号可能漂移）：`srcs/linux-amdgpu-ref/drivers/gpu/drm/amd/amdgpu/gmc_v11_0.c`
+//   `744-866`＝`gmc_v11_0_sw_init`（逐步对照）；`723-742`＝`gmc_v11_0_gart_init`。
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+// 门控解析值（在 `processKext` 内解析一次；判定处只读标量——遵守"探针内不调 checkKernelArgument"）
+static bool  gGvmSwInstall  = false;   // `-NRedGvmSwInstall`（默认关）
+static bool  gGvmSwInitPass = false;   // `-NRedGvmSwInitPass`（默认关）
+static bool  gGvmSwFused    = false;   // 一次性熔断：回滚过 ⇒ 不再安装（R56 §C15 额外保险）
+static void* gGvmSwSlot     = nullptr; // 我方写入的槽地址（＝subobj+8），供幂等回滚
+static void* gOrigGvmSwInit = nullptr; // 被替换的 Apple 实现指针（＝0x191dc＋本 kext slide）
+static UInt32 gGvmSwCalls   = 0;       // 执行确认通道：调用序号 n
+
+// 记录区条目口径（Apple 侧同型扫描＝`0x1a9d0`／`0x1dcc9`／`0x1adf4`／`0x3d0cc`，步长 20）：
+static const UInt32 kGvmRecBytes    = 3648;  // 记录区长度（`info+4` 起；R57 §C14.1）
+static const UInt32 kGvmRecStride   = 20;    // 条目步长（R56 §D3）
+static const UInt32 kGvmKeyMajor    = 11;    // 本机 GC 世代键 major（GC 11.0.x）
+static const UInt32 kGvmKeyMinorMax = 4;     // minor 上界（取自 `gmc_v11_0.c:775-779` 的版本列表）
+static const UInt32 kGvmGartSizeMB  = 512;   // GART 尺寸（上游 `amdgpu_gmc_set_gart_size(adev, SZ_512M)`）
+
+// 我方 GVM 簿记体（BSS；零堆分配、零栈占用）。字段与上游逐步对应，全表见交付文档"副作用清单"。
+struct NRedGvmSwBook {
+    // A1 记录区解析（真实数据：`info+4` 起 3648 B，步长 20，键位 +0/+4）
+    UInt32 recEntries;
+    UInt32 gfxKeyMajor, gfxKeyMinor, gfxKeyOff;      // 命中的本机世代键；0xFFFFFFFF＝未命中
+    // A2 GMC 簿记（`gmc_v11_0.c:788-789`／`:795`／`:827-828`）
+    UInt64 mcMask, pteAddrMask, vmSizeBytes;
+    UInt32 vmBlockBytes, vmLevels, vmBits, vmhubsMask;
+    // A3 两 hub 簿记（`:749`／`:751`）
+    UInt32 hubBit[2], hubReady[2];
+    UInt64 hubVaStart[2], hubVaSize[2];
+    // A4 显存几何（`:755-760`）——本轮省略（理由见本体注释），字段如实留 0＋标记
+    UInt32 vramWidth, vramType, vramVendor, vramOmitted;
+    // A5 BO 管理器簿记＋一次自检分配（`:843`）
+    UInt64 boPhys;
+    UInt32 boBytes, boRegistered;
+    // A6 GART 结构与内存可见表项（`:723-742`／`:847`）
+    UInt64 gartPhys;
+    UInt32 gartBytes, gartPtes;
+    // A7 VM 管理器簿记（`:851-859`）
+    UInt32 firstKfdVmid, vmidTotal, vmRegistered;
+    // A8 中断簿记（`:801-821`）——簿记登记；真实注册待接入 ⇒ 计入"未完成"
+    UInt32 irqCount, irqPending;
+    // A9 RAS（卡面明确"可省"）——本轮跳过，如实登记（不计入失败）
+    UInt32 rasSkipped;
+    // 逐步结果位图（bit k＝第 k 步）：失败／未完成／省略
+    UInt32 failMask, pendingMask, omittedMask;
+};
+static NRedGvmSwBook gGvmBook;                             // 我方簿记（BSS）
+static IOBufferMemoryDescriptor* gGvmBoDesc   = nullptr;   // A5：自检分配（物理连续）
+static IOBufferMemoryDescriptor* gGvmGartDesc = nullptr;   // A6：GART 表（物理连续、页对齐）
+// 日志行缓冲：**static**（不占栈）。R6 写"日志临时缓冲 ≤96 B"，但 R5 要求的 8 项字段
+//  （两个指针＋两段 64 bit 记录字＋out+0/out+8＋n＋返回值）最小取值长度已 ≥98 字符 ⇒ 96 B 内
+//  放不下；按 R6 的立法意图（栈纪律：历史 1 KB 栈缓冲溢出）与既有惯例（如 `static char line[176]`）
+//  取 static 缓冲＝**零栈占用**，长度对齐既有内存环单行容量（`TraceRing::kLineBytes`＝192）。
+static char gGvmSwLog[192];
+
+static int nredGvmSwInit(void* info, void* out);
+
+// 执行确认通道（R5）：每次被调一行；**日志失败静默丢弃**（不改返回值、不改控制流、不改 ABI）。
+//  ⚠ 只做 snprintf＋内存环 push（零 FS／零 SYSLOG／零堆分配）；本函数自身只有几个标量。
+static void nredGvmSwLogCall(const UInt32 n, const void* const info, const void* const out,
+                             const UInt64 o8init, const int ret)
+{
+    int m = 0;
+    if (info == nullptr || out == nullptr) {
+        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] n=%u in=null out=null ret=%d\n",
+                     static_cast<unsigned>(n), ret);
+    } else {
+        const UInt8* const I = static_cast<const UInt8*>(info);
+        const UInt8* const O = static_cast<const UInt8*>(out);
+        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
+                     "[gvmsw] n=%u i3656=%llx i3664=%llx r0=%016llx r1=%016llx o0=%u o8=%llx ret=%d f=%x p=%x\n",
+                     static_cast<unsigned>(n),
+                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 3656)),
+                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 3664)),
+                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 4)),
+                     static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(I + 12)),
+                     static_cast<unsigned>(*reinterpret_cast<const UInt32*>(O)),
+                     static_cast<unsigned long long>(o8init), ret,
+                     static_cast<unsigned>(gGvmBook.failMask | gGvmBook.pendingMask),
+                     static_cast<unsigned>(gGvmBook.omittedMask));
+    }
+    if (m > 0) { nredTraceLine(gGvmSwLog, m); }   // m<=0（缓冲不足等）⇒ 静默丢弃，绝不影响调用方
+}
+
+// A11 对称清理（对照上游 `723-742` 的对称释放与 Apple `0x19324` 的按序释放）：释放我方资源、
+//  复位簿记；**幂等**（重复调用安全）。仅失败路径调用（成功路径由进程生命周期持有）。
+static void nredGvmSwFini(void)
+{
+    // `complete()` 只在 `prepare()` 成功过的描述符上调用：prepare 失败者已在分配处置回 nullptr。
+    if (gGvmBoDesc != nullptr) { gGvmBoDesc->complete(); gGvmBoDesc->release(); gGvmBoDesc = nullptr; }
+    if (gGvmGartDesc != nullptr) {
+        gGvmGartDesc->complete();
+        gGvmGartDesc->release();
+        gGvmGartDesc = nullptr;
+    }
+    __builtin_memset(&gGvmBook, 0, sizeof(gGvmBook));
+}
+
+// R2 回滚（**幂等**）：把 `orig` 恢复回槽。只在"槽内仍是我方函数"时写 ⇒ 幂等、且绝不覆盖他人指针。
+static void nredGvmSwUninstallSlot(void)
+{
+    if (gGvmSwSlot != nullptr && nredKernelPtrOk(gGvmSwSlot) &&
+        *reinterpret_cast<void**>(gGvmSwSlot) == reinterpret_cast<void*>(&nredGvmSwInit)) {
+        *reinterpret_cast<void**>(gGvmSwSlot) = gOrigGvmSwInit;
+    }
+}
+
+// R2 安装动作（与本体分离：后续若确认"回调槽每客户一份"，只需扩本函数）。
+//  三重前置（缺一不装）：`subobj != 0` ∧ `orig != 0` ∧ `orig == 0x191dc＋slide`；幂等；失败记一行。
+static void nredGvmSwInstallSlot(void* const ttlRoot)
+{
+    if (ttlRoot == nullptr || gGvmSwFused) { return; }
+    const void* const subobj = *reinterpret_cast<void* const*>(static_cast<const UInt8*>(ttlRoot) + 48);
+    int m = 0;
+    if (!nredKernelPtrOk(subobj)) {
+        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: skip r=3 subobj=%llx\n",
+                     static_cast<unsigned long long>(reinterpret_cast<UInt64>(subobj)));
+        if (m > 0) { nredTraceLine(gGvmSwLog, m); }
+        return;
+    }
+    void** const slot = reinterpret_cast<void**>(
+        const_cast<UInt8*>(static_cast<const UInt8*>(subobj)) + 8);
+    void* const cur = *slot;
+    if (cur == reinterpret_cast<void*>(&nredGvmSwInit)) {   // 幂等：槽内已是我方实现 ⇒ 跳过
+        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: skip r=1 already\n");
+        if (m > 0) { nredTraceLine(gGvmSwLog, m); }
+        return;
+    }
+    const UInt64 want = 0x191dcULL + gHwlibsSlide;         // Apple 实现 `0x191dc` 的运行期地址
+    if (cur == nullptr || gHwlibsSlide == 0 || reinterpret_cast<UInt64>(cur) != want) {
+        m = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
+                     "[gvmsw] install: skip r=2 form-change orig=%llx want=%llx\n",
+                     static_cast<unsigned long long>(reinterpret_cast<UInt64>(cur)),
+                     static_cast<unsigned long long>(want));
+        if (m > 0) { nredTraceLine(gGvmSwLog, m); }
+        return;
+    }
+    gOrigGvmSwInit = cur;
+    gGvmSwSlot     = slot;
+    *slot          = reinterpret_cast<void*>(&nredGvmSwInit);
+    m = snprintf(gGvmSwLog, sizeof(gGvmSwLog), "[gvmsw] install: orig=%llx new=%llx slot=%llx\n",
+                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(gOrigGvmSwInit)),
+                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(&nredGvmSwInit)),
+                 static_cast<unsigned long long>(reinterpret_cast<UInt64>(slot)));
+    if (m > 0) { nredTraceLine(gGvmSwLog, m); }
+}
+
+// ── 我方实现本体（Apple 契约：`int(void* info, void* out)`）─────────────────────────────────
+//  本函数在 FW bringup **深栈**上被 Apple `0x98125` 经 `9820c callq *%r14` 间接调用 ⇒ 只走
+//  `nredTraceLine`（内存环：零 FS／零 SYSLOG／零堆分配）；日志缓冲 static ⇒ 零栈占用。
+static int nredGvmSwInit(void* const info, void* const out)
+{
+    const UInt32 n = ++gGvmSwCalls;
+    if (info == nullptr || out == nullptr) {                       // 入参空 ⇒ 2（与 Apple 那版同值）
+        nredGvmSwLogCall(n, nullptr, nullptr, 0, 2);
+        return 2;
+    }
+    const UInt8* const I = static_cast<const UInt8*>(info);
+    const UInt8* const O = static_cast<const UInt8*>(out);
+    const UInt64 o8init  = *reinterpret_cast<const UInt64*>(O + 8);   // out+8 初值（回填前取）
+    // 3＝已存在、无需初始化：Apple 把 GVM 簿记句柄存于 `out+8`（`0x191dc` 的 `1925d` 写 0／
+    //  `19281` 写指针；`0x98125` 的 X4 段 `9829e movq -48(%rbp),%rax ; 982a2 movq %rax,40(%rbx)`
+    //  把它搬进 `subobj+40`）⇒ 初值非 0 ⇒ 此前已初始化过。
+    if (o8init != 0) {
+        nredGvmSwLogCall(n, info, out, o8init, 3);
+        return 3;
+    }
+    gGvmBook.failMask = 0; gGvmBook.pendingMask = 0; gGvmBook.omittedMask = 0;
+
+    // ── A1 记录区解析（真实数据；对照 R57 A1）────────────────────────────────────────────
+    //  条目布局＝{u32 键0, u32 键1, …}，本机世代键取自上游**本驱动自身的版本列表**
+    //  （`gmc_v11_0.c:775-779` 的 GC 11.0.0..11.0.4）⇒ 在真实记录区里定位该键。
+    UInt32 nEnt = 0, keyOff = 0xFFFFFFFFU, kMaj = 0, kMin = 0;
+    {
+        const UInt8* const rec = I + 4;
+        for (UInt32 off = 0; off + kGvmRecStride <= kGvmRecBytes; off += kGvmRecStride) {
+            const UInt32 k0 = *reinterpret_cast<const UInt32*>(rec + off);
+            const UInt32 k1 = *reinterpret_cast<const UInt32*>(rec + off + 4);
+            if (k0 == 0 && k1 == 0) { continue; }                  // 空条目
+            nEnt += 1;
+            if (keyOff == 0xFFFFFFFFU && k0 == kGvmKeyMajor && k1 <= kGvmKeyMinorMax) {
+                keyOff = off; kMaj = k0; kMin = k1;
+            }
+        }
+    }
+    gGvmBook.recEntries  = nEnt;
+    gGvmBook.gfxKeyMajor = kMaj;
+    gGvmBook.gfxKeyMinor = kMin;
+    gGvmBook.gfxKeyOff   = keyOff;
+    if (nEnt == 0 || keyOff == 0xFFFFFFFFU) {                      // 无条目／无本机世代键
+        gGvmBook.failMask |= (1U << 0);                            // ⇒ 标错，不继续假装成功
+        nredGvmSwLogCall(n, info, out, o8init, 5);
+        return 5;
+    }
+
+    // ── A4 显存几何（对照 `:755-760` `amdgpu_gmc_get_vram_info`）——**本轮省略**───────────────
+    //  省略理由（R57 明确"暂可省"，且卡面未把它列为必须成功的判据）：显存几何源＝`AmdAtomVramInfo`
+    //  （由 X6000FB 阶段解析 atom/固件产生），在本回调时点**不可达**；不做臆造值 ⇒ 如实留 0＋
+    //  `omittedMask` 标记，**不计入失败**。（若需接入，请单独派卡：需跨 kext 取 VRAM 信息。）
+    gGvmBook.vramWidth = 0; gGvmBook.vramType = 0; gGvmBook.vramVendor = 0;
+    gGvmBook.vramOmitted = 1;
+    gGvmBook.omittedMask |= (1U << 3);
+
+    // ── A2 GMC 簿记（对照 `:788-789`／`:795`／`:827-828`）────────────────────────────────
+    gGvmBook.mcMask       = 0xFFFFFFFFFFFFULL;                     // :827（48 bit MC）
+    gGvmBook.pteAddrMask  = 0x0000FFFFFFFFF000ULL;                 // :828（48 bit PA）
+    gGvmBook.vmSizeBytes  = 256ULL * (1ULL << 40);                 // :795（256 TB＝256*1024 MB）
+    gGvmBook.vmBlockBytes = 512;                                   // :795（块 512＝fragment 9 bit）
+    gGvmBook.vmLevels     = 3;                                     // :795（3 级）
+    gGvmBook.vmBits       = 48;                                    // :795（48 位）
+    gGvmBook.vmhubsMask   = (1U << 0) | (1U << 1);                 // :788/789 GFXHUB0(0)｜MMHUB0(0)
+
+    // ── A3 两个 hub 簿记（对照 `:749`／`:751`；**仅簿记**，不碰 MMIO／寄存器）────────────────
+    //  每个 hub 一条簿记＝hub 位（VM hub 掩码位）＋VA 窗（该 hub 映射的整段 VM 窗）＋页表块/位宽
+    //  （共享 A2 的常量）⇒ 硬件初始化阶段据此写各 hub 的页表基址。
+    gGvmBook.hubBit[0] = 1;   // MMHUB0（`AMDGPU_MMHUB0(0)`）
+    gGvmBook.hubBit[1] = 0;   // GFXHUB0（`AMDGPU_GFXHUB(0)`）
+    for (UInt32 i = 0; i < 2; i += 1) {
+        gGvmBook.hubVaStart[i] = 0;
+        gGvmBook.hubVaSize[i]  = gGvmBook.vmSizeBytes;
+        gGvmBook.hubReady[i]   = 1;
+    }
+
+    // ── A5 BO 管理器＋一次自检分配（对照 `:843` `amdgpu_bo_init`）────────────────────────────
+    //  真实动作＝物理连续缓冲分配＋登记（沿用本仓库既有 `IOBufferMemoryDescriptor` 惯例）；
+    //  失败 ⇒ 标错＋对称清理＋返非 0（不得假装成功）。
+    if (gGvmBoDesc == nullptr) {
+        gGvmBoDesc = IOBufferMemoryDescriptor::withOptions(
+            kIOMemoryPhysicallyContiguous | kIODirectionInOut, 4096, 4096);
+        if (gGvmBoDesc != nullptr && gGvmBoDesc->prepare() != kIOReturnSuccess) {
+            gGvmBoDesc->release();
+            gGvmBoDesc = nullptr;
+        }
+    }
+    IOByteCount boSeg = 0;
+    const addr64_t boPhys = (gGvmBoDesc != nullptr) ? gGvmBoDesc->getPhysicalSegment(0, &boSeg, 0) : 0;
+    if (gGvmBoDesc == nullptr || boPhys == 0 || boSeg < 4096) {
+        gGvmBook.failMask |= (1U << 4);
+        nredGvmSwFini();
+        nredGvmSwLogCall(n, info, out, o8init, 4);
+        return 4;
+    }
+    gGvmBook.boPhys = boPhys; gGvmBook.boBytes = 4096; gGvmBook.boRegistered = 1;
+
+    // ── A6 GART 结构＋内存可见表项（对照 `:723-742` `gmc_v11_0_gart_init`／`:847`）────────────
+    //  真实动作：分配页表（GART 512 MB ⇒ 131072 页 × 8 B＝1 MB，物理连续、页对齐）→ 清零（无效
+    //  表项）→ 把 A5 的自检分配写进表项 0（**内存可见的表项写入**＝本步的物理证据）。
+    //  ⚠ PTE 位取值按 amdgpu 通用定义（VALID 1<<0／SYSTEM 1<<1／READABLE 1<<5／WRITEABLE 1<<6）；
+    //    本归档未含 `amdgpu_vm.h` ⇒ 位值【未验证】（写入的是**我方表**，本轮无任何寄存器指向它
+    //    ⇒ 无硬件影响，留待硬件初始化阶段按上游既定序列复核）。
+    const UInt32 kGartPages = kGvmGartSizeMB * 1024U * 1024U / 4096U;   // 131072
+    const UInt32 kGartBytes = kGartPages * 8U;                          // 1 MB
+    if (gGvmGartDesc == nullptr) {
+        gGvmGartDesc = IOBufferMemoryDescriptor::withOptions(
+            kIOMemoryPhysicallyContiguous | kIODirectionInOut, kGartBytes, 4096);
+        if (gGvmGartDesc != nullptr && gGvmGartDesc->prepare() != kIOReturnSuccess) {
+            gGvmGartDesc->release();
+            gGvmGartDesc = nullptr;
+        }
+    }
+    IOByteCount gartSeg = 0;
+    const addr64_t gartPhys =
+        (gGvmGartDesc != nullptr) ? gGvmGartDesc->getPhysicalSegment(0, &gartSeg, 0) : 0;
+    UInt64* const ptes = (gGvmGartDesc != nullptr)
+        ? reinterpret_cast<UInt64*>(gGvmGartDesc->getBytesNoCopy()) : nullptr;
+    if (ptes == nullptr || gartPhys == 0 || gartSeg < kGartBytes) {
+        gGvmBook.failMask |= (1U << 5);
+        nredGvmSwFini();
+        nredGvmSwLogCall(n, info, out, o8init, 4);
+        return 4;
+    }
+    __builtin_memset(ptes, 0, kGartBytes);                              // 清零：其余表项＝无效
+    ptes[0] = (boPhys & ~0xFFFULL) | 0x63ULL;                           // 表项 0：VALID|SYSTEM|R|W
+    gGvmBook.gartPhys = gartPhys;
+    gGvmBook.gartBytes = kGartBytes;
+    gGvmBook.gartPtes = 1;                                              // 已写入的表项数（真实计数）
+
+    // ── A7 VM 管理器簿记（对照 `:851-859`）───────────────────────────────────────────────
+    //  VMID 0＝System；1-7＝gfx/compute；8-15＝KFD（`:851-857`）⇒ 记录划分并登记一个 VM。
+    gGvmBook.firstKfdVmid = 8;
+    gGvmBook.vmidTotal    = 16;
+    gGvmBook.vmRegistered = 1;
+
+    // ── A8 中断簿记（对照 `:801-821` `amdgpu_irq_add_id` 三条）────────────────────────────
+    //  簿记登记＝3 条（VMC page fault／GFX UTCL2 fault／DF ECC）。⚠ **真实注册未完成**：
+    //  上游 `SOC21_IH_CLIENTID_*`／`*_SRCID__*` 常量（归档未含相关头文件）与 Apple 侧 IH 服务
+    //  接口身份**均未解出** ⇒ 本步**如实计入"未完成"**（`pendingMask`），不计作成功。
+    //  ⇒ 即使放行门控打开，本次也**不返 0**（返 8）——"不伪造成功"。
+    gGvmBook.irqCount   = 3;
+    gGvmBook.irqPending = 1;
+    gGvmBook.pendingMask |= (1U << 7);
+
+    // ── A9 RAS 簿记（对照 `:861`）——卡面明确"可省" ⇒ 本轮跳过并如实登记（不计入失败）──────────
+    gGvmBook.rasSkipped = 1;
+    gGvmBook.omittedMask |= (1U << 8);
+
+    // ── A10 回填（对照 Apple `0x1937f` 段／R57 A10）──────────────────────────────────────
+    //  契约限制：`info` 只读、`out+0` 不可写 ⇒ 我方回填落点＝`out+8`（Apple 会把它搬进
+    //  `subobj+40`，见上方 X4 段的逐字引用）⇒ 本步产生"被 Apple 消费"的真实副作用。
+    //  ⚠ 写侧用 `out` 的非 const 视图：**全函数仅此一处**写 `out`，且只写 `+8`（R3）。
+    *reinterpret_cast<UInt64*>(static_cast<UInt8*>(out) + 8) = reinterpret_cast<UInt64>(&gGvmBook);
+
+    // ── 返回值判定（R3）：任一"失败/未完成"步 ⇒ 非 0；全部真实成功 ∧ 放行门控开 ⇒ 0 ──────────
+    if (gGvmBook.failMask != 0) {                       // 失败 ⇒ 熔断回滚（R2 回滚）＋对称清理（A11）
+        nredGvmSwUninstallSlot();
+        gGvmSwFused = true;
+        nredGvmSwFini();
+        nredGvmSwLogCall(n, info, out, o8init, 6);
+        return 6;
+    }
+    if (gGvmBook.pendingMask != 0) {                    // 有步骤未完成（A8）⇒ 不得返 0
+        nredGvmSwLogCall(n, info, out, o8init, 8);
+        return 8;
+    }
+    if (!gGvmSwInitPass) {                              // 软件初始化成功，但放行门控未开
+        nredGvmSwLogCall(n, info, out, o8init, 7);
+        return 7;
+    }
+    nredGvmSwLogCall(n, info, out, o8init, 0);
+    return 0;
+}
+
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // ── GVM 软件初始化替换：安装动作（R2）——门控 `-NRedGvmSwInstall`（**默认关**）关时
+    //  本行不成立＝零行为；开时仅在本 wrapper 以 client5/stage0 进入时动作（＝`0x94a5b` 落点）。
+    //  时序要求：必须在 org（`0x9440f`）执行**之前**——否则 `0x98125` 已读过 `*(subobj+8)`。
+    if (gGvmSwInstall && b == 5 && c == 0 && !gGvmSwFused) { nredGvmSwInstallSlot(a); }
     const UInt32 ret = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
     // H1 观测集 N-4（2026-10-18）：记**前三次** `(client, stage, ret)`（**零解引用**，只写标量）。
     //  ⚠️ 门控关 ⇒ 本块整段不执行（零写入、零成本）—— 本回调曾在 B25 的 double-fault 栈上
@@ -2581,6 +2925,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  解析一次存标量；判定处只读标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
     //  ⚠ 关态：零标量写入、零戳记行、零新增解引用 ⇒ 与现状逐字一致。
     gTtlBisect = checkKernelArgument("-NRedTtlBisect");
+    // GVM 软件初始化替换门控（**默认全关**）：解析一次存标量；判定处只读标量。
+    //  ⚠ 关态：不安装、不介入、零新增日志、零新增解引用 ⇒ 与现状逐字一致。
+    gGvmSwInstall  = checkKernelArgument("-NRedGvmSwInstall");
+    gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
