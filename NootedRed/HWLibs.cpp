@@ -3014,34 +3014,158 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     return kSwResPass;                                  // ★ 真实成功（R80 起**恢复可达**）
 }
 
-// ── 模块 8（SMU）本体：**阶段 1**（R98 §2.6）──────────────────────────────────────────────────
-//  被替换实现＝`0x6430f`（装配点 `0x9e4c9`，【反汇编·确凿】）；真实动作（R98 亲读头部）：
-//   ① *(u32*)(info+0)==704 ∧ *(u32*)(info+8)==1 ∧ *(u32*)(out+0)==80
-//      ∧ (v=*(u32*)(info+612)：若 bit3 置位，则要求 ((v>>2)|(v>>4))&1 为 1)
-//   ② 缓冲+16 ← info+696 ；缓冲+8 ← info+688
-//   ③ `0x649ee(缓冲, 1968, 1, &out)`（取/建，**需书面授权**）
-//   ④ 其后子步骤＝【未解出】  ⑤ 句柄槽＝`subobj+40`（【转引·R73】）
-//  ⚠ **阶段 1 只做 ①② 的只读部分**：③④⑤ 与句柄供给**如实登记为省略** ⇒ **恒返 6（fail-closed）**；
-//    **不得**为凑 `res=7` 而放宽（红线）。
+// ── 模块 8（SMU）本体：**阶段 2**（R108 修订版，含 M-1～M-4）─────────────────────────────────────
+//  被替换实现＝`0x6430f`（装配点 `0x9e4c9`）；寄存器别名：`r15`＝`I`（info）、`r14`＝`O`（out）、
+//  `local`＝`rbp-2000`（1968 B）、`scratch`＝`rbp-32`。动作＝R108 §1 的 24 行，逐条对照机器码：
+//  `llvm-objdump -d --start-address=0x6432b --stop-address=0x6463b
+//   "kb/内核扩展/13.6/extracted/com.apple.kext.AMDRadeonX5000HWLibs.macho"`
+//  ⚠ **阶段 2 无省略**（R108 §5）：`omittedMask` 恒 0；失败面＝2／4（`bit16`）／5（`bit15`）／
+//    6（`bit17`／`bit18`）／7 ⇒ **没有任何"少做却返 0"的路径**（成功出口只有 `6463b` 一处）。
+//  ⚠ **默认不可达**：`gSwInitIdsMask` 初值只含模块 5；即便掩码含 8，放行门关也只返 7（R108 §4）。
+//  ⚠ **与苹果的三处如实差异**（这三个返回值苹果机器码**未判**，本实现按 R108 §1 判 ⇒ 只会更早失败）：
+//    #10 `6440c`、#22 `645bd`（均 `0x64b1a`）、#19 `64571`（`0x65885`）。
+//  ⚠ **另加 3 处先决检查**（R108 动作表外；防 trap／防野指针，只会更早失败）：
+//    ① `gHwlibsSlide == 0`（调用任何苹果函数之前）；② `nredKernelPtrOk(h)`（`0x649ee` 返回后）；
+//    ③ `*(h+1712) != 0`（它是 #22 的第二实参 ⇒ 不得把 0 交给 `0x64b1a`）。
+static const UInt32 kSmuLocalBytes = 1968;   // `0x64334` 的 `$1968`
+static UInt8 gSmuLocalBuf[kSmuLocalBytes];   // `local`（`rbp-2000`）⇒ static（栈纪律：帧 ≤128 B）
 static int nredSmuSwInit(void* const info, void* const out)
 {
     const UInt8* const I = static_cast<const UInt8*>(info);
     UInt8* const O = static_cast<UInt8*>(out);
-    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
-    if (*reinterpret_cast<const UInt32*>(I + 0) != 704) { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
-    if (*reinterpret_cast<const UInt32*>(I + 8) != 1)   { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
-    if (*reinterpret_cast<const UInt32*>(O + 0) != 80)  { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
-    const UInt32 v = *reinterpret_cast<const UInt32*>(I + 612);
-    if ((v & 8U) != 0 && ((((v >> 2) | (v >> 4)) & 1U) == 0)) { gGvmBook.failMask |= (1U << 15); return kSwResParseFail; }
-    // ② 两个入参字段（纯读；阶段 1 只做非零登记，不搬进对象）
-    if (*reinterpret_cast<const UInt64*>(I + 688) == 0 || *reinterpret_cast<const UInt64*>(I + 696) == 0) {
-        gGvmBook.failMask |= (1U << 15); return kSwResParseFail;
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;   // 阶段 2 **无省略** ⇒ `omittedMask` 保持 0（R108 §5）
+    UInt8* const L = gSmuLocalBuf;
+    // ── #1~#6 缓冲清零与形状校验（纯读）───────────────────────────────────────────────────────
+    __builtin_memset(L, 0, kSmuLocalBytes);                                        // #1（`64334/64339`）bzero(local,1968)
+    if (I == nullptr || O == nullptr) { return kSwResNullArg; }                    // #2（`64343..6434f`）⇒ 2
+    if (*reinterpret_cast<const UInt32*>(I + 0) != 704) {                          // #3（`6435a/64361`）
+        gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
     }
-    gGvmBook.omittedMask |= (1U << 14);   // ③ 取/建（`0x649ee`）——需书面授权，本阶段不做
-    gGvmBook.omittedMask |= (1U << 15);   // ④ 后续子步骤（【未解出】）
-    gGvmBook.omittedMask |= (1U << 16);   // ⑤ 句柄/对象未供给（`subobj+40`）
-    gGvmBook.failMask    |= (1U << 18);   // ★ fail-closed：全过也不得报成功
-    return kSwResStepFail;                // 6
+    if (*reinterpret_cast<const UInt32*>(O + 0) != 80) {                           // #4（`64367/6436b`）
+        gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
+    }
+    if (*reinterpret_cast<const UInt32*>(I + 8) != 1) {                            // #5（`64371/64376`）
+        gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
+    }
+    const UInt32 v = *reinterpret_cast<const UInt32*>(I + 612);                    // #6（`6437c`）
+    if ((v & 8U) != 0 && ((((v >> 2) | (v >> 4)) & 1U) == 0)) {                    //  `64383..64393` 观测类判据
+        gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
+    }
+    // ── #7#8 两个入参字段（源在 `I`，去向是 `local`）──────────────────────────────────────────
+    const UInt64 f696 = *reinterpret_cast<const UInt64*>(I + 696);                 // #7 源（`643be`）
+    const UInt64 f688 = *reinterpret_cast<const UInt64*>(I + 688);                 // #8 源（`643d0`）
+    //  R108 §6：阶段 1 的"两字段非零登记"**保留**（苹果 `643be/643d0` 只搬不判 ⇒ 本处更严，只会更早失败）。
+    if (f688 == 0 || f696 == 0) {
+        gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
+    }
+    *reinterpret_cast<UInt64*>(L + 16) = f696;                                     // #7（`643c5/643cc`）
+    *reinterpret_cast<UInt64*>(L + 8)  = f688;                                     // #8（`643d0/643d7`）
+    if (gHwlibsSlide == 0) {                        // 先决①：kext 基址未解析 ⇒ 不可安全调用（同 m5 的 S0-a）
+        gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
+    }
+    // ── #9#10 取/建 handle 本体＋用 `local` 初始化（**苹果调用**；失败 ⇒ `bit16` ＋ 4）─────────────
+    void* h = nullptr;                                                             // `scratch`（`rbp-32`）
+    using NRedSmuGetOrCreate = int (*)(void*, UInt64, UInt32, void**);
+    using NRedSmuInitFrom    = int (*)(void*, void*, UInt64);
+    const NRedSmuGetOrCreate fnGetOrCreate =
+        reinterpret_cast<NRedSmuGetOrCreate>(gHwlibsSlide + 0x649ee);              // 授权①（#21 复用）
+    const NRedSmuInitFrom fnInitFrom =
+        reinterpret_cast<NRedSmuInitFrom>(gHwlibsSlide + 0x64b1a);                 // 授权②（#22 复用）
+    const int rc9 = fnGetOrCreate(L, kSmuLocalBytes, 1, &h);                       // #9（`643db..643e9`）非 0＝失败
+    if (rc9 != 0) {
+        gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
+    }
+    const int rc10 = fnInitFrom(L, h, kSmuLocalBytes);                             // #10（`643f8..6440c`）
+    if (rc10 != 0) {                                                               //  ★ 苹果未判（见头注差异）
+        gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
+    }
+    if (!nredKernelPtrOk(h)) {                     // 先决②：非空 ≠ 合法内核指针（其后全按句柄解引用）
+        gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
+    }
+    UInt8* const H = static_cast<UInt8*>(h);
+    // ── #11~#18 写出参、句柄字段、位域与三次纯内存搬运 ─────────────────────────────────────────
+    *reinterpret_cast<UInt64*>(O + 8) = reinterpret_cast<UInt64>(h);               // #11（`64411/64415`）
+    *(O + 16) = 0;                                                                 // #11（`64419`）u8
+    *reinterpret_cast<UInt64*>(H + 16) = f696;                                     // #12（`6441e/64425`）
+    *reinterpret_cast<UInt64*>(H + 8)  = f688;                                     // #13（`64429/64430`）
+    // ── #14 `*(u16*)(h+728)` 位域：把 `v` 逐位搬运（**完整两组**，共 9 组位操作）────────────────────
+    //  苹果**读 32 位**（`64448`）、**回写 16 位**（`6451f`）⇒ 本实现同用 32 位累加器、末尾写 u16。
+    {
+        UInt32 a = *reinterpret_cast<const UInt32*>(H + 728);                      // `64448`（32 位读）
+        a = (a & ~1U)     | (((v >> 2) | (v >> 4)) & 1U);                          // `6443b..64453` → bit0
+        a = (a & ~2U)     | ((v >> 2) & 2U);                                       // `6445a..6446c` → bit1
+        a = (a & ~16U)    | ((v >> 1) & 16U);                                      // `64473..64484` → bit4
+        a = (a & ~64U)    | (v & 64U);                                             // `6448b..6449b` → bit6
+        a = (a & ~128U)   | (v & 128U);                                            // `644a2..644b7` → bit7
+        a = (a & ~8U)     | ((v & 1U) << 3);                                       // `644be..644ce` → bit3
+        a = (a & ~0x100U) | ((v & 2U) << 7);                                       // `644d5..644e9` → bit8
+        a = (a & ~0x200U) | ((v & 0x100U) << 1);                                   // `644f0..64504` → bit9
+        a = (a & ~0x400U) | ((v & 0x200U) << 1);                                   // `6450b..6451f` → bit10
+        *reinterpret_cast<UInt16*>(H + 728) = static_cast<UInt16>(a);              // `6451f`（16 位写）
+    }
+    *reinterpret_cast<UInt32*>(H + 716) = 0x80000U;                                // #15（`64526`）常量
+    *reinterpret_cast<UInt64*>(H + 952) = 0;                                       // #16（`64530`）显式清零
+    __builtin_memcpy(H + 32, I + 4, 608);                                          // #17（`6453b..64547`）608 B
+    __builtin_memcpy(H + 640, I + 616, 72);                                        // #18（`6454c..64561`）72 B
+    // ── #19~#23 五项苹果调用（授权清单 ⑦／③／④／⑤／⑥）──────────────────────────────────────
+    using NRedSmuSetter = int (*)(void*, UInt32, UInt32);
+    const NRedSmuSetter fnSetter = reinterpret_cast<NRedSmuSetter>(gHwlibsSlide + 0x65885);
+    const int rc19 = fnSetter(h, 0xC0201U, 0);                                     // #19（`64566..64571`）
+    if (rc19 != 0) {                                                               //  ★ 苹果未判（见头注差异）
+        gGvmBook.failMask |= (1U << 17); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    }
+    UInt64 p12 = 0, p20 = 0;                     // #20：`*(u64*)(I+12)`／`*(u64*)(I+20)`＝**8 字节非对齐读**
+    __builtin_memcpy(&p12, I + 12, 8);
+    __builtin_memcpy(&p20, I + 20, 8);
+    using NRedSmuSubmit = int (*)(void*, UInt64, UInt64);
+    const NRedSmuSubmit fnSubmit = reinterpret_cast<NRedSmuSubmit>(gHwlibsSlide + 0x6720b);
+    const int rc20 = fnSubmit(h, p12, p20);                                        // #20（`64576..64582`）
+    if (rc20 != 0) {
+        gGvmBook.failMask |= (1U << 17); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    }
+    // #21（`6458d..645a2`）取/建 `h[1712]` 的 `0x8000` 子对象——**第 4 实参＝`h+1712`（内部指针）**
+    const int rc21 = fnGetOrCreate(h, 0x8000U, 1, reinterpret_cast<void**>(H + 1712));
+    if (rc21 != 0) {
+        gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
+    }
+    const UInt64 hSub = *reinterpret_cast<const UInt64*>(H + 1712);                // #22 第二实参（`645b1`）
+    if (hSub == 0) {                               // 先决③：**不得**把 0 交给 `0x64b1a`（防 trap）
+        gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
+    }
+    const int rc22 = fnInitFrom(h, reinterpret_cast<void*>(hSub), 0x8000U);        // #22（`645ad..645bd`）
+    if (rc22 != 0) {                                                               //  ★ 苹果未判（见头注差异）
+        gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
+    }
+    using NRedSmuCommit = int (*)(void*, void*, void*);
+    const NRedSmuCommit fnCommit = reinterpret_cast<NRedSmuCommit>(gHwlibsSlide + 0x67328);
+    const int rc23 = fnCommit(h, const_cast<UInt8*>(I), O);                        // #23（`645c2..645cc`）
+    if (rc23 != 0) {
+        gGvmBook.failMask |= (1U << 17); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    }
+    // ── 守卫（R108 §3 逐字；**唯一差异**＝把局部别名 `H` 改名为 `HG`，避免与外层 `H` 遮蔽）──────────
+    //  清理链共**三处**零空判用到 `h` 的派生字段：
+    //    (a) `0x64a9c`：`64ac0` 读 `*(h+16)`；`64ada` 用 `*(X+8)`；`64ade` 调 `*(X+24)`；
+    //    (b) `0x64c1e`：`64c22` 读 `*(h+16)`；`64c26` 用 `*(X+8)`；`64c2a` 调 `*(X+56)`   ★ M-2
+    //    (c) `0x64a9c(h, *(h+1712))`：`64ac8` 读 `*(arg2-8)`（arg2＝`*(h+1712)`）
+    //  ※ `0x64c1e` 的第二实参全程未被读 ⇒ `*(h+912)`／`*(h+944)` 为 0 也安全（复核 §2.2）。
+    {
+        const UInt8* const HG  = static_cast<const UInt8*>(h);
+        const bool    hOk      = nredKernelPtrOk(h);
+        const UInt64  X        = hOk ? *reinterpret_cast<const UInt64*>(HG + 16) : 0;
+        const bool    xOk      = hOk && nredKernelPtrOk(reinterpret_cast<const void*>(X))
+                                 && *reinterpret_cast<const UInt64*>(X + 8)  != 0
+                                 && *reinterpret_cast<const UInt64*>(X + 24) != 0
+                                 && *reinterpret_cast<const UInt64*>(X + 56) != 0;  // ★ M-2
+        const UInt64  sub      = hOk ? *reinterpret_cast<const UInt64*>(HG + 1712) : 0;
+        if (!xOk || sub == 0) {
+            gGvmBook.failMask |= (1U << 18);                                       // ★ M-3：`bit18`（"未供给 ⇒ 6"）
+            *reinterpret_cast<UInt64*>(O + 8) = 0;                                 // #25：失败一律清 `out+8`
+            return kSwResStepFail;                                                 // 6
+        }
+    }
+    // ── #24 成功出口门控（R108 §4 逐字）：门控关 ⇒ 只返 7（**不报成功**）────────────────────────
+    if (!gGvmSwInitPass) { return kSwResPassGateOff; }
+    return kSwResPass;                             // 0（`6463b: xorl %ebx,%ebx`）★ 唯一成功出口
 }
 
 // ── 模块 6（PSP）本体：**阶段 1**（R96 §1.2／R98 §4）──────────────────────────────────────────
@@ -3123,7 +3247,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
         switch (clientId) {
             case 5: res = nredGvmSwInit(info, out, o8init); break;   // 模块 5＝GVM（A1–A11）
             case 6: res = nredPspSwInit(info, out); break;           // 模块 6＝PSP（R96 阶段 1）
-            case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R98 阶段 1）
+            case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R108 阶段 2）
             case 7: res = nredGcSwInit(info, out); break;            // 模块 7＝GC（R100 阶段 1）
             default: break;                                          // 其余模块：**显式未实现**
         }
