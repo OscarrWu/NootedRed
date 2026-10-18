@@ -2551,14 +2551,20 @@ static int nredGvmSwInit(void* info, void* out, UInt64 o8init);
 template <UInt32 Id>
 static int nredSwInitThunk(void* const info, void* const out) { return NRedSwInitDispatch(Id, info, out); }
 
-// 已确证期望值的模块清单（R60 §1.4）：**只列【反汇编·确凿】的 7 条**。
-//  ⚠ 模块 9／2（【推断·高】）与 3／11／12／13（未解出/未确定）**一律不入表**（表中不得出现数值 ⇒ 不猜）。
+// 已确证期望值的模块清单（R60 §1.4）：**只列【反汇编·确凿】的 8 条**（R124 起含模块 9）。
+//  ⚠ 模块 **2**（【推断·高】）与 3／11／12／13（未解出/未确定）**不入表**（表中不得出现数值 ⇒ 不猜）；
+//     模块 9 的入表依据（R124，【反汇编·确凿】）：`9fd07 leaq …##0x797e8` → `9fd0e movq %rax,-64(%rbp)`；
+//     `9fd7a leaq -64(%rbp),%rsi` ＋ `9fd7e movl $9,%edi` ＋ `9fd83 callq 0x93e4c`（装配器按内存序写 `dst[0..3]`）；
+//     独立印证：worker `9ff37 movq 8(%r15),%r12` → `a00db callq *%r12`。
+//  ⚠ **已知限制（R124 明确不改）**：安装动作**只写 `subobj+8`** ⇒ 模块 9 的 `funcs[1..3]`（`+16/+24/+32`）
+//     仍是苹果的 ⇒ 探针只拦下 `funcs[0]` 路径（崩点 I／II 所在），其余槽未接管。
 struct NRedSwClient { UInt32 id; int (*fn)(void*, void*); UInt64 expect; };
 static const NRedSwClient kSwClients[] = {
     { 5,  nredSwInitThunk<5>,  0x191dc },   // R58 §1.3【反汇编·确凿】
     { 6,  nredSwInitThunk<6>,  0x48f9c },
     { 7,  nredSwInitThunk<7>,  0x7ce0  },
     { 8,  nredSwInitThunk<8>,  0x6430f },
+    { 9,  nredSwInitThunk<9>,  0x797e8 },   // R124：模块 9（VCN）——`0x797e8`【反汇编·确凿】（见上）
     { 10, nredSwInitThunk<10>, 0x4d00  },
     { 14, nredSwInitThunk<14>, 0x42e94 },
     { 15, nredSwInitThunk<15>, 0x3fc39 },
