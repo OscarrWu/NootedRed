@@ -171,6 +171,18 @@ static UInt32 gBisV176Read = 0;
 //  （base＝`*(ctx)`）⇒ **a2 的 base 必须用 `rootIn`＝`*(root)`，不得复用 `o3`**。
 static UInt32 gBisA2 = kBisNone32;      // arg2：{0,2}；哨兵＝未读
 static UInt32 gBisA2Read = 0;           // rb：1＝真读过 rec[0]；0＝哨兵（未读）
+// ★ R42（2026-10-18）：`r14i`／`reci` 两个指针标量（**本卡唯一新增**）。
+//  背景：R17 实测 `a2=0` ⇒ H4 否证 ⇒ 失败必在 `0x98125` 的**三个提前返回点**之一：
+//   ① `subobj==0`（`98175 je 0x9828e`，静默）；② `0x958d8(host,5)==0`（`981d9 je 0x98251`，
+//   "NULL GVM discovery info!"）；③ `*(subobj+8)==0` 或回调返非 0（`981ff/98211 ⇒ 0x98217`，
+//   "NULL GVM sw_init entry!"）。⇒ 2 个指针即可把失败点落在 `0x98125` 内部。
+//  ⚠ 只读、不调用 Apple 函数（`0x958d8` 为纯查表，按 R34/我的 `a`/`x` 同一算式逐字复刻，
+//   非"调用"）。
+//  ⚠ 每个字段各配"是否真读到"标志（`ri=`/`rc=`），避免哨兵与真值不可区分。
+static UInt64 gBisR14i = 0;             // r14i：`*(u64*)(subobj+8)`（＝ 0x98125 的 `r14`＝回调指针）
+static UInt32 gBisR14iRead = 0;         // ri：1＝真读过；0＝哨兵（subobj 空）
+static UInt64 gBisReci = 0;             // reci：`0x958d8(host,5)` 的记录指针（非 0 ⟺ 记录可查）
+static UInt32 gBisReciRead = 0;         // rc：1＝真读过（"真读到 0"也算）；0＝哨兵
 static UInt32 gBisHit = 0;   // 本扩读是否命中（1＝走到了 client5/stage0 且各前置非空；0＝未命中/未走到）
 static UInt32 gBisShort = 0; // 短路原因码（**只记首次**）：0=无
 enum : UInt32 {
@@ -385,7 +397,8 @@ int nredTraceFlush(int secTag)
                                 "Ee8=%llx r28=%llx r30=%llx s2c=%u s3c=%u "
                                 "p1=%u/%u/%u p2=%u/%u/%u p3=%u/%u/%u "
                                 "o3=%llx o4=%llx c14=%llx f112=%llx f600=%llx f616=%llx "
-                                "v176=%08x vb=%u a=%u x=%u a2=%u rb=%u hit=%u sh=%s\n",
+                                "v176=%08x vb=%u a=%u x=%u a2=%u rb=%u "
+                                "r14i=%llx ri=%u reci=%llx rc=%u hit=%u sh=%s\n",
                                 static_cast<unsigned>(gC4n), static_cast<unsigned>(gC4ret),
                                 static_cast<unsigned>(gC4a4), static_cast<unsigned>(gC4b4),
                                 static_cast<unsigned>(gC4c4),
@@ -413,6 +426,8 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gBisV176), static_cast<unsigned>(gBisV176Read),
                                 static_cast<unsigned>(gBisA), static_cast<unsigned>(gBisX),
                                 static_cast<unsigned>(gBisA2), static_cast<unsigned>(gBisA2Read),
+                                static_cast<unsigned long long>(gBisR14i), static_cast<unsigned>(gBisR14iRead),
+                                static_cast<unsigned long long>(gBisReci), static_cast<unsigned>(gBisReciRead),
                                 static_cast<unsigned>(gBisHit),
                                 kBisShortReason[(gBisShort < (sizeof(kBisShortReason) / sizeof(kBisShortReason[0])))
                                                     ? gBisShort : 0]);
@@ -2179,6 +2194,10 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
             if (!nredKernelPtrOk(subobj)) { setShort(kBisShortSub); subobj = nullptr; }
             if (subobj != nullptr) {
                 gBisSub = reinterpret_cast<UInt64>(subobj);
+                // ★ R42：`r14i = *(u64*)(subobj+8)`（＝ 0x98125 的 `r14`，`9817e: movq 8(%rbx),%r14`）。
+                //  判 ③a：为 0 ⇒ `0x981fc je` ⇒ "NULL GVM sw_init entry!"。守卫＝subobj 已非空。
+                gBisR14i = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(subobj) + 8);
+                gBisR14iRead = 1;
                 // L1b：host = *(subobj)
                 void* host = *reinterpret_cast<void* const*>(subobj);
                 if (!nredKernelPtrOk(host)) { setShort(kBisShortHost); host = nullptr; }
@@ -2289,14 +2308,25 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                             }
                         }
                     }
-                    if (!nredKernelPtrOk(pool)) { setShort(kBisShortRec); }
+                    if (!nredKernelPtrOk(pool)) {
+                        // 0x958d8 在 pool==0 时返 0（`958f8 je 0x95923`）⇒ "真读到 0"（② 成立）
+                        gBisReci = 0; gBisReciRead = 1;
+                        setShort(kBisShortRec);
+                    }
                     else {
                         const UInt8* const P = static_cast<const UInt8*>(pool);
                         const UInt32 idx = *reinterpret_cast<const UInt32*>(P + (5 << 5));
-                        if (idx == 0xFFFFFFFFU) { setShort(kBisShortRec); }
+                        if (idx == 0xFFFFFFFFU) {
+                            // 0x958d8 在 idx==0xFFFFFFFF 时返 0（`9590e/95911`）⇒ "真读到 0"（② 成立）
+                            gBisReci = 0; gBisReciRead = 1;
+                            setShort(kBisShortRec);
+                        }
                         else {
                             const UInt64 recAddr = *reinterpret_cast<const UInt64*>(P + 608)
                                                  + 3652ULL * static_cast<UInt64>(idx);
+                            // reci＝0x958d8 的原样返回（raw 地址，**不做** ptr-ok：Apple 亦不校验，
+                            //  非 0 ⟺ 记录可查 ⟺ ② 不成立）。rc=1 ⇒ 真读到（含真读到 0 的情况）。
+                            gBisReci = recAddr; gBisReciRead = 1;
                             void* rec = reinterpret_cast<void*>(recAddr);
                             if (!nredKernelPtrOk(rec)) { setShort(kBisShortRec); }
                             else {
