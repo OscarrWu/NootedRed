@@ -190,6 +190,20 @@ static UInt64 gBisR14i = 0;             // r14i：`*(u64*)(subobj+8)`（＝ 0x98
 static UInt32 gBisR14iRead = 0;         // ri：1＝真读过；0＝哨兵（subobj 空）
 static UInt64 gBisReci = 0;             // reci：`0x958d8(host,5)` 的记录指针（非 0 ⟺ 记录可查）
 static UInt32 gBisReciRead = 0;         // rc：1＝真读过（"真读到 0"也算）；0＝哨兵
+// ★ R47/R49（2026-10-18）：`r0b2`／`r14b2`／`recib2` 出口再读（**本卡唯一新增**）。
+//  定位事实：既有读数点整体位于 org 调用**返回之后**（R33 块在 `FunctionCast(orgMode9440f)`
+//  之后）⇒ 现有 `r0`/`r14i`/`reci` 本就是"出口值"。本卡按规格在同一读点**再独立
+//  解引用一次**并各配已读标志（`r0b2b`/`r14b2b`/`recib2b`）⇒ 作确定性复核：
+//  同地址两次读值一致 ⇒ 读链稳定；不一致 ⇒ 读链/对象在区间内被改。
+//  ⚠ 纯内存读、同链同守卫、哨兵与真值可区分（Read=1 时值可信，即使值恰为哨兵形态）。
+//  ⚠ 哨兵口径（R3）：`r14b2`／`recib2` 的值 `0` 是**合法真值**（`0x98125` 的 X2／X3 触发条件正是
+//    `0x958d8==0`／`*(subobj+8)==0`）⇒ 未读到一律写既有指针级哨兵 `kBisNone64`，不得用 0。
+static UInt32 gBisR0b2 = kBisNone32;      // r0b2：出口再读 `rec[0]`（u32）；哨兵＝未读（kBisNone32）
+static UInt32 gBisR0b2Read = 0;           // r0b2b：1＝真读过；0＝哨兵（未读）
+static UInt64 gBisR14b2 = kBisNone64;     // r14b2：出口再读 `*(u64*)(subobj+8)`；哨兵＝未读
+static UInt32 gBisR14b2Read = 0;          // r14b2b：1＝真读过；0＝哨兵（subobj 空）
+static UInt64 gBisRecib2 = kBisNone64;    // recib2：出口再读 `0x958d8(host,5)` 记录指针；哨兵＝未读
+static UInt32 gBisRecib2Read = 0;         // recib2b：1＝真读过（"真读到 0"也算）；0＝哨兵
 static UInt32 gBisHit = 0;   // 本扩读是否命中（1＝走到了 client5/stage0 且各前置非空；0＝未命中/未走到）
 static UInt32 gBisShort = 0; // 短路原因码（**只记首次**）：0=无
 enum : UInt32 {
@@ -396,6 +410,8 @@ int nredTraceFlush(int secTag)
     //    · `c4a4>0 ∧ c4ret==0` ⇒ 断在 ④（`0x929ac`）；
     //    · `Ee8≠0 ∧ r28≠0` ⇒ 我方记录已被采纳并写入 `dev+0xE8`（与 `[nredInsert] ours>0` 互证）；
     //    · `site=?` 占多数 ⇒ 返回值语义/基址与反汇编不符 ⇒ 保留证据上报，不擅改判据。
+    //    · 行末 `r0b2/r0b2b`／`r14b2/r14b2b`／`recib2/recib2b`＝出口三值的**同点复读**（各配已读标志）；
+    //      `…b=1` ⇒ 值可信（即使恰为哨兵形态）；三者与 `r0/r14i/reci` 逐字相等 ⇒ 该区间读链稳定。
     //  ⚠ 零行为：只读我方标量（由三个**既有** wrapper 写入），本处**零解引用**、零 SYSLOG、零 panic 文本。
     if (gTtlBisect && off < sizeof(body)) {
         const size_t cap = sizeof(body) - off;
@@ -406,7 +422,8 @@ int nredTraceFlush(int secTag)
                                 "o3=%llx o4=%llx c14=%llx f112=%llx f600=%llx f616=%llx "
                                 "v176=%08x vb=%u a=%u x=%u a2=%u rb=%u "
                                 "r14i=%llx ri=%u reci=%llx rc=%u "
-                                "r0=%u r0b=%u hit=%u sh=%s\n",
+                                "r0=%u r0b=%u hit=%u sh=%s r0b2=%u r0b2b=%u r14b2=%llx r14b2b=%u "
+                                "recib2=%llx recib2b=%u\n",
                                 static_cast<unsigned>(gC4n), static_cast<unsigned>(gC4ret),
                                 static_cast<unsigned>(gC4a4), static_cast<unsigned>(gC4b4),
                                 static_cast<unsigned>(gC4c4),
@@ -439,7 +456,12 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gBisR0), static_cast<unsigned>(gBisR0Read),
                                 static_cast<unsigned>(gBisHit),
                                 kBisShortReason[(gBisShort < (sizeof(kBisShortReason) / sizeof(kBisShortReason[0])))
-                                                    ? gBisShort : 0]);
+                                                    ? gBisShort : 0],
+                                static_cast<unsigned>(gBisR0b2), static_cast<unsigned>(gBisR0b2Read),
+                                static_cast<unsigned long long>(gBisR14b2),
+                                static_cast<unsigned>(gBisR14b2Read),
+                                static_cast<unsigned long long>(gBisRecib2),
+                                static_cast<unsigned>(gBisRecib2Read));
         if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
     }
     const uint32_t n = gTraceRing.count;
@@ -2207,6 +2229,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                 //  判 ③a：为 0 ⇒ `0x981fc je` ⇒ "NULL GVM sw_init entry!"。守卫＝subobj 已非空。
                 gBisR14i = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(subobj) + 8);
                 gBisR14iRead = 1;
+                // ★ R47/R49：`r14b2`＝出口再读同一地址（**独立再解引用一次**，非复制 rec 变量）。
+                gBisR14b2 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(subobj) + 8);
+                gBisR14b2Read = 1;
                 // L1b：host = *(subobj)
                 void* host = *reinterpret_cast<void* const*>(subobj);
                 if (!nredKernelPtrOk(host)) { setShort(kBisShortHost); host = nullptr; }
@@ -2262,6 +2287,10 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                             // ★ R44 裁决：r0＝rec[0] 原值（与 a2 同源同链）＋ r0b 已读标志。
                             gBisR0 = rec0;
                             gBisR0Read = 1;
+                            // ★ R47/R49：`r0b2`＝出口再读同一地址（**独立再解引用一次**，非复制 rec0）。
+                            gBisR0b2 = *reinterpret_cast<const UInt32*>(
+                                static_cast<const UInt8*>(slot3obj) + 56);
+                            gBisR0b2Read = 1;
                         }
                     }
                     // ctx = *(slot1+600)（第五出口的 rdi；`982b8: movq 600(%rax),%r14`）
@@ -2307,6 +2336,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                     //   idx == 0xFFFFFFFF ⇒ 未装配（返 0）                            ; `9590e/95911`
                     //   **record = *(u64*)(pool+608) + 3652 * idx**                  ; `95913/9591a`
                     //     ⚠ 与"pool + 608*idx"**不是**同一式（我先前写错过，已按机器码改正）。
+                    // ★ R47/R49：`recib2`＝上述 `0x958d8` 复刻的**出口复读**（同一算式在同一读点再取一次，
+                    //  非复制变量、不调用 Apple 函数）⇒ 三条出口分支各紧跟 `gBisRecib2` 赋值，
+                    //  哨兵＝`kBisNone64`（Read=0 时值不可信）。
                     void* pool = nullptr;
                     {
                         void* inner = *reinterpret_cast<void* const*>(host);
@@ -2323,6 +2355,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                     if (!nredKernelPtrOk(pool)) {
                         // 0x958d8 在 pool==0 时返 0（`958f8 je 0x95923`）⇒ "真读到 0"（② 成立）
                         gBisReci = 0; gBisReciRead = 1;
+                        gBisRecib2 = 0; gBisRecib2Read = 1;   // 出口复读：pool 非法 ⇒ 与 reci 同判返 0
                         setShort(kBisShortRec);
                     }
                     else {
@@ -2331,6 +2364,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                         if (idx == 0xFFFFFFFFU) {
                             // 0x958d8 在 idx==0xFFFFFFFF 时返 0（`9590e/95911`）⇒ "真读到 0"（② 成立）
                             gBisReci = 0; gBisReciRead = 1;
+                            gBisRecib2 = 0; gBisRecib2Read = 1;   // 出口复读：idx 未装配 ⇒ 返 0
                             setShort(kBisShortRec);
                         }
                         else {
@@ -2339,6 +2373,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                             // reci＝0x958d8 的原样返回（raw 地址，**不做** ptr-ok：Apple 亦不校验，
                             //  非 0 ⟺ 记录可查 ⟺ ② 不成立）。rc=1 ⇒ 真读到（含真读到 0 的情况）。
                             gBisReci = recAddr; gBisReciRead = 1;
+                            gBisRecib2 = recAddr; gBisRecib2Read = 1;   // 出口复读：同一算式同址再取
                             void* rec = reinterpret_cast<void*>(recAddr);
                             if (!nredKernelPtrOk(rec)) { setShort(kBisShortRec); }
                             else {
