@@ -148,6 +148,14 @@ static UInt32 gSwLastId      = 0;       // 最近一次送达的模块号（1-ba
 static UInt64 gProbe9[6] = {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
                             0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
 static UInt32 gProbe9N   = 0;   // 探针被调次数（供"是否跑过"的判据；`[swprobe9] n=`）
+// R129（观测修正）：模块 8 阶段 2 的**失败定位读数**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
+//  依据 R128 §4.3／§6-X1：`[20]`（`0x6720b`）与 `[23]`（`0x67328`）**共用 `bit17`** ⇒ 只有 `v612` 能分开它们；
+//  `h712`＝`[20]` 写入的版本枚举（"是否跑过"＋枚举值）；`h1728`＝`[20]` 装入的 240 B 函数表指针
+//  （为 0 ⇒ `[23]` 必返 0 ⇒ 反证停在 `[20]`）。**纯标量读、零新增解引用方向。**
+static UInt32 gM8V612  = 0xFFFFFFFFU;             // `*(u32*)(I+612)`＝模块 8 的判别式 `v`
+static UInt32 gM8H712  = 0xFFFFFFFFU;             // `*(u32*)(h+712)`（`[20]` 写的版本枚举）
+static UInt64 gM8H1728 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1728)`（`[20]` 装入的函数表指针）
+static UInt32 gM8N     = 0;                       // 我方模块 8 本体被进入的次数（戳记"跑过"判据）
 // R105：入参结构两个 32 位字段的**留存**（供 `[swinfo]` 戳记；纯读、零新增解引用方向）。
 //  `0xFFFFFFFF`＝**从未读到**（哨兵；与真实值可区分——模块判定只需 `==1`／`==0` 之类的小值）。
 static UInt32 gSwInfo12 = 0xFFFFFFFFU;   // `*(u32*)(info+12)`（模块 2（SDMA）的关键判别字段）
@@ -670,6 +678,21 @@ int nredTraceFlush(int secTag)
             static_cast<unsigned long long>(gProbe9[2]), static_cast<unsigned long long>(gProbe9[3]),
             static_cast<unsigned long long>(gProbe9[4]), static_cast<unsigned long long>(gProbe9[5]));
         if (np > 0) { off += (static_cast<size_t>(np) < capP) ? static_cast<size_t>(np) : capP; }
+    }
+    // R129：`[swm8]` —— **模块 8（SMU）阶段 2 的失败定位读数**（R128 §4.3／§6-X1），紧跟 `[swprobe9]` 之后。
+    //  **产出条件＝`gM8N != 0`**（比"跟随门控"更严：只有我方模块 8 本体**真被进入**才产出）⇒ 关态一行不多。
+    //  `ffffffff`／`ffffffffffffffff`＝该项**未读到**（哨兵；真实值不可能等于它）。
+    //  判读（R128 §4.3）：`v612` 的 `((v>>2)|(v>>4))&1 == 0` ⇒ **停 `[20]`**；`== 1` ⇒ `[20]` 返 0 ⇒ **停 `[23]`**；
+    //  `h712` 非哨兵 ⇒ `[20]` **跑过**（其值为版本枚举）；`h1728 == 0` ⇒ `[23]` 必返 0（反证停在 `[20]`）。
+    //  ⚠ 只读我方 BSS 标量、**零解引用**；既有各行格式一字不改。
+    if (gM8N != 0 && off < sizeof(body)) {
+        const size_t capM = sizeof(body) - off;
+        const int nm = snprintf(body + off, capM, "[swm8] n=%u v612=%08x h712=%08x h1728=%llx\n",
+                                static_cast<unsigned>(gM8N),
+                                static_cast<unsigned>(gM8V612),
+                                static_cast<unsigned>(gM8H712),
+                                static_cast<unsigned long long>(gM8H1728));
+        if (nm > 0) { off += (static_cast<size_t>(nm) < capM) ? static_cast<size_t>(nm) : capM; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -2404,7 +2427,8 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
 //    通吃所有模块（各模块记录区布局不同：模块 5 为 3648 B，模块 6 为 632 B）。
 //  · 未实现模块 ⇒ `default:` **记日志 ＋ 如实返回非 0**（**禁止空壳成功**）。
 //  · 逐模块启用门控 `-NRedSwInitIds=<csv>`，**默认只启用模块 5**（一轮一个变量）。
-//  · 契约不变：只读 `info`（+3656／+3664／+4..+3651）；`out` **只写 +8**（绝不写 +0）；入参空返 2、
+//  · 契约不变：只读 `info`（**R129 起 `+3656／+3664` 仅当模块号＝5**——其它模块的 info 远小于 3664 B，
+//    越界读数无意义；见 `nredSwLogCall` 内同款说明）／`+4..+3651`；`out` **只写 +8**（绝不写 +0）；入参空返 2、
 //    已存在返 3、**全部真实成功 ∧ 放行门控开才返 0**、其余非 0。
 //  · 栈与缓冲：簿记体在 BSS；日志缓冲 static（零栈占用）；帧 ≤128 B。
 // （上一张卡已交付骨架 `d4932c0`／`47e479b`；本卡按 R60 重构为"单入口 ＋ 按模块号分派"。）
@@ -2648,11 +2672,18 @@ static void nredSwLogCall(const UInt32 id, const void* const info, const void* c
     UInt64 i3656 = 0, i3664 = 0, r0 = 0, r1 = 0;
     UInt32 o0 = 0;
     const bool ok = (info != nullptr && out != nullptr);
+    // R129（观测口径修正）：`i3656`／`i3664` **只对模块 5 的 `info` 布局有意义**（其 info ≈3680 B）。模块 6／7／8／9
+    //  的 info 分别仅 632／648／704／(小) B ⇒ 读 `+3656/+3664` **越界约 3 KB**：**不是崩溃，但读数无意义**，
+    //  且极易被误当成"该模块的字段"判读（R128 §4.7）⇒ **仅当 `id == 5` 时读取真值，其它模块保持 0**。
+    //  ⚠ 下面 printf 的字段名与宽度**一字未动** ⇒ **模块 5 的输出格式与数值逐字不变**（其它模块显示 `0`）。
+    const bool readLegacy = (id == 5);
     if (ok) {
         const UInt8* const I = static_cast<const UInt8*>(info);
         const UInt8* const O = static_cast<const UInt8*>(out);
-        i3656 = *reinterpret_cast<const UInt64*>(I + 3656);
-        i3664 = *reinterpret_cast<const UInt64*>(I + 3664);
+        if (readLegacy) {
+            i3656 = *reinterpret_cast<const UInt64*>(I + 3656);
+            i3664 = *reinterpret_cast<const UInt64*>(I + 3664);
+        }
         r0    = *reinterpret_cast<const UInt64*>(I + 4);     // 记录区首 8 B
         r1    = *reinterpret_cast<const UInt64*>(I + 12);    // 记录区次 8 B（供 `[gvmsw]` 原格式）
         o0    = *reinterpret_cast<const UInt32*>(O);          // `out+0` 初值（只读）
@@ -3070,6 +3101,7 @@ static int nredSmuSwInit(void* const info, void* const out)
     // ── #1~#6 缓冲清零与形状校验（纯读）───────────────────────────────────────────────────────
     __builtin_memset(L, 0, kSmuLocalBytes);                                        // #1（`64334/64339`）bzero(local,1968)
     if (I == nullptr || O == nullptr) { return kSwResNullArg; }                    // #2（`64343..6434f`）⇒ 2
+    gM8N += 1;                                                                    // R129：戳记"跑过"判据
     if (*reinterpret_cast<const UInt32*>(I + 0) != 704) {                          // #3（`6435a/64361`）
         gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
     }
@@ -3080,6 +3112,7 @@ static int nredSmuSwInit(void* const info, void* const out)
         gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
     }
     const UInt32 v = *reinterpret_cast<const UInt32*>(I + 612);                    // #6（`6437c`）
+    gM8V612 = v;                                                                  // R129：判别式读数（R128 §4.3）
     if ((v & 8U) != 0 && ((((v >> 2) | (v >> 4)) & 1U) == 0)) {                    //  `64383..64393` 观测类判据
         gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
     }
@@ -3155,6 +3188,11 @@ static int nredSmuSwInit(void* const info, void* const out)
     using NRedSmuSubmit = int (*)(void*, UInt64, UInt64);
     const NRedSmuSubmit fnSubmit = reinterpret_cast<NRedSmuSubmit>(gHwlibsSlide + 0x6720b);
     const int rc20 = fnSubmit(h, p12, p20);                                        // #20（`64576..64582`）
+    // R129：`[20]` 之后的**失败定位读数**——`h` 已过 `nredKernelPtrOk`，两处偏移（712／1728）都在 1968 B 内，
+    //  **纯标量只读**。读点＝**紧跟调用之后**（`[20]` 无论成败都已写这两处：`67225`／`6722c`）⇒ 能把
+    //  "停 `[20]`"（`bit17`，返回前已留存）与"停 `[23]`"分开（R128 §4.3／§6-X1）。
+    gM8H712  = *reinterpret_cast<const UInt32*>(H + 712);
+    gM8H1728 = *reinterpret_cast<const UInt64*>(H + 1728);
     if (rc20 != 0) {
         gGvmBook.failMask |= (1U << 17); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
     }
