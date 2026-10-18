@@ -159,6 +159,18 @@ static UInt32 gBisV176 = kBisNone32, gBisA = kBisNone32, gBisX = kBisNone32;
 //  ⇒ 语义：`vb=1` ⇒ `v176` 是**真读到的值**（哪怕它恰等于 0xFFFFFFFF）；
 //          `vb=0` ⇒ `v176` 是**初始哨兵**，不得当作任何真值使用。
 static UInt32 gBisV176Read = 0;
+// ★ R39（2026-10-18）：`arg2` 确认读数（**本卡唯一新增的 u32**）。
+//  背景：R38 已定真实提交函数＝`FUN_000a4b90`（`*(slot1+616)`），其成败由第 2 参
+//  `arg2` 决定：`arg2=2` ⇒ 打印并返 2 ⇒ **失败**；`arg2=0` ⇒ 返 0 ⇒ 成功。
+//  算式（`0x9829e` 逐字，R39 §1）：`arg2 = 2 × ((rec[0]==1) ∧ 0xa28ad 返真)`，
+//  其中 `rec` 由 `0xa28ad(host,&rec)` 填：`rec = *(u64*)(slot3obj+56)`（24 B），
+//  `slot3obj = 0x8b8e7(root) = 0x8bbc4(*(root),3) = *( *(root) + 16 + 3*24 )`。
+//  ⇒ **只读、不调用 Apple 函数**（`0xa28ad` 会写栈缓冲 ⇒ 属介入，禁用）：直接按
+//  上述取法读 `rec[0]` 并算 `a2`。
+//  ⚠ R39 §0.3 顺带纠正：root 的 slot 3（base＝`*(root)`）**不是** R16 的 `o3`
+//  （base＝`*(ctx)`）⇒ **a2 的 base 必须用 `rootIn`＝`*(root)`，不得复用 `o3`**。
+static UInt32 gBisA2 = kBisNone32;      // arg2：{0,2}；哨兵＝未读
+static UInt32 gBisA2Read = 0;           // rb：1＝真读过 rec[0]；0＝哨兵（未读）
 static UInt32 gBisHit = 0;   // 本扩读是否命中（1＝走到了 client5/stage0 且各前置非空；0＝未命中/未走到）
 static UInt32 gBisShort = 0; // 短路原因码（**只记首次**）：0=无
 enum : UInt32 {
@@ -373,7 +385,7 @@ int nredTraceFlush(int secTag)
                                 "Ee8=%llx r28=%llx r30=%llx s2c=%u s3c=%u "
                                 "p1=%u/%u/%u p2=%u/%u/%u p3=%u/%u/%u "
                                 "o3=%llx o4=%llx c14=%llx f112=%llx f600=%llx f616=%llx "
-                                "v176=%08x vb=%u a=%u x=%u hit=%u sh=%s\n",
+                                "v176=%08x vb=%u a=%u x=%u a2=%u rb=%u hit=%u sh=%s\n",
                                 static_cast<unsigned>(gC4n), static_cast<unsigned>(gC4ret),
                                 static_cast<unsigned>(gC4a4), static_cast<unsigned>(gC4b4),
                                 static_cast<unsigned>(gC4c4),
@@ -400,6 +412,7 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gBisFn616),
                                 static_cast<unsigned>(gBisV176), static_cast<unsigned>(gBisV176Read),
                                 static_cast<unsigned>(gBisA), static_cast<unsigned>(gBisX),
+                                static_cast<unsigned>(gBisA2), static_cast<unsigned>(gBisA2Read),
                                 static_cast<unsigned>(gBisHit),
                                 kBisShortReason[(gBisShort < (sizeof(kBisShortReason) / sizeof(kBisShortReason[0])))
                                                     ? gBisShort : 0]);
@@ -2202,6 +2215,23 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                         const UInt8* const S = static_cast<const UInt8*>(slot1);
                         gBisFn600 = *reinterpret_cast<const UInt64*>(S + 600);
                         gBisFn616 = *reinterpret_cast<const UInt64*>(S + 616);
+                    }
+                    // ★ R39：`arg2` 确认读数（**本卡唯一新增**；只读、不调用 Apple 函数）。
+                    //  取法（逐字，R39 §2.1）：`slot3obj = 0x8b8e7(root) = 0x8bbc4(*(root),3)
+                    //   = *( *(root) + 16 + 3*24 ) = *(rootIn + 88)`（rootIn＝*(root) 已算好）；
+                    //  `rec[0] = *(u32*)(slot3obj + 56)`；`a2 = (rec[0]==1) ? 2 : 0`。
+                    //  ⚠ 每级自备 nredKernelPtrOk 守卫；slot3obj==0 ⇒ 哨兵＋rb=0。
+                    if (rootIn != nullptr) {
+                        const UInt8* const RIN = static_cast<const UInt8*>(rootIn);
+                        void* slot3obj = reinterpret_cast<void*>(
+                            *reinterpret_cast<const UInt64*>(RIN + 16 + 3 * 24));
+                        if (!nredKernelPtrOk(slot3obj)) { slot3obj = nullptr; }
+                        if (slot3obj != nullptr) {
+                            gBisA2Read = 1;   // rb=1：真读过（a2 从此可信，即使值恰为哨兵形态）
+                            const UInt32 rec0 = *reinterpret_cast<const UInt32*>(
+                                static_cast<const UInt8*>(slot3obj) + 56);
+                            gBisA2 = (rec0 == 1) ? 2u : 0u;
+                        }
                     }
                     // ctx = *(slot1+600)（第五出口的 rdi；`982b8: movq 600(%rax),%r14`）
                     void* ctx = nullptr;
