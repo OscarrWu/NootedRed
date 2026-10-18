@@ -3059,6 +3059,31 @@ static int nredPspSwInit(void* const info, void* const out)
     return kSwResStepFail;                // 6
 }
 
+// ── 模块 7（GC）本体：**阶段 1**（R100 §3.6）────────────────────────────────────────────────
+//  被替换实现＝`0x7ce0`（装配点 `0x99851`）；真实动作（R100 亲读）：
+//   形状校验（`info+0==648`／`out+0==1064`／`info+8==1`）→ 缓冲（`+16 ← info+624`、`+8 ← info+616`）
+//   → `0x9dbf`（取/建）→ `0x9f3d`（初始化）→ `out+8 = obj`
+//   → `*(obj+16) = info+624`；`*(obj+8) = info+616` → `memcpy(obj+192, info+4, 608)`
+//  ⚠ **阶段 1 只做形状校验与两字段非零登记**；③④⑤⑥⑦⑧ 与句柄供给**如实登记为省略** ⇒ **恒返 6**
+//    （fail-closed；**不得**为凑 `res=7` 而放宽——红线）。
+static int nredGcSwInit(void* const info, void* const out)
+{
+    const UInt8* const I = static_cast<const UInt8*>(info);
+    UInt8* const O = static_cast<UInt8*>(out);
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    if (*reinterpret_cast<const UInt32*>(I + 0) != 648)  { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt32*>(O + 0) != 1064) { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt32*>(I + 8) != 1)    { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
+    if (*reinterpret_cast<const UInt64*>(I + 616) == 0 ||
+        *reinterpret_cast<const UInt64*>(I + 624) == 0) { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
+    gGvmBook.omittedMask |= (1U << 19);   // ③ 取/建（`0x9dbf`）——需书面授权
+    gGvmBook.omittedMask |= (1U << 20);   // ④ 初始化（`0x9f3d`）——需书面授权
+    gGvmBook.omittedMask |= (1U << 21);   // ⑤⑥⑦⑧ `out+8`／`obj+16`／`obj+8`／`memcpy(608)`
+    gGvmBook.omittedMask |= (1U << 22);   // 句柄供给（`subobj+40`）
+    gGvmBook.failMask    |= (1U << 22);   // ★ fail-closed：全过也不得报成功
+    return kSwResStepFail;                // 6
+}
+
 // ── 统一入口（**唯一**）：按模块号分派（R60 需求 1.2）─────────────────────────────────────
 //  · 计数：`gGvmSwCalls`（全部）与 `gSwCallN[id]`（按模块号，供 `[swi] n=`）；`gSwLastId`＝本次模块号。
 //  · 模块 5 ⇒ 本体；**其余模块 ⇒ 显式"未实现"**（只记日志 ＋ **如实返回非 0**；禁止空壳成功）。
@@ -3080,6 +3105,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
             case 5: res = nredGvmSwInit(info, out, o8init); break;   // 模块 5＝GVM（A1–A11）
             case 6: res = nredPspSwInit(info, out); break;           // 模块 6＝PSP（R96 阶段 1）
             case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R98 阶段 1）
+            case 7: res = nredGcSwInit(info, out); break;            // 模块 7＝GC（R100 阶段 1）
             default: break;                                          // 其余模块：**显式未实现**
         }
     }
