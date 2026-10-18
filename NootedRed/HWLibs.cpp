@@ -3014,26 +3014,33 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     return kSwResPass;                                  // ★ 真实成功（R80 起**恢复可达**）
 }
 
-// ── 模块 8（SMU）本体：**阶段 2**（R108 修订版，含 M-1～M-4）─────────────────────────────────────
+// ── 模块 8（SMU）本体：**阶段 2**（R108 修订版；R111/M-A 修正）───────────────────────────────────
 //  被替换实现＝`0x6430f`（装配点 `0x9e4c9`）；寄存器别名：`r15`＝`I`（info）、`r14`＝`O`（out）、
 //  `local`＝`rbp-2000`（1968 B）、`scratch`＝`rbp-32`。动作＝R108 §1 的 24 行，逐条对照机器码：
 //  `llvm-objdump -d --start-address=0x6432b --stop-address=0x6463b
 //   "kb/内核扩展/13.6/extracted/com.apple.kext.AMDRadeonX5000HWLibs.macho"`
-//  ⚠ **阶段 2 无省略**（R108 §5）：`omittedMask` 恒 0；失败面＝2／4（`bit16`）／5（`bit15`）／
-//    6（`bit17`／`bit18`）／7 ⇒ **没有任何"少做却返 0"的路径**（成功出口只有 `6463b` 一处）。
+//  ⚠ **成功路径无省略**：`omittedMask` 恒 0 的含义是"**成功路径每一步都真做**"（R108 §5）。
+//    失败面＝2／4（`bit16`）／5（`bit15`）／6（`bit17`／`bit18`）／7 ⇒ **没有"少做却返 0"的路径**
+//    （成功出口只有 `6463b` 一处）。
+//  ⚠ **接受的偏差（如实登记；R111/N-2）**：**失败路径不调用苹果清理 `0x64a9c`**（苹果原实现在
+//    `6460a..64626` 调用）⇒ #11 之后失败的句柄与 `h+1712` 子对象**会泄漏**。理由：该调用**不在
+//    R108 §2 的授权清单内**（清单只有 7 项）⇒ 不得自行补调用。
 //  ⚠ **默认不可达**：`gSwInitIdsMask` 初值只含模块 5；即便掩码含 8，放行门关也只返 7（R108 §4）。
-//  ⚠ **与苹果的三处如实差异**（这三个返回值苹果机器码**未判**，本实现按 R108 §1 判 ⇒ 只会更早失败）：
-//    #10 `6440c`、#22 `645bd`（均 `0x64b1a`）、#19 `64571`（`0x65885`）。
-//  ⚠ **另加 3 处先决检查**（R108 动作表外；防 trap／防野指针，只会更早失败）：
-//    ① `gHwlibsSlide == 0`（调用任何苹果函数之前）；② `nredKernelPtrOk(h)`（`0x649ee` 返回后）；
-//    ③ `*(h+1712) != 0`（它是 #22 的第二实参 ⇒ 不得把 0 交给 `0x64b1a`）。
+//  ⚠ **与苹果的两处如实差异**（这两个返回值苹果机器码**未判**，本实现按 R108 §1 判 ⇒ 只会更早失败）：
+//    #10 `6440c`、#22 `645bd`（均 `0x64b1a`；该函数自身约定＝**0 成功／2 失败**）。
+//    ※ #19（`0x65885`）的返回判据已按 **R111/M-A 删除**（纯 setter、其返回值无状态语义，见该处注释）。
+//  ⚠ **另加 3 处先决检查**（R108 动作表外；只会更早失败）：
+//    ① `gHwlibsSlide == 0`（调用任何苹果函数之前 ⇒ 防野指针调用）；
+//    ② `nredKernelPtrOk(h)`（`0x649ee` 返回后 ⇒ 防按野指针解引用）；
+//    ③ `*(h+1712) != 0`（**R111/N-1 更正**：`0x64b1a` 对 `rsi==0` **自行显式返 2、不解引用** ⇒ 它
+//       **不是"防 trap"**，而是"提前失败"；与 #22 自身判据结果等价——两条路都返 4（`bit16`））。
 static const UInt32 kSmuLocalBytes = 1968;   // `0x64334` 的 `$1968`
-static UInt8 gSmuLocalBuf[kSmuLocalBytes];   // `local`（`rbp-2000`）⇒ static（栈纪律：帧 ≤128 B）
+static UInt8 gSmuLocalBuf[kSmuLocalBytes];   // `local`（`rbp-2000`）⇒ **static＝非可重入**（栈纪律：帧 ≤128 B）
 static int nredSmuSwInit(void* const info, void* const out)
 {
     const UInt8* const I = static_cast<const UInt8*>(info);
     UInt8* const O = static_cast<UInt8*>(out);
-    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;   // 阶段 2 **无省略** ⇒ `omittedMask` 保持 0（R108 §5）
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;   // **成功路径无省略** ⇒ `omittedMask` 保持 0（R108 §5）
     UInt8* const L = gSmuLocalBuf;
     // ── #1~#6 缓冲清零与形状校验（纯读）───────────────────────────────────────────────────────
     __builtin_memset(L, 0, kSmuLocalBytes);                                        // #1（`64334/64339`）bzero(local,1968)
@@ -3110,10 +3117,13 @@ static int nredSmuSwInit(void* const info, void* const out)
     // ── #19~#23 五项苹果调用（授权清单 ⑦／③／④／⑤／⑥）──────────────────────────────────────
     using NRedSmuSetter = int (*)(void*, UInt32, UInt32);
     const NRedSmuSetter fnSetter = reinterpret_cast<NRedSmuSetter>(gHwlibsSlide + 0x65885);
-    const int rc19 = fnSetter(h, 0xC0201U, 0);                                     // #19（`64566..64571`）
-    if (rc19 != 0) {                                                               //  ★ 苹果未判（见头注差异）
-        gGvmBook.failMask |= (1U << 17); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
-    }
+    // #19（`64566..64571`）：`0x65885(h, 0xC0201, 0)`。**R111/M-A 修正**：该函数是**纯 setter**——
+    //  全函数仅 7 条指令、**无分支**（`65889 movl %esi,%eax`／`6588b movq %rax,960(%rdi)`／
+    //  `65892 movq %rdx,968(%rdi)`／`65899 retq`）⇒ **返回值＝它自己的第 2 实参**（此处 `0xC0201` ≠ 0）
+    //  ⇒ 若判 `rc != 0` 则**判据恒真** ⇒ 阶段 2 的**成功出口不可达**、真机读数恒为失败并**误归因**。
+    //  旁证：苹果自身 11 处调用点**无一**以其返回值作判据 ⇒ **本处判据已删除、只保留调用**
+    //  （R108 U-5 由此结案：`0x65885`＝纯 setter，"无状态可判"）。
+    fnSetter(h, 0xC0201U, 0);
     UInt64 p12 = 0, p20 = 0;                     // #20：`*(u64*)(I+12)`／`*(u64*)(I+20)`＝**8 字节非对齐读**
     __builtin_memcpy(&p12, I + 12, 8);
     __builtin_memcpy(&p20, I + 20, 8);
@@ -3129,7 +3139,9 @@ static int nredSmuSwInit(void* const info, void* const out)
         gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
     }
     const UInt64 hSub = *reinterpret_cast<const UInt64*>(H + 1712);                // #22 第二实参（`645b1`）
-    if (hSub == 0) {                               // 先决③：**不得**把 0 交给 `0x64b1a`（防 trap）
+    if (hSub == 0) {                               // 先决③（**R111/N-1 更正**：非"防 trap"——`0x64b1a`
+                                                   //   对 `rsi==0` 自行显式返 2、不解引用 ⇒ 本检查只是
+                                                   //   "提前失败"，结果与 #22 判据等价：都返 4）
         gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
     }
     const int rc22 = fnInitFrom(h, reinterpret_cast<void*>(hSub), 0x8000U);        // #22（`645ad..645bd`）
@@ -3148,6 +3160,8 @@ static int nredSmuSwInit(void* const info, void* const out)
     //    (b) `0x64c1e`：`64c22` 读 `*(h+16)`；`64c26` 用 `*(X+8)`；`64c2a` 调 `*(X+56)`   ★ M-2
     //    (c) `0x64a9c(h, *(h+1712))`：`64ac8` 读 `*(arg2-8)`（arg2＝`*(h+1712)`）
     //  ※ `0x64c1e` 的第二实参全程未被读 ⇒ `*(h+912)`／`*(h+944)` 为 0 也安全（复核 §2.2）。
+    //  **R111/N-3 口径**：`bit18` ⇒ **`xOk` 失败**（`*(X+8)`／`*(X+24)`／`*(X+56)` 任一为 0，或 `X` 非法）；
+    //    另一条件 `sub == 0` 已在先决③处（`bit16`）拦下 ⇒ **`sub==0` 分支实流不可达**（保留以逐字对齐 R108 §3）。
     {
         const UInt8* const HG  = static_cast<const UInt8*>(h);
         const bool    hOk      = nredKernelPtrOk(h);
@@ -3157,6 +3171,7 @@ static int nredSmuSwInit(void* const info, void* const out)
                                  && *reinterpret_cast<const UInt64*>(X + 24) != 0
                                  && *reinterpret_cast<const UInt64*>(X + 56) != 0;  // ★ M-2
         const UInt64  sub      = hOk ? *reinterpret_cast<const UInt64*>(HG + 1712) : 0;
+        //  R111/N-3：实流到达此处 ⇒ **`xOk` 失败**（`sub==0` 已被先决③以 `bit16` 拦下）。
         if (!xOk || sub == 0) {
             gGvmBook.failMask |= (1U << 18);                                       // ★ M-3：`bit18`（"未供给 ⇒ 6"）
             *reinterpret_cast<UInt64*>(O + 8) = 0;                                 // #25：失败一律清 `out+8`
