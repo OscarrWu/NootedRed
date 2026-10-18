@@ -131,7 +131,8 @@ static UInt64 gHwlibsSlide = 0;
 //  ⚠ 为什么放在文件头区：头部戳记在 `NRedTraceFlush*` 的头部区（本文件上方）读它们，位置早于
 //    实现本体 ⇒ 依本文件既有惯例（`gTtlBisect`／`gDevTablePatch`／`gHwlibsSlide` 同此）前置。
 static bool   gGvmSwInstall  = false;   // `-NRedGvmSwInstall`（总开关，默认关）
-static bool   gGvmSwInitPass = false;   // `-NRedGvmSwInitPass`（放行，默认关）
+static bool   gGvmSwInitPass = false;   // `-NRedGvmSwInitPass`（**放行开关**，默认关；R70 §3：语义＝"仅当全部
+                                        //  步骤**达可用层**时才允许报成功"⇒ 当前它**无法单独导致成功**）
 static UInt32 gSwInitIdsMask = (1U << 5); // `-NRedSwInitIds` 解析结果（1..15 位掩码）＝**默认只启用模块 5**
 static UInt32 gGvmSwCalls    = 0;       // 全部调用次数（`[gvmsw] n=`；上一张卡已交付，保持语义）
 static UInt32 gSwCallN[16]   = {0};     // 各模块被调用次数（`[swi] n=`＝**按模块号计数**；索引＝模块号 1..15）
@@ -2323,13 +2324,13 @@ static bool gGvmSwFused = false;   // 一次性熔断：回滚过 ⇒ 不再安�
 
 // 返回值错误码（R60 §1.2；沿用模块 5 约定）
 enum : int {
-    kSwResPass        = 0,   // 全部软件初始化步骤真实成功 ∧ 放行门控开
+    kSwResPass        = 0,   // 全部步骤**达可用层** ∧ 放行开关开（R70：当前不可达——A8 未达可用层）
     kSwResNullArg     = 2,   // 入参为空（与苹果那版同值）
     kSwResExists      = 3,   // 已存在、无需初始化（与苹果那版同值）
     kSwResAllocFail   = 4,   // 我方簿记/结构建立失败（并熔断回滚）
     kSwResParseFail   = 5,   // 记录区解析失败
     kSwResStepFail    = 6,   // 某软件初始化步骤失败（并熔断回滚）
-    kSwResPassGateOff = 7,   // 软件初始化成功，但 `-NRedGvmSwInitPass` 未开
+    kSwResPassGateOff = 7,   // 全部步骤达可用层但放行开关未开（R70：当前不可达——失败位恒非 0）
     kSwResUnimpl      = 8,   // 该模块尚未实现（本轮：模块 5 之外）
 };
 
@@ -2806,6 +2807,9 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     gGvmBook.gartPhys = gartPhys;
     gGvmBook.gartBytes = kGartBytes;
     gGvmBook.gartPtes = 1;                                              // 已写入的表项数（真实计数）
+    //  ⚠ **层次声明**（R70 §2.2／U-3 裁决）：本步（GART 表结构与表项写入）当前**只达"簿记层"**
+    //    ——表已建、表项已写，但**没有消费者**（真实就绪需按 R57 A6 读寄存器确认，红线禁止）⇒
+    //    其"完成"**不代表对硬件可用**；本轮**不收紧**其判定（避免扩大改动面，见 U-3 裁决）。
 
     // ── A7 VM 管理器簿记（对照 `:851-859`）───────────────────────────────────────────────
     gGvmBook.firstKfdVmid = 8;      // VMID 0＝System；1-7＝gfx/compute；8-15＝KFD
@@ -2829,18 +2833,32 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
         nredSwIrqAddId(kIhClientDf, kIhSrcDfEcc, kIrqSrcEcc)) {
         gIrqRegistered = 1;                                  // 三条**全部真实写入**
     }
-    gGvmBook.irqCount      = gIrqEntryN;                     // 真实计数（写入成功几条就是几条）
+    // ── A8 完成判据：**只达"簿记层"，未达"可用层"** ⇒ **无条件计入未完成**（R70 M-1／需求 R1）──────
+    //  · **簿记层**：结果只写进我方簿记体（`gGvmBook`），**没有任何外部消费者**；
+    //  · **可用层**（R70 §2.1 定义）：① 有一个真实存在且身份已明的消费者；② 该消费者能据此完成其
+    //    职责；③ 有可观测判据证明"消费发生了"。
+    //  ⚠ **当前"中断登记"未达可用层**：我方登记表 `gIrqEntries[]` **没有消费者**（苹果侧中断分发器
+    //    身份【未解出】）⇒ 按需求 R1"簿记层不得计入成功"⇒ **失败位恒置位**（下面的登记动作本身照做，
+    //    不改登记逻辑；只改"它的判定层次"）。
+    //  ⚠ **恢复条件**：当"消费者身份已明 ∧ 能触发一次真实分发 ∧ 有可观测判据"三者齐备时，把下一行
+    //    换回按 `gIrqRegistered` 判定（即 `if (gIrqRegistered == 0)`）。
+    gGvmBook.irqCount      = gIrqEntryN;               // 真实计数（写入成功几条就是几条，供判读）
     gGvmBook.irqRegistered = gIrqRegistered;
-    if (gIrqRegistered == 0) { gGvmBook.failMask |= (1U << 7); }   // 登记未全部成功 ⇒ 标错、不返 0
+    gGvmBook.failMask |= (1U << 7);                    // ★ 仅达簿记层（**无消费者**）⇒ 恒计未完成
 
     // ── A9 RAS 簿记（对照 `:861`）——卡面明确"可省" ⇒ 本轮跳过并如实登记（不计入失败）──────────
     gGvmBook.rasSkipped = 1;
     gGvmBook.omittedMask |= (1U << 8);
 
-    // ── A10 回填（对照苹果 `0x1937f` 段／R57 A10）──────────────────────────────────────
-    //  契约限制：`info` 只读、`out+0` 不可写 ⇒ 我方回填落点＝`out+8`（苹果会把它搬进 `subobj+40`）。
-    //  ⚠ 写侧用 `out` 的非 const 视图：**全函数仅此一处**写 `out`，且只写 `+8`。
-    *reinterpret_cast<UInt64*>(static_cast<UInt8*>(out) + 8) = reinterpret_cast<UInt64>(&gGvmBook);
+    // ── A10 回填（对照苹果 `0x1937f` 段／R57 A10）——**自 R70 起暂不回填**（M-3）────────────────
+    //  为什么不回填（三条理由，逐条对应 R70 §4.1）：
+    //   ① **诚实性**：当前"未真实完成"（A8 未达可用层）⇒ **不应把不完整对象交给下游**；
+    //   ② **双保险**：出参 `+8` 保持 0 ⇒ 苹果侧 `0x9831c`（`*(obj+40)==0`）与 `0x19324` 会**安全早退**
+    //      ⇒ 即便将来某路径意外返成功也不崩（R69 §3 #2【反汇编·确凿】）；
+    //   ③ **契约未解出**：`+3664` 只是已知的第一个要求，`0x19324` 四个前置子调对 handle 的其它要求
+    //      ＝【未解出】⇒ 现在回填＝盲交不完整对象（红线）。
+    //  ⚠ **恢复条件**：解出 handle 完整契约（`+3664` ＋ 四个前置子调）后，恢复此处的一行回填。
+    //  ⇒ 本函数**不再写 `out`**（只读契约三处与出参初值）。
 
     // ── 返回值判定（R60 §1.2／§2.4）：任一失败步 ⇒ 非 0；全部真实成功 ∧ 放行门控开 ⇒ 0 ──────────
     if (gGvmBook.failMask != 0) {                       // 失败 ⇒ 熔断回滚（按模块）＋对称清理（A11）
@@ -2849,8 +2867,15 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
         nredSwFini();
         return kSwResStepFail;
     }
-    if (!gGvmSwInitPass) { return kSwResPassGateOff; }  // 软件初始化成功，但放行门控未开
-    return kSwResPass;
+    // ⚠ **放行开关保留**（R70 §3／需求 R3）：`-NRedGvmSwInitPass` 的语义＝"**仅当全部步骤均达可用层**时，
+    //   才允许把成功报给苹果"。当前因上面 M-1 已使失败位恒非 0（A8 未达可用层）⇒ **本行功能上不可达**
+    //   （保留位置与语义，便于将来补齐可用层后逐轮单变量放行）。
+    if (!gGvmSwInitPass) { return kSwResPassGateOff; }
+    // ⚠ **双保险**（R70 M-2）：**"报成功"当前不可达**——M-1 使失败位恒非 0（A8 未达可用层），再加本行
+    //   也返回失败码 ⇒ **"成功码"（本枚举中值为 0 者）在当前代码中没有任何可达出口**。
+    //   **保留其位置与语义**，待"可用层"补齐后恢复"成功码"返回。
+    //   待补项：R69 #1（`out+8` 对象的 `+3664` 契约）＋ 未解出项 U-1（handle 完整契约）。
+    return kSwResStepFail;                              // 待可用层补齐后恢复"成功码"返回
 }
 
 // ── 统一入口（**唯一**）：按模块号分派（R60 需求 1.2）─────────────────────────────────────
@@ -3296,6 +3321,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  ⚠ 关态：不安装、不介入、零新增日志、零新增解引用 ⇒ 与现状逐字一致。
     gGvmSwInstall  = checkKernelArgument("-NRedGvmSwInstall");
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
+    //  ⚠ **放行开关语义**（R70 §3／需求 R3）：本开关**保留**，但语义改为"**仅当全部步骤均达可用层**时，
+    //    才允许把成功报给苹果"⇒ 当前（A8 未达可用层、失败位恒非 0）它**单独无法导致成功**。
+    //    保留理由：将来补齐可用层后仍需"是否真的报成功"的单变量开关（逐轮对照），且不改代码即可回滚。
     // 逐模块启用清单（R60 §1.3）：`-NRedSwInitIds=<逗号分隔模块号>`（1..15），**默认 5**（一轮一个变量）。
     //  ⚠ 值型启动参数 ⇒ 用 `PE_boot_args()` 逐字解析（本文件既有 B70 同源）；判定处只读位掩码标量
     //    （遵守"探针内不调 checkKernelArgument"纪律 ⇒ 此处解析一次）。
