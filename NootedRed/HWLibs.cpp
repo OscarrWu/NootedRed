@@ -143,6 +143,10 @@ static UInt32 gSwCallN[16]   = {0};     // 各模块被调用次数（`[swi] n=`
 static UInt8 gSwResById[16] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 static UInt8 gSwCntById[16] = {0};
 static UInt32 gSwLastId      = 0;       // 最近一次送达的模块号（1-based；0＝从未被调到）
+// R105：入参结构两个 32 位字段的**留存**（供 `[swinfo]` 戳记；纯读、零新增解引用方向）。
+//  `0xFFFFFFFF`＝**从未读到**（哨兵；与真实值可区分——模块判定只需 `==1`／`==0` 之类的小值）。
+static UInt32 gSwInfo12 = 0xFFFFFFFFU;   // `*(u32*)(info+12)`（模块 2（SDMA）的关键判别字段）
+static UInt32 gSwInfo8  = 0xFFFFFFFFU;   // `*(u32*)(info+8)`（多数模块的"版本/存在"判别字段）
 static UInt32 gGvmSwInsCode  = 0;       // 安装结果码：0＝未执行（总开关关/未启用/熔断）；1＝已安装；
                                         //  2＝跳过（槽内已是我方）；3＝形态变化（三重校验③失败）；
                                         //  4＝subobj 非法；5＝该模块未启用；6＝期望值未确证/未解出（不猜、不装）
@@ -617,6 +621,18 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gSwS1f24),
                                 static_cast<unsigned long long>(gSwHandleAddr));
         if (nH > 0) { off += (static_cast<size_t>(nH) < capH) ? static_cast<size_t>(nH) : capH; }
+    }
+    // R105：`[swinfo]` **入参两字段戳记** —— 紧跟 `[swihand]` 之后、同一门控下。
+    //  `i12`＝`*(u32*)(info+12)`（模块 2 的苹果实现以它 ==1 作判别，本机实值未知）；
+    //  `i8`＝`*(u32*)(info+8)`；`c`＝本次送达的模块号（既有 `gSwLastId`）。
+    //  ⚠ 只读我方标量、**零解引用**；`ffffffff`＝从未读到（哨兵）；既有各行格式一字不改。
+    if ((gGvmSwInstall || gGvmSwInitPass) && off < sizeof(body)) {
+        const size_t capI = sizeof(body) - off;
+        const int nI = snprintf(body + off, capI, "[swinfo] i12=%08x i8=%08x c=%d\n",
+                                static_cast<unsigned>(gSwInfo12),
+                                static_cast<unsigned>(gSwInfo8),
+                                static_cast<int>(gSwLastId));
+        if (nI > 0) { off += (static_cast<size_t>(nI) < capI) ? static_cast<size_t>(nI) : capI; }
     }
     // R98 §1（R99 S1）：**按模块结果戳记** —— 与既有 `[gvmsw]`／`[swi]`／`[swihand]` 同区、同一门控。
     //  **口径**：`r`＝16 个模块**最近一次**我方实现的返回值（`ff`＝从未被调到；`kSwRes*` 最大 8 ⇒ 不与 `ff` 混淆）；
@@ -3101,6 +3117,9 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
     int res = kSwResUnimpl;                                     // 默认＝该模块未实现（非 0）
     if (info == nullptr || out == nullptr) { res = kSwResNullArg; }
     else {
+        // R105：入参两个 32 位字段（**`info` 已过既有非空判断**）⇒ 留存供 `[swinfo]` 戳记（纯读 8 字节）。
+        gSwInfo12 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(info) + 12);
+        gSwInfo8  = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(info) + 8);
         switch (clientId) {
             case 5: res = nredGvmSwInit(info, out, o8init); break;   // 模块 5＝GVM（A1–A11）
             case 6: res = nredPspSwInit(info, out); break;           // 模块 6＝PSP（R96 阶段 1）
