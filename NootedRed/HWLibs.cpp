@@ -171,6 +171,13 @@ static UInt32 gBisV176Read = 0;
 //  （base＝`*(ctx)`）⇒ **a2 的 base 必须用 `rootIn`＝`*(root)`，不得复用 `o3`**。
 static UInt32 gBisA2 = kBisNone32;      // arg2：{0,2}；哨兵＝未读
 static UInt32 gBisA2Read = 0;           // rb：1＝真读过 rec[0]；0＝哨兵（未读）
+// ★ R44 裁决（2026-10-18）：`r0`＝`rec[0]` 原值 ＋ `r0b` 已读标志（**本回合唯一新增**）。
+//  目的：下轮真机用它**自检** `a2 == 2×((r0==1) && (reci!=0))`。
+//  ⚠️ 背景：R44 §② 称我方 a2 少一层解引用——**已驳回**（PM 裁决：Apple 与我的复刻链
+//  均为 `***subobj` 后 `+88`，逐字一致；R44 把"复刻链"误读成"调用 0xa28ad(*subobj)"）。
+//  ⇒ **不得**改链深度；`r0` 与 `a2` 同源同链（同一个 `rec0`）。
+static UInt32 gBisR0 = kBisNone32;      // r0：`rec[0]` 原值（u32）；哨兵＝未读
+static UInt32 gBisR0Read = 0;           // r0b：1＝真读过；0＝哨兵（未读）
 // ★ R42（2026-10-18）：`r14i`／`reci` 两个指针标量（**本卡唯一新增**）。
 //  背景：R17 实测 `a2=0` ⇒ H4 否证 ⇒ 失败必在 `0x98125` 的**三个提前返回点**之一：
 //   ① `subobj==0`（`98175 je 0x9828e`，静默）；② `0x958d8(host,5)==0`（`981d9 je 0x98251`，
@@ -398,7 +405,8 @@ int nredTraceFlush(int secTag)
                                 "p1=%u/%u/%u p2=%u/%u/%u p3=%u/%u/%u "
                                 "o3=%llx o4=%llx c14=%llx f112=%llx f600=%llx f616=%llx "
                                 "v176=%08x vb=%u a=%u x=%u a2=%u rb=%u "
-                                "r14i=%llx ri=%u reci=%llx rc=%u hit=%u sh=%s\n",
+                                "r14i=%llx ri=%u reci=%llx rc=%u "
+                                "r0=%u r0b=%u hit=%u sh=%s\n",
                                 static_cast<unsigned>(gC4n), static_cast<unsigned>(gC4ret),
                                 static_cast<unsigned>(gC4a4), static_cast<unsigned>(gC4b4),
                                 static_cast<unsigned>(gC4c4),
@@ -428,6 +436,7 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gBisA2), static_cast<unsigned>(gBisA2Read),
                                 static_cast<unsigned long long>(gBisR14i), static_cast<unsigned>(gBisR14iRead),
                                 static_cast<unsigned long long>(gBisReci), static_cast<unsigned>(gBisReciRead),
+                                static_cast<unsigned>(gBisR0), static_cast<unsigned>(gBisR0Read),
                                 static_cast<unsigned>(gBisHit),
                                 kBisShortReason[(gBisShort < (sizeof(kBisShortReason) / sizeof(kBisShortReason[0])))
                                                     ? gBisShort : 0]);
@@ -2250,6 +2259,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                             const UInt32 rec0 = *reinterpret_cast<const UInt32*>(
                                 static_cast<const UInt8*>(slot3obj) + 56);
                             gBisA2 = (rec0 == 1) ? 2u : 0u;
+                            // ★ R44 裁决：r0＝rec[0] 原值（与 a2 同源同链）＋ r0b 已读标志。
+                            gBisR0 = rec0;
+                            gBisR0Read = 1;
                         }
                     }
                     // ctx = *(slot1+600)（第五出口的 rdi；`982b8: movq 600(%rax),%r14`）
