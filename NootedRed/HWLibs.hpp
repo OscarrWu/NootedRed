@@ -22,8 +22,8 @@
 //   （不经 msgbuf；seq 无上限、无轮转，文件序==调用序；⚠️ rootvnode 未挂载时只 SYSLOG、不写文件）。
 //   NRED_TRACE：同时写内核日志（SYSLOG→L1/L2）与上述落盘（第三通道 `NRedTrace-NNN.log`，手册 §5.7）。
 void nredTraceLine(char* const buf, const int n);
-// A-22：把内存环里的早期 trace 行刷盘（仅允许在**既有安全时点**调用：`NvMsgBuf::dumpNow`／
-//  `NRed::init` 定时拍／panic 分片路径）。早期路径（bringupRun/tmrInit/tmrLoad/hook 早期段）
+// A-22：把内存环里的早期 trace 行刷盘（仅允许在**既有三个安全时点**调用：`NvMsgBuf::dumpNow`／
+//  `NvMsgBuf::dumpTick`／`NRed::init` 定时拍；**苹果自有 panic 分片不承载我方内存环**）。早期路径
 //  **禁止**调用。返回实际写出行数（0 = 无内容或未就绪；写失败保留内存，下拍重试）。
 int nredTraceFlush();
 // A-28：秒级标签版本（由 L2 周期拍 `dumpTick` 在 stBusy 保护区内调用；文件名与首行带 `sec=`）
@@ -33,7 +33,7 @@ int nredTraceFlush(int secTag);
 //  `lilu_os_log`（内含 1 KB 栈缓冲）→ `IOLog` → `__os_log_internal` ⇒ 深栈 + 大栈耗 ⇒ 触栈保护页
 //  ⇒ Double fault（CR2 = RSP−8）。A-22 当时只把**落盘通道**改为内存环，SYSLOG 通道未门控，
 //  本标志补上这一遗留通道。置位时 `NRED_TRACE` **跳过 SYSLOG**、只写内存环 ⇒ 由既有安全时点
-//  `nredTraceFlush`（NvMsgBuf 周期拍 `dumpTick` / `dumpNow` / panic 分片路径）刷盘 ⇒ 无诊断损失。
+//  `nredTraceFlush`（NvMsgBuf 周期拍 `dumpTick` / `dumpNow`）刷盘 ⇒ 无诊断损失；**苹果自有 panic 分片不承载我方内存环**。
 //  置位/复位点＝`fw::nredFwBringupHook` 入口 RAII 守卫（仅 `-NRedFwBringup` 打开时进入该函数）。
 //  **默认 false ⇒ 非 bringup 路径行为逐字不变**（门控关时该分支永不成立）。
 extern bool gNredTraceSyslogMuted;

@@ -1947,7 +1947,7 @@ UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
                      static_cast<unsigned long long>(v));
         if (nOut > 0) {
             nredTraceLine(lineOut, nOut);
-            nredTraceFlush();   // B67 保守变体：仅此处 flush 一次（深栈少 I/O）
+            // R83／规矩 28：早期路径**不落盘**（原刷写调用已删）⇒ 只写内存环，交由既有三个安全时点带出。
         }
     }
     return ret;
@@ -2739,7 +2739,12 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     const bool   s1ok  = nredKernelPtrOk(reinterpret_cast<const void*>(slot1));
     const UInt64 s1f8  = s1ok ? *reinterpret_cast<const UInt64*>(slot1 + 8)  : 0;
     const UInt64 s1f16 = s1ok ? *reinterpret_cast<const UInt64*>(slot1 + 16) : 0;
-    if (!s1ok || s1f8 == 0 || s1f16 == 0) {             // S0-b：前置校验（R80 §2.2）⇒ 不调、如实失败
+    //  M-1（R82；独立复核 9ae9336 §3.2／§6.1）：清理路径 `0x19c7d` 的
+    //  `19c9d movq 3664(%rdi),%rcx → 19cbe movq 8(%rcx),%rdi → 19cc5 callq *24(%rcx)`
+    //  **三处均无空判**，且 `%rcx` ＝ 本块写入 `handle+3664` 的 `slot1`；若 `*(slot1+24)==0`
+    //  则清理路径 `callq *0` ⇒ **trap 型（本机不自动重启）** ⇒ 守卫必须覆盖 `+24`（fail-closed）。
+    const UInt64 s1f24 = s1ok ? *reinterpret_cast<const UInt64*>(slot1 + 24) : 0;
+    if (!s1ok || s1f8 == 0 || s1f16 == 0 || s1f24 == 0) {   // S0-b（R80）＋M-1（R82）
         gGvmBook.failMask |= (1U << 6);
         nredSwFini();
         return kSwResAllocFail;

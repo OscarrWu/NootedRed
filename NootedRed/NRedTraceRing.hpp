@@ -8,10 +8,10 @@
 // 设计：
 //   · 早期路径（bringupRun/tmrInit/tmrLoad/hook 内早期段）的一切 trace **只写内存环形缓冲**，
 //     **绝不**调 `FileIO::writeBufferToFile`（本文件本身也**不 include** kern_file.hpp）。
-//   · 在**既有安全时点**（`NRed::init` / `NvMsgBuf::dumpNow` / panic 分片路径）再**刷盘一次**，
-//     与既有 L2 通道（`-NRedObserveDisk` 读 msgbuf 按拍落盘）**同构**。
+//   · 在**既有三个安全时点**（`NRed::init` / `NvMsgBuf::dumpNow` / `NvMsgBuf::dumpTick`）刷一次；
+//     **panic 分片是苹果自有机制，不承载我方内存环**（与既有 L2 通道 `-NRedObserveDisk` 同构）。
 //   · 行同时经 `SYSLOG` 进内核 console 环形缓冲（NRED_TRACE 已含 SYSLOG）⇒ **双通道冗余**
-//     （内存缓冲 + 内核 console），panic 分片可带出后者。
+//     （内存缓冲 + 内核 console），**不依赖 panic 分片**。
 //   · 保留 A-20 的 `dropped`/`written` 计数（内存侧即可）。
 //
 // 边界：本文件只做**内存环形缓冲 + 计数**（纯逻辑 + 静态存储），**不触碰 VFS/文件/锁**；

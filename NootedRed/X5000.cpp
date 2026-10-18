@@ -1108,12 +1108,12 @@ void X5000::fixedGetSurfaceInfo(AMDRadeonX5000_AMDHWAlignManager* const self, AM
 bool X5000::wrapAccelStart(void* const self, void* const provider)
 {
     // B62：纳入门控 `-NRedAccelLog`（基线轮须让该链上我方打印/刷盘整体静默）；
-    //  不改读值/控制流/返回值。⚠️ flush 一并纳入（避免基线轮改变落盘行为）。
+    //  不改读值/控制流/返回值。⚠️ 落盘调用已按规矩 28 移除（本处只写内存环）。
     if (checkKernelArgument("-NRedAccelLog")) {
         NRED_TRACE("accelStart-enter: self=%llx prov=%llx",
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(provider)));
-        nredTraceFlush();
+        // R83／规矩 28：早期路径不落盘（原刷写调用已删）⇒ 只写内存环。
     }
 
 
@@ -1222,12 +1222,12 @@ static IOReturn ttlStubCallback(void* ctx, void* in, void** out)
 void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 {
     // B62：纳入门控 `-NRedAccelLog`（基线轮须让该链上我方打印/刷盘整体静默）；
-    //  不改读值/控制流/返回值；flush 一并纳入（避免基线轮改变落盘行为）。
+    //  不改读值/控制流/返回值；落盘调用已按规矩 28 移除（本处只写内存环）。
     if (checkKernelArgument("-NRedAccelLog")) {
         NRED_TRACE("initTtl-enter: self=%llx gart=%llx",
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(self)),
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(gartParams)));
-        nredTraceFlush();
+        // R83／规矩 28：早期路径不落盘（原刷写调用已删）⇒ 只写内存环。
     }
 
 
