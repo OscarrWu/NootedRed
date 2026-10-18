@@ -148,14 +148,27 @@ static UInt32 gSwLastId      = 0;       // 最近一次送达的模块号（1-ba
 static UInt64 gProbe9[6] = {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
                             0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
 static UInt32 gProbe9N   = 0;   // 探针被调次数（供"是否跑过"的判据；`[swprobe9] n=`）
-// R129（观测修正）：模块 8 阶段 2 的**失败定位读数**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
-//  依据 R128 §4.3／§6-X1：`[20]`（`0x6720b`）与 `[23]`（`0x67328`）**共用 `bit17`** ⇒ 只有 `v612` 能分开它们；
-//  `h712`＝`[20]` 写入的版本枚举（"是否跑过"＋枚举值）；`h1728`＝`[20]` 装入的 240 B 函数表指针
-//  （为 0 ⇒ `[23]` 必返 0 ⇒ 反证停在 `[20]`）。**纯标量读、零新增解引用方向。**
-static UInt32 gM8V612  = 0xFFFFFFFFU;             // `*(u32*)(I+612)`＝模块 8 的判别式 `v`
-static UInt32 gM8H712  = 0xFFFFFFFFU;             // `*(u32*)(h+712)`（`[20]` 写的版本枚举）
-static UInt64 gM8H1728 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1728)`（`[20]` 装入的函数表指针）
+// R129／R143（观测）：模块 8 的**关键字段留存**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
+//  `gM8V612`＝能力位快照；`gM8H712`＝**D2 不写该字段**（`0x66d84` 属已删的 `#20`）⇒ 回读应为 0（`bit29` 佐证）；
+//  `gM8H1728`＝由保留的 `#20a`（`0x64b1a(h,h+1728,240)`）装表；`gM8N`＝模块 8 本体被进入的次数。
+//  **纯标量读、零新增解引用方向。**
+static UInt32 gM8V612  = 0xFFFFFFFFU;             // `*(u32*)(I+612)`＝**能力位快照 `v`**（R128 §4.3 的判别式；
+                                                  //   D2 起 `[20]`/`[23]` 均已删 ⇒ 语义降级为"供后续参照"）
+static UInt32 gM8H712  = 0xFFFFFFFFU;             // `*(u32*)(h+712)`（**D2 不调用 `0x66d84` ⇒ 该字段不被写**，
+                                                  //   回读应为 0；`omittedMask bit29` 的佐证）
+static UInt64 gM8H1728 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1728)`（由保留的 `#20a` `0x64b1a(h,h+1728,240)` 装表）
 static UInt32 gM8N     = 0;                       // 我方模块 8 本体被进入的次数（戳记"跑过"判据）
+// R143（D2）：模块 8 的**硬件侧/回读观测**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
+//  依据 R141 §4（`[swhw8]` 字段表）＋复核 Q6（**补 `h+1736`＝槽 1、`h+1960`＝槽 29**）——正是"槽 1..29 未装"
+//  与"槽 29 未取得"的**直接读数**；**不含** `*(*(h+16)+72)` 的解引用（复核 Q6 明确禁止）。
+static UInt32 gM8H720  = 0xFFFFFFFFU;             // `*(u32*)(h+720)`（**D2 不设** ⇒ 回读应为 0，R141 §3.2）
+static UInt64 gM8H888  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+888)`（D2-1 清零后回读）
+static UInt64 gM8H896  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+896)`（同上）
+static UInt64 gM8H904  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+904)`（同上）
+static UInt64 gM8H912  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+912)`（同上）
+static UInt64 gM8H1712 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1712)`（子对象，`#21` 取建）
+static UInt64 gM8H1736 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1736)`＝**槽 1**（未装 ⇒ 苹果 hw-init 静默返 0）
+static UInt64 gM8H1960 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1960)`＝**槽 29**（uCode 常量，未取得）
 // R105：入参结构两个 32 位字段的**留存**（供 `[swinfo]` 戳记；纯读、零新增解引用方向）。
 //  `0xFFFFFFFF`＝**从未读到**（哨兵；与真实值可区分——模块判定只需 `==1`／`==0` 之类的小值）。
 static UInt32 gSwInfo12 = 0xFFFFFFFFU;   // `*(u32*)(info+12)`（模块 2（SDMA）的关键判别字段）
@@ -679,11 +692,11 @@ int nredTraceFlush(int secTag)
             static_cast<unsigned long long>(gProbe9[4]), static_cast<unsigned long long>(gProbe9[5]));
         if (np > 0) { off += (static_cast<size_t>(np) < capP) ? static_cast<size_t>(np) : capP; }
     }
-    // R129：`[swm8]` —— **模块 8（SMU）阶段 2 的失败定位读数**（R128 §4.3／§6-X1），紧跟 `[swprobe9]` 之后。
+    // R129／R143：`[swm8]` —— 模块 8 **能力位快照 ＋ 两处关键字段**（R128 §4.3／§6-X1 引入；语义按 D2 更新）。
     //  **产出条件＝`gM8N != 0`**（比"跟随门控"更严：只有我方模块 8 本体**真被进入**才产出）⇒ 关态一行不多。
     //  `ffffffff`／`ffffffffffffffff`＝该项**未读到**（哨兵；真实值不可能等于它）。
-    //  判读（R128 §4.3）：`v612` 的 `((v>>2)|(v>>4))&1 == 0` ⇒ **停 `[20]`**；`== 1` ⇒ `[20]` 返 0 ⇒ **停 `[23]`**；
-    //  `h712` 非哨兵 ⇒ `[20]` **跑过**（其值为版本枚举）；`h1728 == 0` ⇒ `[23]` 必返 0（反证停在 `[20]`）。
+    //  **D2 判读**：`v612`＝能力位快照（历史判别式；`[20]`/`[23]` 已删 ⇒ 不再用于区分停点）；
+    //    `h712` 应＝**0**（`0x66d84` 不再执行 ⇒ 本世代标识未写，`bit29`）；`h1728` 由 `#20a` 装表（0 ⇒ 装表未成）。
     //  ⚠ 只读我方 BSS 标量、**零解引用**；既有各行格式一字不改。
     if (gM8N != 0 && off < sizeof(body)) {
         const size_t capM = sizeof(body) - off;
@@ -693,6 +706,26 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gM8H712),
                                 static_cast<unsigned long long>(gM8H1728));
         if (nm > 0) { off += (static_cast<size_t>(nm) < capM) ? static_cast<size_t>(nm) : capM; }
+    }
+    // R143（D2）：`[swhw8]` —— **模块 8 的硬件侧/回读观测**（R141 §4 ＋ 复核 Q6），紧跟 `[swm8]` 之后。
+    //  **产出条件＝`gM8N != 0`**（模块 8 本体真被进入）⇒ 关态一行不多；`ffffffff`／`ffffffffffffffff`＝**未读到**。
+    //  判读要点：`h720` 应＝**0**（**D2 不设 `h+720`**，R141 §3.2——不得宣告"SMU 上下文已就绪"）；
+    //    `h888/896/904/912` 应＝**0**（D2-1 清零后的回读，＝D2-2 的机械证据）；
+    //    `h1712 ≠ 0`（子对象已建）；`h1736`（**槽 1**）与 `h1960`（**槽 29**）＝"槽 1..29 未装"与
+    //    "uCode 常量未取得"的**直接读数**（两者为 0 ⇒ 坐实；复核 N-2／Q6）。
+    //  ⚠ **不含** `*(*(h+16)+72)` 的解引用（复核 Q6 明确禁止）；只读我方 BSS、零解引用。
+    if (gM8N != 0 && off < sizeof(body)) {
+        const size_t capW = sizeof(body) - off;
+        const int nw = snprintf(body + off, capW,
+            "[swhw8] n=%u h712=%08x h720=%08x h888=%llx h896=%llx h904=%llx h912=%llx "
+            "h1712=%llx h1728=%llx h1736=%llx h1960=%llx\n",
+            static_cast<unsigned>(gM8N),
+            static_cast<unsigned>(gM8H712), static_cast<unsigned>(gM8H720),
+            static_cast<unsigned long long>(gM8H888), static_cast<unsigned long long>(gM8H896),
+            static_cast<unsigned long long>(gM8H904), static_cast<unsigned long long>(gM8H912),
+            static_cast<unsigned long long>(gM8H1712), static_cast<unsigned long long>(gM8H1728),
+            static_cast<unsigned long long>(gM8H1736), static_cast<unsigned long long>(gM8H1960));
+        if (nw > 0) { off += (static_cast<size_t>(nw) < capW) ? static_cast<size_t>(nw) : capW; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -3070,33 +3103,46 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     return kSwResPass;                                  // ★ 真实成功（R80 起**恢复可达**）
 }
 
-// ── 模块 8（SMU）本体：**阶段 2**（R108 修订版；R111/M-A 修正）───────────────────────────────────
+// ── 模块 8（SMU）本体：**D2＝我方自带 sw-init**（R141 设计＋复核修订；R143 落地）────────────────────
 //  被替换实现＝`0x6430f`（装配点 `0x9e4c9`）；寄存器别名：`r15`＝`I`（info）、`r14`＝`O`（out）、
-//  `local`＝`rbp-2000`（1968 B）、`scratch`＝`rbp-32`。动作＝R108 §1 的 24 行，逐条对照机器码：
+//  `local`＝`rbp-2000`（1968 B）、`scratch`＝`rbp-32`。机器码对照源：
 //  `llvm-objdump -d --start-address=0x6432b --stop-address=0x6463b
 //   "kb/内核扩展/13.6/extracted/com.apple.kext.AMDRadeonX5000HWLibs.macho"`
-//  ⚠ **成功路径无省略**：`omittedMask` 恒 0 的含义是"**成功路径每一步都真做**"（R108 §5）。
-//    失败面＝2／4（`bit16`）／5（`bit15`）／6（`bit17`／`bit18`）／7 ⇒ **没有"少做却返 0"的路径**
-//    （成功出口只有 `6463b` 一处）。
+//  **D2 动作集**（R141 §1）：**保** `#1..#19`、`#20a`＝`0x64b1a(h,h+1728,240)`、`#20b`＝`0x66f18(h)`、
+//    `#21`、`#22`；**删**苹果 `#20`（`0x6720b`：版本分类／版本门／变体装表）与 `#23`（`0x67328`：槽 0 →
+//    `0x65156` → 条件 `0x65b34`；含**槽 29 私有常量路径**）；**加** D2-1（显式清零 `h+888/896/904/912`）／
+//    D2-2（回读核对）／D2-3（`omittedMask` 登记）／D2-4（**不设 `h+720`**）。
+//  ❌ **不得**把本实现写作"模块 8 完成"或"SMU 就绪"——本实现＝**"SMU 软件侧最小初始化（M1–M7）"**；
+//     SMU **硬件侧**（H2–H7：固件状态检查／驱动表与工具表地址／表传输／允许特性掩码／显存池位置／消息通道）
+//     **未做**（授权或裁决项）⇒ 已逐条登记在 `omittedMask`。
+//  ★ **"模块 8 完成"的唯一判据**＝真机 `[swres] r[8]==00` ∧ `f==0` ∧ **槽 1..29 与 M8–M13 已按裁决补齐**；
+//     **"链条越过 8"不等于模块 8 完成**——苹果的 hw-init（`0x6463f`→`0x67423`）因**槽 1 为空**会**静默返 0**
+//     （＝"成功但未做"）；槽 1..29 我们**没有**对等实现，且**未主动失败**（如实登记，不伪装）。
+//  ⚠ **已知关闭项（如实登记）**：`h+888` 置 0 ⇒ `0x687a6`／`0x68daf`／`0x6fb27`／`0x74db6` 四个包装器
+//     恒走"空跑／返 0"分支 ⇒ 该 4 项功能在 D2 后关闭（`omittedMask bit27`）；苹果侧常态值**未证**
+//     （其值由框架填的 `O+32/40/…` 而来，复核 M-3）⇒ 与苹果的差异**不可离线判定**。
+//  ⚠ **失败面**＝2／4（`bit16`）／5（`bit15`）／6（`bit18`／`bit27`／`bit28`）／7；`bit17` **已随 `#20`／`#23`
+//     的删除而不再被本函数使用**。成功出口只有一处（函数尾 `return kSwResPass`）。
 //  ⚠ **接受的偏差（如实登记；R111/N-2）**：**失败路径不调用苹果清理 `0x64a9c`**（苹果原实现在
-//    `6460a..64626` 调用）⇒ #11 之后失败的句柄与 `h+1712` 子对象**会泄漏**。理由：该调用**不在
-//    R108 §2 的授权清单内**（清单只有 7 项）⇒ 不得自行补调用。
+//    `6460a..64626` 调用）⇒ `#11` 之后失败的句柄与 `h+1712` 子对象**会泄漏**。理由：该调用**不在
+//    R108 §2 的授权清单内** ⇒ 不得自行补调用。
+//  ⚠ **残余风险（如实登记）**：`#10`（`0x64b1a(L,h,1968)`，`6440c`）**同样**走 `movq 16(%rdi),%rcx →
+//     callq *72(%rcx)`（此处 `rdi`＝`L`，其 `+16`＝`f696`）⇒ 本 D2 guard 依 R141 的位置在 `#19` 之后
+//     ⇒ **不覆盖 `#10`**。该风险在苹果原实现中同样存在（苹果亦不查）；若要覆盖须把 guard 前移到 `#8`
+//     之后（**本卡未做**，避免偏离 R141 的动作顺序）。
 //  ⚠ **默认不可达**：`gSwInitIdsMask` 初值只含模块 5；即便掩码含 8，放行门关也只返 7（R108 §4）。
-//  ⚠ **与苹果的两处如实差异**（这两个返回值苹果机器码**未判**，本实现按 R108 §1 判 ⇒ 只会更早失败）：
-//    #10 `6440c`、#22 `645bd`（均 `0x64b1a`；该函数自身约定＝**0 成功／2 失败**）。
-//    ※ #19（`0x65885`）的返回判据已按 **R111/M-A 删除**（纯 setter、其返回值无状态语义，见该处注释）。
-//  ⚠ **另加 3 处先决检查**（R108 动作表外；只会更早失败）：
-//    ① `gHwlibsSlide == 0`（调用任何苹果函数之前 ⇒ 防野指针调用）；
-//    ② `nredKernelPtrOk(h)`（`0x649ee` 返回后 ⇒ 防按野指针解引用）；
-//    ③ `*(h+1712) != 0`（**R111/N-1 更正**：`0x64b1a` 对 `rsi==0` **自行显式返 2、不解引用** ⇒ 它
-//       **不是"防 trap"**，而是"提前失败"；与 #22 自身判据结果等价——两条路都返 4（`bit16`））。
+//  ⚠ **与苹果的如实差异**：`#10`／`#22`（`0x64b1a`，自身约定＝**0 成功／2 失败**）的返回值苹果**未判**，
+//     本实现按 R108 §1 判 ⇒ 只会更早失败；`#20a`／`#20b` 的返回值**照苹果丢弃**（`6723b`／`67243` 之后无判据）。
+//  ⚠ **先决检查 3 处**（只会更早失败）：① `gHwlibsSlide == 0`；② `nredKernelPtrOk(h)`（`0x649ee` 返回后）；
+//     ③ `*(h+1712) != 0`（**R111/N-1 更正**：`0x64b1a` 对 `rsi==0` 自行显式返 2、**不解引用** ⇒ 它不是
+//     "防 trap"，而是"提前失败"，与 `#22` 自身判据结果等价——两条路都返 4（`bit16`））。
 static const UInt32 kSmuLocalBytes = 1968;   // `0x64334` 的 `$1968`
 static UInt8 gSmuLocalBuf[kSmuLocalBytes];   // `local`（`rbp-2000`）⇒ **static＝非可重入**（栈纪律：帧 ≤128 B）
 static int nredSmuSwInit(void* const info, void* const out)
 {
     const UInt8* const I = static_cast<const UInt8*>(info);
     UInt8* const O = static_cast<UInt8*>(out);
-    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;   // **成功路径无省略** ⇒ `omittedMask` 保持 0（R108 §5）
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;   // 清零后按 **D2-3** 逐项登记（`bit27`／`29`／`30`／`31`）
     UInt8* const L = gSmuLocalBuf;
     // ── #1~#6 缓冲清零与形状校验（纯读）───────────────────────────────────────────────────────
     __builtin_memset(L, 0, kSmuLocalBytes);                                        // #1（`64334/64339`）bzero(local,1968)
@@ -3172,7 +3218,7 @@ static int nredSmuSwInit(void* const info, void* const out)
     *reinterpret_cast<UInt64*>(H + 952) = 0;                                       // #16（`64530`）显式清零
     __builtin_memcpy(H + 32, I + 4, 608);                                          // #17（`6453b..64547`）608 B
     __builtin_memcpy(H + 640, I + 616, 72);                                        // #18（`6454c..64561`）72 B
-    // ── #19~#23 五项苹果调用（授权清单 ⑦／③／④／⑤／⑥）──────────────────────────────────────
+    // ── #19（`0x65885` setter，**无判据**）＋其后为 **D2 动作**（苹果 `#20`／`#23` 已按 R141 §1 删除）────────
     using NRedSmuSetter = int (*)(void*, UInt32, UInt32);
     const NRedSmuSetter fnSetter = reinterpret_cast<NRedSmuSetter>(gHwlibsSlide + 0x65885);
     // #19（`64566..64571`）：`0x65885(h, 0xC0201, 0)`。**R111/M-A 修正**：该函数是**纯 setter**——
@@ -3182,20 +3228,30 @@ static int nredSmuSwInit(void* const info, void* const out)
     //  旁证：苹果自身 11 处调用点**无一**以其返回值作判据 ⇒ **本处判据已删除、只保留调用**
     //  （R108 U-5 由此结案：`0x65885`＝纯 setter，"无状态可判"）。
     fnSetter(h, 0xC0201U, 0);
-    UInt64 p12 = 0, p20 = 0;                     // #20：`*(u64*)(I+12)`／`*(u64*)(I+20)`＝**8 字节非对齐读**
-    __builtin_memcpy(&p12, I + 12, 8);
-    __builtin_memcpy(&p20, I + 20, 8);
-    using NRedSmuSubmit = int (*)(void*, UInt64, UInt64);
-    const NRedSmuSubmit fnSubmit = reinterpret_cast<NRedSmuSubmit>(gHwlibsSlide + 0x6720b);
-    const int rc20 = fnSubmit(h, p12, p20);                                        // #20（`64576..64582`）
-    // R129：`[20]` 之后的**失败定位读数**——`h` 已过 `nredKernelPtrOk`，两处偏移（712／1728）都在 1968 B 内，
-    //  **纯标量只读**。读点＝**紧跟调用之后**（`[20]` 无论成败都已写这两处：`67225`／`6722c`）⇒ 能把
-    //  "停 `[20]`"（`bit17`，返回前已留存）与"停 `[23]`"分开（R128 §4.3／§6-X1）。
-    gM8H712  = *reinterpret_cast<const UInt32*>(H + 712);
-    gM8H1728 = *reinterpret_cast<const UInt64*>(H + 1728);
-    if (rc20 != 0) {
-        gGvmBook.failMask |= (1U << 17); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    // ── D2（R143）：**删除苹果 `#20` 与 `#23`**（R141 §1）───────────────────────────────────────────
+    //  为什么删：模块 8 的"照做"路线已被四轮取证关闭（槽 29 的常量只存在于苹果私有 `__data`、本机 ASIC
+    //  不在其支持集、记录表里也没有）⇒ 苹果 `#20`（`0x6720b`：版本分类＋版本门＋变体装表）与 `#23`
+    //  （`0x67328`：槽 0 → `0x65156` → 条件 `0x65b34`；含**槽 29 私有常量路径**）对**本机硬件结构性不适用**。
+    //  ⇒ 改由我方自带 sw-init：**做能诚实做的真实动作**，未做项逐条登记（见函数尾部的 `omittedMask`）。
+    //  ⚠ **保留了 `#20` 内部两项与"版本门"无关的真实子动作**（R141 §1-5／§1-6 逐字地址）：
+    //    `#20a`＝`0x64b1a(h, h+1728, 240)`（框架交表；`6722c..6723b`）——**返回值照苹果丢弃**（其后无 `testl`）；
+    //    `#20b`＝`0x66f18(h)`（读 5 个配置值写 `h+784/776/780/824/…`；`67240..67243`）——返回值苹果亦丢弃。
+    //  ⚠ **D2 guard（`bit27`）——必须在 `#20a`／`#22` 之前**：`0x64b1a` 会 `movq 16(%rdi),%rcx` 再
+    //    `callq *72(%rcx)`（`64b3b`／`64b57`）⇒ 若 `*(h+16)==0` ⇒ 读 `0x8`（CR2=0x8）；若 `*(X+72)==0`
+    //    ⇒ `callq *0`（RIP=0）。两者都由本 guard 挡下（R136 §6.1／复核 R6）。
+    {
+        const UInt64 X = *reinterpret_cast<const UInt64*>(H + 16);
+        if (!nredKernelPtrOk(reinterpret_cast<const void*>(X)) ||
+            *reinterpret_cast<const UInt64*>(X + 72) == 0) {
+            gGvmBook.failMask |= (1U << 27);                                       // ★ D2 guard（"服务对象不可用 ⇒ 6"）
+            *reinterpret_cast<UInt64*>(O + 8) = 0;
+            return kSwResStepFail;                                                 // 6
+        }
     }
+    fnInitFrom(h, reinterpret_cast<void*>(H + 1728), 240);   // #20a（`6722c`）**返回值照苹果丢弃**
+    using NRedSmuCfgRead = int (*)(void*);
+    const NRedSmuCfgRead fnCfgRead = reinterpret_cast<NRedSmuCfgRead>(gHwlibsSlide + 0x66f18);
+    fnCfgRead(h);                                            // #20b（`67240`）**返回值苹果亦丢弃**（`67243`）
     // #21（`6458d..645a2`）取/建 `h[1712]` 的 `0x8000` 子对象——**第 4 实参＝`h+1712`（内部指针）**
     const int rc21 = fnGetOrCreate(h, 0x8000U, 1, reinterpret_cast<void**>(H + 1712));
     if (rc21 != 0) {
@@ -3211,11 +3267,33 @@ static int nredSmuSwInit(void* const info, void* const out)
     if (rc22 != 0) {                                                               //  ★ 苹果未判（见头注差异）
         gGvmBook.failMask |= (1U << 16); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResAllocFail;
     }
-    using NRedSmuCommit = int (*)(void*, void*, void*);
-    const NRedSmuCommit fnCommit = reinterpret_cast<NRedSmuCommit>(gHwlibsSlide + 0x67328);
-    const int rc23 = fnCommit(h, const_cast<UInt8*>(I), O);                        // #23（`645c2..645cc`）
-    if (rc23 != 0) {
-        gGvmBook.failMask |= (1U << 17); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    // ── D2-1（R143）：**显式清零**苹果 `#23` 的四个产物槽 `h+888/896/904/912`（R141 §1-11／M7）────────
+    //  这四槽的**唯一写者＝`0x65156`**（`651df`／`651ea`／`651f8`／`651ff`），而 `0x65156` 只由**已删的
+    //  `#23`** 路径调用 ⇒ 不走它时**必须显式置 0**、**不得留下垃圾值**（真写动作，非空桩）。
+    //  ⚠ **已登记**：置 0 使 **4 个下游包装器恒走"空跑／返 0"分支** ⇒ 相关 4 项功能在 D2 后**关闭**
+    //    （`omittedMask bit27`；读者＝`0x687a6`／`0x68daf`／`0x6fb27`／`0x74db6`）。
+    *reinterpret_cast<UInt64*>(H + 888) = 0;
+    *reinterpret_cast<UInt64*>(H + 896) = 0;
+    *reinterpret_cast<UInt64*>(H + 904) = 0;
+    *reinterpret_cast<UInt64*>(H + 912) = 0;
+    // ── D2 观测读数（戳记与下面的回读核对**共用**；全部只读，偏移 ≤ `1960+8` ⇒ 都在 1968 B 对象内）────────
+    gM8H712  = *reinterpret_cast<const UInt32*>(H + 712);
+    gM8H720  = *reinterpret_cast<const UInt32*>(H + 720);
+    gM8H888  = *reinterpret_cast<const UInt64*>(H + 888);
+    gM8H896  = *reinterpret_cast<const UInt64*>(H + 896);
+    gM8H904  = *reinterpret_cast<const UInt64*>(H + 904);
+    gM8H912  = *reinterpret_cast<const UInt64*>(H + 912);
+    gM8H1712 = *reinterpret_cast<const UInt64*>(H + 1712);
+    gM8H1728 = *reinterpret_cast<const UInt64*>(H + 1728);
+    gM8H1736 = *reinterpret_cast<const UInt64*>(H + 1736);                         // 槽 1（苹果 hw-init 入口判据）
+    gM8H1960 = *reinterpret_cast<const UInt64*>(H + 1960);                         // 槽 29（uCode 常量）
+    // ── D2-2（R143）：**回读核对**（机械可核；R141 §1-12）⇒ 不满足即 `bit28` ＋ 6（fail-closed）──────────
+    //  判据＝四槽**均为 0** ∧ `*(h+1712) != 0`（**按卡面／R141 §1-12 的严格形式**：不含设计里那条
+    //  "`h+784/776/780` 至少一项非 0"的**弱代理**——复核 N-3 已指出它可能误报失败）。
+    if (gM8H888 != 0 || gM8H896 != 0 || gM8H904 != 0 || gM8H912 != 0 || gM8H1712 == 0) {
+        gGvmBook.failMask |= (1U << 28);                                           // ★ D2-2 回读核对失败
+        *reinterpret_cast<UInt64*>(O + 8) = 0;
+        return kSwResStepFail;                                                     // 6
     }
     // ── 守卫（R108 §3 逐字；**唯一差异**＝把局部别名 `H` 改名为 `HG`，避免与外层 `H` 遮蔽）──────────
     //  清理链共**三处**零空判用到 `h` 的派生字段：
@@ -3241,7 +3319,21 @@ static int nredSmuSwInit(void* const info, void* const out)
             return kSwResStepFail;                                                 // 6
         }
     }
-    // ── #24 成功出口门控（R108 §4 逐字）：门控关 ⇒ 只返 7（**不报成功**）────────────────────────
+    // ── D2-3（R143）：`omittedMask` **登记（必须非空）**（R141 §1-13 ＋ 复核 M-2／N-2）──────────────
+    //  ⚠ `omittedMask` 与 `failMask` 是**两个独立字段**（日志里分别印 `o=`／`f=`）⇒ 位号可同号不同义。
+    gGvmBook.omittedMask |= (1U << 27);   // ★ 复核 M-2：`h+888` 置 0 ⇒ **4 项下游功能被关闭**
+                                          //   （读者 `0x687a6`／`0x68daf`／`0x6fb27`／`0x74db6` 的 `cmpb $0,888(%rdi)`
+                                          //    为 0 ⇒ 包装器空跑／返 0）。**苹果侧常态值未证**（其值来自框架填的
+                                          //    `O+32/40/…`，复核 M-3）⇒ 与苹果的差异**不可离线判定**。
+    gGvmBook.omittedMask |= (1U << 29);   // `h+712` **未写**（`0x66d84` 属已删的 `#20`）⇒ 本世代标识未提供
+    gGvmBook.omittedMask |= (1U << 30);   // 槽 29／uCode 常量**未取得**；**且槽 1..29 整段 API 表未安装**
+                                          //   （`h+1736`＝槽 1 为空 ⇒ 后续苹果 hw-init（`0x6463f`→`0x67423`）
+                                          //    会**静默返 0**＝"成功但未做"；复核 N-2）
+    gGvmBook.omittedMask |= (1U << 31);   // **未调用苹果 `#23`**（其职责按 Linux 由我方最小实现替代）；
+                                          //   同时 `h+720` **未置位**＝**不宣告**"SMU 上下文已就绪"（R141 §3.2）
+    // ── 成功出口门控（R108 §4 逐字）：门控关 ⇒ 只返 7（**不报成功**）──────────────────────────────
+    //  ★ 返 0 的**含义收窄**：仅表示"**SMU 软件侧最小初始化（M1–M7）完成**"——**不等于"模块 8 完成"**，
+    //    更不等于"SMU 就绪"（硬件侧 H2–H7 未做，见头注判据与 `omittedMask`）。
     if (!gGvmSwInitPass) { return kSwResPassGateOff; }
     return kSwResPass;                             // 0（`6463b: xorl %ebx,%ebx`）★ 唯一成功出口
 }
