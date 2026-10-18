@@ -180,15 +180,20 @@ static char kMarkM1[] = "M1: ip-seq entry reached (0x929ac)\n";
 static char kMarkM2[] = "M2: install point reached (module5)\n";
 static char kMarkM3[] = "M3: our sw-init implementation invoked\n";
 
-// 标记动作（三段共用）：**先置标志 → 写一行静态标记 → 刷写**（需求 v2 R7／R10）。
-//  ⚠ 门控判断在各**调用点**（关态连本函数都不进 ⇒ 零执行）；本函数只做这三步，
-//    **不检查刷写返回值**（失败静默丢弃，绝不影响调用方的返回值/控制流/ABI）。
+// 标记动作（三段共用）：**先置标志 → 写一行静态标记到内存环**（需求 v2 R7／R10）。
+//  ⚠ **R78 去刷盘化**：本函数**只写内存环**（`nredTraceLine`），**不再调用落盘刷写**——早期路径
+//    （bringup／定时器初始化／钩子早期段）写文件会让内核线程阻塞、随后被 watchdog 强制重启
+//    （无 panic ⇒ 无 panic 分片）。⇒ **落盘交回既有安全时点**（`NvMsgBuf::dumpNow()` 与周期拍；
+//    见 `NvMsgBuf.hpp` 对应处与本文件顶部"安全时点"注释）。
+//  ⚠ **代价（如实承认，R3）**：标记**只存在于内存环** ⇒ 若崩溃发生在"标记之后、下一次安全时点之前"，
+//    标记**不会被带出**（本项目 R20／R21 实测即如此）⇒ 该装置当前**大概率读不到**，但**不得**用
+//    "另加刷写点／放大缓冲／改其它 I/O"去补（R2／R5）。
+//  ⚠ 门控判断在各**调用点**（关态连本函数都不进 ⇒ 零执行）；返回 `void`，调用方不使用其返回值。
 static void nredTraceMark(bool& done, char* const mark, const int len)
 {
     if (done) { return; }
     done = true;
-    nredTraceLine(mark, len);
-    nredTraceFlush();
+    nredTraceLine(mark, len);        // ★ 只写内存环（纯内存、零 FS、零 os_log、零大栈缓冲）
 }
 // N-2：`0x929ac`（判据④）的调用总次数／最近返回值／最近调用点档位／分档计数。
 //  ⚠ 调用点判别：该函数有**三个**调用点（`92956`＝判据④、`92dcf`、`92e5e`），
