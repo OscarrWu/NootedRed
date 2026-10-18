@@ -159,6 +159,16 @@ struct NRedGvmSwLast {
     int    ret;                         // 最近一次返回值
 };
 static NRedGvmSwLast gGvmSwLast = {0, 0, 0, 0, 0, 0, 0};
+// R90：句柄三字段 ＋ 句柄地址的**留存**（供 `[swihand]` 头部戳记）。
+//  为什么可"顺手留存"：M-1 守卫**本来就已经读**了 `slot1`／`*(slot1+8)`／`*(slot1+16)`／`*(slot1+24)`
+//   （R82 §1／§2.1）⇒ 本卡只把这三个值**存进全局**（几次标量写入，**零新增解引用**）。
+//  ⚠ 戳记处**只读这些标量**、不再解引用；口径＝**最近一次**（`[swihand] n=` 给出模块 5 的调用次数，
+//    便于判"这些值是否已被下一次调用刷新"）。
+static UInt64 gSwS1Slot     = 0;   // `slot1`（＝`info+3664`）
+static UInt64 gSwS1f8       = 0;   // `*(slot1+8)`
+static UInt64 gSwS1f16      = 0;   // `*(slot1+16)`
+static UInt64 gSwS1f24      = 0;   // `*(slot1+24)`（清理路径 `19cc5 callq *24(%rcx)` 的目标）
+static UInt64 gSwHandleAddr = 0;   // 通过 `nredKernelPtrOk` 校验的 `handle`（S0 取/建所得；未走到 ⇒ 0）
 // ── 观测通道修复（R64 ＋ 需求 v2「标记阶梯」）：三段标记，每段"先置标志 → 写一行静态标记 → 刷写" ──
 //  背景（R20 实测）：8 个分片的头部四行全为 0／哨兵；根因＝**崩溃时刻没有新的刷写**（最后一次刷写
 //  19 s、崩溃 ≈26 s）⇒ 头部区不是崩溃时刻的快照。且 v1（只在 `0x929ac` 包装入口刷一次）位于
@@ -584,6 +594,23 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gSwLastCall.out0),
                                 gSwLastCall.res);
         if (nS > 0) { off += (static_cast<size_t>(nS) < capS) ? static_cast<size_t>(nS) : capS; }
+    }
+    // R90：`[swihand]` **头部戳记（句柄三字段 ＋ 句柄地址的真实值）** —— 紧跟 `[swi]` 之后、同一门控下。
+    //  **目的**：**零风险**拿到清理路径 `19cc5 callq *24(%rcx)` 的目标地址（＝`slot1+24` 的值）与句柄本体，
+    //   供**离线**定位 `*(slot1+24)` 的身份（R82 §2：该字段"从未被任何归档 dump 过"）。
+    //  **口径**：`n`＝模块 5 的调用次数（`gSwCallN[5]`）；其余字段＝**最近一次**（S0 守卫处留存；未走到 ⇒ 0）。
+    //  ⚠ 只读我方标量、**零解引用**；既有 `[gvmsw]`／`[swi]` 格式一字不改（本卡**新增独立一行**）。
+    if ((gGvmSwInstall || gGvmSwInitPass) && off < sizeof(body)) {
+        const size_t capH = sizeof(body) - off;
+        const int nH = snprintf(body + off, capH,
+                                "[swihand] n=%u slot1=%llx f8=%llx f16=%llx f24=%llx handle=%llx\n",
+                                static_cast<unsigned>(gSwCallN[5]),
+                                static_cast<unsigned long long>(gSwS1Slot),
+                                static_cast<unsigned long long>(gSwS1f8),
+                                static_cast<unsigned long long>(gSwS1f16),
+                                static_cast<unsigned long long>(gSwS1f24),
+                                static_cast<unsigned long long>(gSwHandleAddr));
+        if (nH > 0) { off += (static_cast<size_t>(nH) < capH) ? static_cast<size_t>(nH) : capH; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -2744,6 +2771,8 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     //  **三处均无空判**，且 `%rcx` ＝ 本块写入 `handle+3664` 的 `slot1`；若 `*(slot1+24)==0`
     //  则清理路径 `callq *0` ⇒ **trap 型（本机不自动重启）** ⇒ 守卫必须覆盖 `+24`（fail-closed）。
     const UInt64 s1f24 = s1ok ? *reinterpret_cast<const UInt64*>(slot1 + 24) : 0;
+    // R90：把守卫**已读**的四个值留存到全局（供 `[swihand]` 戳记；零新增解引用；无论后面返 4 还是继续）。
+    gSwS1Slot = slot1; gSwS1f8 = s1f8; gSwS1f16 = s1f16; gSwS1f24 = s1f24;
     if (!s1ok || s1f8 == 0 || s1f16 == 0 || s1f24 == 0) {   // S0-b（R80）＋M-1（R82）
         gGvmBook.failMask |= (1U << 6);
         nredSwFini();
@@ -2769,6 +2798,7 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     __builtin_memset(handle, 0, kGvmHandleBytes);                             // ④＝`0x1a622` 等价（R80 §2.3）
     *reinterpret_cast<UInt64*>(static_cast<UInt8*>(out) + 8) =
         reinterpret_cast<UInt64>(handle);                                     // ⑤回填出参（`1927d/19281`）
+    gSwHandleAddr = reinterpret_cast<UInt64>(handle);                         // R90：留存句柄地址（供戳记）
     *reinterpret_cast<UInt64*>(static_cast<UInt8*>(handle) + 3664) = slot1;   // ⑥**关键**（`19285/1928c`）
     *reinterpret_cast<UInt64*>(static_cast<UInt8*>(handle) + 3656) =
         *reinterpret_cast<const UInt64*>(I + 3656);                           // ⑦（`19293/1929a`）
