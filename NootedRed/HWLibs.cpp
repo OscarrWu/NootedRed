@@ -143,6 +143,11 @@ static UInt32 gSwCallN[16]   = {0};     // 各模块被调用次数（`[swi] n=`
 static UInt8 gSwResById[16] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 static UInt8 gSwCntById[16] = {0};
 static UInt32 gSwLastId      = 0;       // 最近一次送达的模块号（1-based；0＝从未被调到）
+// R119／R121：模块 9（VCN）**只读探针**的读数载体（BSS 标量；初值 `0xFF…FF`＝"未读"）。
+//  只在探针内写；**戳记产出条件＝`gProbe9N != 0`** ⇒ 探针从未被调 ⇒ `[swprobe9]` 一行不多 ✓。
+static UInt64 gProbe9[6] = {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
+                            0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
+static UInt32 gProbe9N   = 0;   // 探针被调次数（供"是否跑过"的判据；`[swprobe9] n=`）
 // R105：入参结构两个 32 位字段的**留存**（供 `[swinfo]` 戳记；纯读、零新增解引用方向）。
 //  `0xFFFFFFFF`＝**从未读到**（哨兵；与真实值可区分——模块判定只需 `==1`／`==0` 之类的小值）。
 static UInt32 gSwInfo12 = 0xFFFFFFFFU;   // `*(u32*)(info+12)`（模块 2（SDMA）的关键判别字段）
@@ -651,6 +656,20 @@ int nredTraceFlush(int secTag)
         nHex[32] = '\0';
         const int nR = snprintf(body + off, capR, "[swres] r=%s n=%s\n", rHex, nHex);
         if (nR > 0) { off += (static_cast<size_t>(nR) < capR) ? static_cast<size_t>(nR) : capR; }
+    }
+    // R119／R121：`[swprobe9]` —— 模块 9 只读探针的 6 个接口表指针读数，**紧跟 `[swres]` 之后**。
+    //  **产出条件＝`gProbe9N != 0`**（**比"跟随门控"更严**：只有探针真被调过才产出）⇒ 关态一行不多。
+    //  `ffffffffffffffff`＝该项**未读到**（`A`／`B` 形状非法时的哨兵；真实函数指针不可能等于它）。
+    //  ⚠ 只读我方 BSS 标量、**零解引用**；既有各行格式一字不改。
+    if (gProbe9N != 0 && off < sizeof(body)) {
+        const size_t capP = sizeof(body) - off;
+        const int np = snprintf(body + off, capP,
+            "[swprobe9] n=%u a16=%llx a24=%llx b16=%llx b32=%llx b56=%llx b64=%llx\n",
+            static_cast<unsigned>(gProbe9N),
+            static_cast<unsigned long long>(gProbe9[0]), static_cast<unsigned long long>(gProbe9[1]),
+            static_cast<unsigned long long>(gProbe9[2]), static_cast<unsigned long long>(gProbe9[3]),
+            static_cast<unsigned long long>(gProbe9[4]), static_cast<unsigned long long>(gProbe9[5]));
+        if (np > 0) { off += (static_cast<size_t>(np) < capP) ? static_cast<size_t>(np) : capP; }
     }
     const uint32_t n = gTraceRing.count;
     for (uint32_t i = 0; i < n; ++i) {
@@ -3239,6 +3258,39 @@ static int nredGcSwInit(void* const info, void* const out)
     return kSwResStepFail;                // 6
 }
 
+// ── 模块 9（VCN）**只读探针＋诚实失败**（R119；R121 落地）─────────────────────────────────────
+//  目的：① 在苹果实现之前拦下"接口表不全 ⇒ 零空判解引用"的崩点（R115 §3.3／R118 §3：崩点 I `0x79810`、
+//        崩点 II `0x7a1bc`）；② **只读**记录 6 个接口表指针（R118 §1.2），供扫描轮判定 G1。
+//  安全（5 条门，逐条落实在下面）：① `info`／`out` 非空；② `A = *(u64*)(I+16)` 先过 `nredKernelPtrOk`；
+//        ③ `B = *(u64*)(I+8)` 同上；④ 每次读 `A+k`／`B+k` 前 `A`／`B` 已确认形状合法；⑤ **只读**——不写任何
+//        苹果对象、不改 `out`、不调用任何苹果函数（⇒ **无需授权**）。
+//  返回值：形状不符 ⇒ 5（`failMask bit23`）；形状通过但**未做真实工作** ⇒ 6（`failMask bit24`，fail-closed）
+//        ⇒ 苹果的 `0x797e8`／`0x7a1a5` 不再执行（崩点消失），且链条**停在 9**（不误报成功）。
+static int nredVcnProbeSwInit(void* const info, void* const out)
+{
+    const UInt8* const I = static_cast<const UInt8*>(info);
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    if (info == nullptr || out == nullptr) { return kSwResNullArg; }          // 2
+    const UInt64 A = *reinterpret_cast<const UInt64*>(I + 16);                // `device`（苹果 worker `0x9fea6` 已写入）
+    const UInt64 B = *reinterpret_cast<const UInt64*>(I + 8);                 // `device + 304`（同上）
+    const bool aOk = nredKernelPtrOk(reinterpret_cast<const void*>(A));
+    const bool bOk = nredKernelPtrOk(reinterpret_cast<const void*>(B));
+    const UInt64 NONE = 0xFFFFFFFFFFFFFFFFULL;
+    // ★ **只读**：逐槽读（形状不合法 ⇒ 保持哨兵；**绝不越过形状校验解引用**）
+    gProbe9[0] = aOk ? *reinterpret_cast<const UInt64*>(A + 16) : NONE;       // `device+16`（`7a1b8/7a1bc`）
+    gProbe9[1] = aOk ? *reinterpret_cast<const UInt64*>(A + 24) : NONE;       // `device+24`（`7a1c3`）
+    gProbe9[2] = bOk ? *reinterpret_cast<const UInt64*>(B + 16) : NONE;       // `device+320`（`7a1ca/7a1ce`）
+    gProbe9[3] = bOk ? *reinterpret_cast<const UInt64*>(B + 32) : NONE;       // `device+336`（`7a1d5`）
+    gProbe9[4] = bOk ? *reinterpret_cast<const UInt64*>(B + 56) : NONE;       // `device+360`（`7a1e3`）
+    gProbe9[5] = bOk ? *reinterpret_cast<const UInt64*>(B + 64) : NONE;       // `device+368`（`7a1dc`）
+    gProbe9N += 1;                                                            // 戳记"跑过"判据
+    if (!aOk || !bOk) { gGvmBook.failMask |= (1U << 23); return kSwResParseFail; }   // 5（只读判定，零解引用）
+    gGvmBook.omittedMask |= (1U << 25);   // 取/建对象（探针阶段未做）
+    gGvmBook.omittedMask |= (1U << 26);   // 子步骤（探针阶段未做）
+    gGvmBook.failMask    |= (1U << 24);   // ★ fail-closed：**不得报成功**（否则链条推进到苹果的 9 ⇒ 崩点）
+    return kSwResStepFail;                // 6
+}
+
 // ── 统一入口（**唯一**）：按模块号分派（R60 需求 1.2）─────────────────────────────────────
 //  · 计数：`gGvmSwCalls`（全部）与 `gSwCallN[id]`（按模块号，供 `[swi] n=`）；`gSwLastId`＝本次模块号。
 //  · 模块 5 ⇒ 本体；**其余模块 ⇒ 显式"未实现"**（只记日志 ＋ **如实返回非 0**；禁止空壳成功）。
@@ -3264,6 +3316,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
             case 6: res = nredPspSwInit(info, out); break;           // 模块 6＝PSP（R96 阶段 1）
             case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R108 阶段 2）
             case 7: res = nredGcSwInit(info, out); break;            // 模块 7＝GC（R100 阶段 1）
+            case 9: res = nredVcnProbeSwInit(info, out); break;      // 模块 9＝VCN（R119 只读探针）
             default: break;                                          // 其余模块：**显式未实现**
         }
     }
