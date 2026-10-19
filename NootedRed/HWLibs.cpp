@@ -3515,7 +3515,10 @@ static int nredGcSwInit(void* const info, void* const out)
             // ⚠ 比苹果严格：苹果此处**不清** `O+8`（`7e1b jne 0x7d76` 直接上抛），我方清（R160 §2 #26）。
             gGvmBook.failMask |= (1U << 22); *reinterpret_cast<UInt64*>(O + 8) = 0; return rc25;
         }
-        fnFill(L, *reinterpret_cast<const void* const*>(H + 3424), nSub);    // #28
+        // #27：苹果在 #25 之后**重新读取**计数与指针（`7e21 movl 3432(%rcx),%edx`／`7e2f movq 3424(%rcx),%rsi`）
+        //  ⇒ 此处同样回读，不使用 #24 的旧值。
+        fnFill(L, *reinterpret_cast<const void* const*>(H + 3424),
+               *reinterpret_cast<const UInt32*>(H + 3432));                   // #28
     }
     *reinterpret_cast<UInt64*>(O + 1048) = *reinterpret_cast<const UInt64*>(H + 3424);  // #29
     *reinterpret_cast<UInt32*>(O + 1056) = *reinterpret_cast<const UInt32*>(H + 3432);  // #30
