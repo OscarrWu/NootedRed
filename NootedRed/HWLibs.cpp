@@ -170,6 +170,21 @@ static UInt64 gM8H912  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+912)`（同上�
 static UInt64 gM8H1712 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1712)`（子对象，`#21` 取建）
 static UInt64 gM8H1736 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1736)`＝**槽 1**（未装 ⇒ 苹果 hw-init 静默返 0）
 static UInt64 gM8H1960 = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(h+1960)`＝**槽 29**（uCode 常量，未取得）
+// R160（模块 7 D2 观测）：GC 软件初始化的读数留存（**纯标量写**；`nredGcSwInit` 写、`nredSwLogCall` 读）。
+//  `0xFF…FF`＝"未读到"哨兵；解引用白名单见 R160 §5.4（不读 `*(h+16)`、不新增任何解引用）。
+static UInt32 gM7N       = 0;                       // 模块 7 本体被进入的次数（`[swhw7] n=`）
+static UInt32 gM7Code    = 0xFFFFFFU;               // `0xb129(I+12)` 的打包值（入口重置为 0xffffff）
+static UInt64 gM7O1048   = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(O+1048)`（#29）
+static UInt32 gM7O1056   = 0xFFFFFFFFU;             // `*(u32*)(O+1056)`（#30）
+static UInt64 gM7H3520   = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(H+3520)`（#54 的取/建产物）
+static UInt32 gM7H3528   = 0xFFFFFFFFU;             // `*(u32*)(H+3528)`（应等于 `0xc312` 的返回）
+static UInt64 gM7S3552   = 0xFFFFFFFFFFFFFFFFULL;   // M1-c 回读：`H+3552` 槽
+static UInt64 gM7S3560   = 0xFFFFFFFFFFFFFFFFULL;   // M1-c 回读：`H+3560` 槽
+static UInt64 gM7S3568   = 0xFFFFFFFFFFFFFFFFULL;   // M1-c 回读：`H+3568` 槽
+static UInt32 gM7StubHit = 0;                       // bit0=3552／bit1=3560／bit2=3568（桩被调用过）
+static UInt64 gM7Tab[5]  = {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
+                            0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};   // `H+3544/3784/3944/4000/4024`
+
 // R105：入参结构两个 32 位字段的**留存**（供 `[swinfo]` 戳记；纯读、零新增解引用方向）。
 //  `0xFFFFFFFF`＝**从未读到**（哨兵；与真实值可区分——模块判定只需 `==1`／`==0` 之类的小值）。
 static UInt32 gSwInfo12 = 0xFFFFFFFFU;   // `*(u32*)(info+12)`（模块 2（SDMA）的关键判别字段）
@@ -2748,6 +2763,28 @@ static void nredSwLogCall(const UInt32 id, const void* const info, const void* c
                      static_cast<unsigned>(gGvmBook.omittedMask));
     }
     if (m > 0) { nredTraceLine(gGvmSwLog, m); }   // m<=0（缓冲不足等）⇒ 静默丢弃，绝不影响调用方
+    // R160（模块 7 D2）：`[swhw7]` 两行，落点＝本函数末尾（复用 `gGvmSwLog[192]`；不使用
+    //  `nredTraceFlush` 的 `body[4096]`）。**两行各自一次 `snprintf` ＋ 一次 `nredTraceLine`**（不拼行）。
+    //  产出条件＝`gM7N != 0`（模块 7 本体真被进入）⇒ 门控关时一行不多。
+    if (gM7N != 0) {
+        int m7 = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
+                          "[swhw7] n=%u hit=%x cw=%06x h3520=%llx h3528=%08x\n",
+                          static_cast<unsigned>(gM7N), static_cast<unsigned>(gM7StubHit),
+                          static_cast<unsigned>(gM7Code),
+                          static_cast<unsigned long long>(gM7H3520), static_cast<unsigned>(gM7H3528));
+        if (m7 > 0) { nredTraceLine(gGvmSwLog, m7); }
+        m7 = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
+                      "[swhw7s] s=%llx,%llx,%llx t=%llx,%llx,%llx,%llx,%llx\n",
+                      static_cast<unsigned long long>(gM7S3552),
+                      static_cast<unsigned long long>(gM7S3560),
+                      static_cast<unsigned long long>(gM7S3568),
+                      static_cast<unsigned long long>(gM7Tab[0]),
+                      static_cast<unsigned long long>(gM7Tab[1]),
+                      static_cast<unsigned long long>(gM7Tab[2]),
+                      static_cast<unsigned long long>(gM7Tab[3]),
+                      static_cast<unsigned long long>(gM7Tab[4]));
+        if (m7 > 0) { nredTraceLine(gGvmSwLog, m7); }
+    }
 }
 
 // A11 对称清理（对照上游 `723-742` 与苹果 `0x19324` 的按序释放）：释放我方资源、复位簿记；
@@ -3381,29 +3418,197 @@ static int nredPspSwInit(void* const info, void* const out)
     return kSwResStepFail;                // 6
 }
 
-// ── 模块 7（GC）本体：**阶段 1**（R100 §3.6）────────────────────────────────────────────────
-//  被替换实现＝`0x7ce0`（装配点 `0x99851`）；真实动作（R100 亲读）：
-//   形状校验（`info+0==648`／`out+0==1064`／`info+8==1`）→ 缓冲（`+16 ← info+624`、`+8 ← info+616`）
-//   → `0x9dbf`（取/建）→ `0x9f3d`（初始化）→ `out+8 = obj`
-//   → `*(obj+16) = info+624`；`*(obj+8) = info+616` → `memcpy(obj+192, info+4, 608)`
-//  ⚠ **阶段 1 只做形状校验与两字段非零登记**；③④⑤⑥⑦⑧ 与句柄供给**如实登记为省略** ⇒ **恒返 6**
-//    （fail-closed；**不得**为凑 `res=7` 而放宽——红线）。
+// ── 模块 7（GC）本体：**D2**（R154 需求／R155 实施／R158 M1／R160 可开工版）──────────────────
+//  被替换实现＝苹果 `0x7ce0`（装配点 `0x99851`）。D2 手法：保留 `#1–#40`／`#43–#55` 的真实动作，
+//  只删**版本门** `#41 callq 0x8df8(h,code)` 与其判据 `#42`（本机 code 必不在其支持集）。
+//  ★ 被删步骤的产物＝`h+3544..4031` 的 488 B 回调/表区 ⇒ 在**原位置**按唯一正确顺序处理：
+//    显式清零 → 61 槽全零回读 → 写三个诚实拒绝桩（`h+3552/3560/3568`）→ 三槽回读比对。
+//    **终态＝三槽为桩地址、其余 58 槽为 0**（"488 B 全零"只在**装桩前**那一刻成立，不得当终态）。
+//  ★ 三个桩（R160 §4）：3568 返 0＝"无可用块"（消费者译为失败 2，**不是成功**）；3560/3552 返非 0
+//    ⇒ 调用方走失败分支。桩只读 `rdi`、不解引用任何入参、不做硬件动作 ⇒ 不会 `callq *0` trap。
+//  ⚠ 未复现项（R160 §3.3）：`0x8df8` 的 59 槽苹果回调表未安装（`omittedMask bit28`）；其默认失败分支
+//    的事件 `0xb794(h,8,0,0)` 随删点消失（`bit23`）；GC 硬件侧未做（`bit24`）；`h+3880/4024` 来源未知
+//    （`bit14`）；句柄供给 `subobj+40` 未做（`bit22`）。
+//  ⚠ 口径（R160 §0）：返 0 只表示"GC 软件侧最小初始化完成并越过版本门"，**不等于**模块 7 完成／GC 就绪。
+static constexpr UInt32 kGcLocalBytes = 4032;
+static UInt8 gGcLocalBuf[kGcLocalBytes];   // 苹果同位使用 4032 B 栈缓冲；改 static ⇒ 零栈占用
+// 三个诚实拒绝桩：只读 `rdi`（本实现完全不读入参）、不做硬件动作；返回值使调用方走失败分支。
+//  `gM7StubHit` 当前**无并发写者**（stage 链单线程串行）⇒ 普通 `|=` 即可；
+//  若将来出现并发路径，改用 `__atomic_fetch_or(&gM7StubHit, mask, __ATOMIC_RELAXED)`。
+static UInt64 nredGcStub3552(void* /*h*/, UInt64 /*src*/, UInt64 /*dst*/, UInt64 /*len*/)
+{ gM7StubHit |= (1U << 0); return 0x80000301ULL; }   // 非 0 ⇒ `0x829e` 经 `0x834b` 返 2
+static UInt64 nredGcStub3560(void* /*h*/)
+{ gM7StubHit |= (1U << 1); return 0x80000302ULL; }   // 循环内：经 `0x834b` 返 2；尾跳：原样传出
+static UInt64 nredGcStub3568(void* /*h*/)
+{ gM7StubHit |= (1U << 2); return 0; }               // ★ 必须 0＝"无可用块"（非成功）⇒ `0x829e` 经 `0x82da` 返 2
 static int nredGcSwInit(void* const info, void* const out)
 {
     const UInt8* const I = static_cast<const UInt8*>(info);
     UInt8* const O = static_cast<UInt8*>(out);
     gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
-    if (*reinterpret_cast<const UInt32*>(I + 0) != 648)  { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
-    if (*reinterpret_cast<const UInt32*>(O + 0) != 1064) { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
-    if (*reinterpret_cast<const UInt32*>(I + 8) != 1)    { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
-    if (*reinterpret_cast<const UInt64*>(I + 616) == 0 ||
-        *reinterpret_cast<const UInt64*>(I + 624) == 0) { gGvmBook.failMask |= (1U << 19); return kSwResParseFail; }
-    gGvmBook.omittedMask |= (1U << 19);   // ③ 取/建（`0x9dbf`）——需书面授权
-    gGvmBook.omittedMask |= (1U << 20);   // ④ 初始化（`0x9f3d`）——需书面授权
-    gGvmBook.omittedMask |= (1U << 21);   // ⑤⑥⑦⑧ `out+8`／`obj+16`／`obj+8`／`memcpy(608)`
-    gGvmBook.omittedMask |= (1U << 22);   // 句柄供给（`subobj+40`）
-    gGvmBook.failMask    |= (1U << 22);   // ★ fail-closed：全过也不得报成功
-    return kSwResStepFail;                // 6
+    UInt8* const L = gGcLocalBuf;
+    // 入口重置（R160 §5.3）：同一引导内重复进入时，`[swhw7]` 读数只反映本次。
+    gM7N += 1;
+    gM7Code = 0xFFFFFFU; gM7O1048 = ~0ULL; gM7O1056 = 0xFFFFFFFFU;
+    gM7H3520 = ~0ULL; gM7H3528 = 0xFFFFFFFFU; gM7StubHit = 0;
+    gM7S3552 = ~0ULL; gM7S3560 = ~0ULL; gM7S3568 = ~0ULL;
+    for (UInt32 i = 0; i < 5; i += 1) { gM7Tab[i] = ~0ULL; }
+
+    __builtin_memset(L, 0, kGcLocalBytes);                                   // #2
+    if (info == nullptr || out == nullptr) { return kSwResNullArg; }         // #4/#5
+    if (*reinterpret_cast<const UInt32*>(I + 0) != 648 ||
+        *reinterpret_cast<const UInt32*>(O + 0) != 1064 ||
+        *reinterpret_cast<const UInt32*>(I + 8) != 1 ||
+        *reinterpret_cast<const UInt64*>(I + 616) == 0 ||
+        *reinterpret_cast<const UInt64*>(I + 624) == 0) {                    // #7..#9
+        gGvmBook.failMask |= (1U << 19); return kSwResParseFail;             // 1
+    }
+    if (gHwlibsSlide == 0) {
+        gGvmBook.failMask |= (1U << 22); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    }
+    *reinterpret_cast<UInt64*>(L + 16) = *reinterpret_cast<const UInt64*>(I + 624);   // #10
+    *reinterpret_cast<UInt64*>(L + 8)  = *reinterpret_cast<const UInt64*>(I + 616);   // #11
+
+    using NRedGcGetOrCreate = int (*)(void*, UInt32, UInt32, void**);
+    using NRedGcFill        = int (*)(void*, const void*, UInt32);
+    using NRedGcCode        = UInt32 (*)(const void*);
+    using NRedGcStateInit   = int (*)(void*, UInt32);
+    using NRedGcTriple      = int (*)(void*, UInt32);
+    using NRedGcDispatch    = int (*)(void*, UInt64, UInt64, void*);          // ★ 4 参（FIX-1）
+    using NRedGcTail        = int (*)(void*, void*);
+    using NRedGcStub        = int (*)(void*, UInt64);
+    using NRedGcConst       = UInt32 (*)(void);
+    const NRedGcGetOrCreate fnGetOrCreate = reinterpret_cast<NRedGcGetOrCreate>(gHwlibsSlide + 0x9dbf);
+    const NRedGcFill        fnFill        = reinterpret_cast<NRedGcFill>(gHwlibsSlide + 0x9f3d);
+    const NRedGcCode        fnCode        = reinterpret_cast<NRedGcCode>(gHwlibsSlide + 0xb129);
+    const NRedGcStateInit   fnStateInit   = reinterpret_cast<NRedGcStateInit>(gHwlibsSlide + 0x9573);
+    const NRedGcTriple      fnTriple      = reinterpret_cast<NRedGcTriple>(gHwlibsSlide + 0x9bf9);
+    const NRedGcDispatch    fnDispatch    = reinterpret_cast<NRedGcDispatch>(gHwlibsSlide + 0xa081);
+    const NRedGcTail        fnTail        = reinterpret_cast<NRedGcTail>(gHwlibsSlide + 0x9801);
+    const NRedGcStub        fnStub        = reinterpret_cast<NRedGcStub>(gHwlibsSlide + 0x9db1);
+    const NRedGcConst       fnConst       = reinterpret_cast<NRedGcConst>(gHwlibsSlide + 0xc312);
+
+    void* h = nullptr;
+    const int rc12 = fnGetOrCreate(L, kGcLocalBytes, 1, &h);                 // #12
+    if (rc12 != 0) {                                                         // #13
+        gGvmBook.failMask |= (1U << 22); *reinterpret_cast<UInt64*>(O + 8) = 0; return rc12;
+    }
+    if (!nredKernelPtrOk(h)) {
+        gGvmBook.failMask |= (1U << 22); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    }
+    UInt8* const H = static_cast<UInt8*>(h);
+    fnFill(L, h, kGcLocalBytes);                                             // #15（不判）
+    *reinterpret_cast<UInt64*>(O + 8) = reinterpret_cast<UInt64>(h);         // #16
+    *reinterpret_cast<UInt64*>(H + 16) = *reinterpret_cast<const UInt64*>(I + 624);   // #17
+    *reinterpret_cast<UInt64*>(H + 8)  = *reinterpret_cast<const UInt64*>(I + 616);   // #18
+    __builtin_memcpy(H + 192, I + 4, 608);                                   // #19
+
+    const UInt32 code = fnCode(I + 12);                                      // #20
+    gM7Code = code;
+    fnStateInit(h, code);                                                    // #22（不判）
+    fnTriple(h, code);                                                       // #23（不判）
+
+    const UInt32 nSub = *reinterpret_cast<const UInt32*>(H + 3432);          // #24
+    if (nSub != 0) {
+        const int rc25 = fnGetOrCreate(L, nSub, 1, reinterpret_cast<void**>(H + 3424));  // #25
+        if (rc25 != 0) {
+            // ⚠ 比苹果严格：苹果此处**不清** `O+8`（`7e1b jne 0x7d76` 直接上抛），我方清（R160 §2 #26）。
+            gGvmBook.failMask |= (1U << 22); *reinterpret_cast<UInt64*>(O + 8) = 0; return rc25;
+        }
+        fnFill(L, *reinterpret_cast<const void* const*>(H + 3424), nSub);    // #28
+    }
+    *reinterpret_cast<UInt64*>(O + 1048) = *reinterpret_cast<const UInt64*>(H + 3424);  // #29
+    *reinterpret_cast<UInt32*>(O + 1056) = *reinterpret_cast<const UInt32*>(H + 3432);  // #30
+    gM7O1048 = *reinterpret_cast<const UInt64*>(O + 1048);
+    gM7O1056 = *reinterpret_cast<const UInt32*>(O + 1056);
+    *(H + 3420) = 0;                                                         // #31
+    {
+        const UInt32 v = *reinterpret_cast<const UInt32*>(I + 632);          // #32..#39
+        *(H + 806) = static_cast<UInt8>(v & 1U);
+        *(H + 807) = static_cast<UInt8>((v >> 1) & 1U);
+        *(H + 808) = static_cast<UInt8>((v >> 2) & 1U);
+        UInt32 w = *reinterpret_cast<const UInt32*>(H + 3444);
+        w = (w & ~2U)  | ((v >> 2) & 2U);
+        w = (w & ~8U)  | ((v >> 2) & 8U);
+        w = (w & ~4U)  | ((v >> 2) & 4U);
+        w = (w & ~16U) | ((v >> 2) & 16U);
+        w = (w & ~32U) | ((v >> 2) & 32U);
+        *reinterpret_cast<UInt32*>(H + 3444) = w;
+    }
+    // #40：★ 四参，且判返回（FIX-1：`7f10/7f14/7f18` 的 `rdi=h, rsi, rdx, rcx=O`；`7f20 testl; jne`）。
+    const int rc40 = fnDispatch(h,
+                                *reinterpret_cast<const UInt64*>(I + 12),
+                                *reinterpret_cast<const UInt64*>(I + 20), O);
+    if (rc40 != 0) {
+        gGvmBook.failMask |= (1U << 21); *reinterpret_cast<UInt64*>(O + 8) = 0; return rc40;
+    }
+    // ── M1：删 #41/#42 后，原位置清零＋装桩（唯一正确顺序：memset→全零回读→写桩→回读桩）──────
+    __builtin_memset(H + 3544, 0, 488);
+    for (UInt32 off = 3544; off <= 4024; off += 8) {
+        if (*reinterpret_cast<const UInt64*>(H + off) != 0) {
+            gGvmBook.failMask |= (1U << 21); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+        }
+    }
+    *reinterpret_cast<UInt64*>(H + 3552) = reinterpret_cast<UInt64>(&nredGcStub3552);
+    *reinterpret_cast<UInt64*>(H + 3560) = reinterpret_cast<UInt64>(&nredGcStub3560);
+    *reinterpret_cast<UInt64*>(H + 3568) = reinterpret_cast<UInt64>(&nredGcStub3568);
+    // 终态判据：三槽 == 桩地址（其余 58 槽由上面的全零回读保证；#43–#50 不再写回调槽）。
+    if (*reinterpret_cast<const UInt64*>(H + 3552) != reinterpret_cast<UInt64>(&nredGcStub3552) ||
+        *reinterpret_cast<const UInt64*>(H + 3560) != reinterpret_cast<UInt64>(&nredGcStub3560) ||
+        *reinterpret_cast<const UInt64*>(H + 3568) != reinterpret_cast<UInt64>(&nredGcStub3568)) {
+        gGvmBook.failMask |= (1U << 21); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    }
+    gM7S3552 = *reinterpret_cast<const UInt64*>(H + 3552);
+    gM7S3560 = *reinterpret_cast<const UInt64*>(H + 3560);
+    gM7S3568 = *reinterpret_cast<const UInt64*>(H + 3568);
+    gGvmBook.omittedMask |= (1U << 15);   // 三回调未实现（拒绝桩）
+    gGvmBook.omittedMask |= (1U << 28);   // 59 槽苹果回调表未安装
+    gGvmBook.omittedMask |= (1U << 23);   // stage-2 的"22 处回调调用"未执行（注意：`0x8a85` 的 3 条**直接**
+                                          //   调用 `0xb794`／`0xb5ec`／`0xb1c1` 仍会执行，它们不是回调，不在本位范围）
+    gGvmBook.omittedMask |= (1U << 24);   // GC 硬件侧未做
+    gGvmBook.omittedMask |= (1U << 14);   // `h+3880/4024` 来源未知
+    gGvmBook.omittedMask |= (1U << 22);   // 句柄供给（`subobj+40`）未做
+    // #43..#50（D2 下：3544/3600/3608/3624/4000 均为 0 ⇒ 不调用；只有 3568 槽是桩）
+    if (*reinterpret_cast<const UInt64*>(H + 3544) != 0) {                    // 3544=0 ⇒ 跳过
+        reinterpret_cast<void (*)(void*)>(*reinterpret_cast<const UInt64*>(H + 3544))(h);
+    }
+    const int rc44 = fnTail(h, O + 1032);                                    // #44
+    if (rc44 != 0 && rc44 != 3) {
+        gGvmBook.failMask |= (1U << 21); *reinterpret_cast<UInt64*>(O + 8) = 0; return rc44;
+    }
+    if (*reinterpret_cast<const UInt64*>(H + 3608) != 0) {
+        reinterpret_cast<void (*)(void*)>(*reinterpret_cast<const UInt64*>(H + 3608))(h);
+    }
+    if (*(H + 804) != 0 || *(H + 802) != 0) {                                // #45/#46
+        if (*reinterpret_cast<const UInt64*>(H + 3600) != 0) {                // #47
+            reinterpret_cast<void (*)(void*)>(*reinterpret_cast<const UInt64*>(H + 3600))(h);
+        }
+        if (*(H + 804) != 0 && *reinterpret_cast<const UInt64*>(H + 3624) != 0) {  // #48
+            reinterpret_cast<void (*)(void*)>(*reinterpret_cast<const UInt64*>(H + 3624))(h);
+        }
+    }
+    if (!(((*reinterpret_cast<const UInt32*>(H + 3444)) & 2U) != 0 && *(H + 820) != 0)) {  // #49
+        if (*reinterpret_cast<const UInt64*>(H + 4000) != 0) {                // #50
+            reinterpret_cast<void (*)(void*)>(*reinterpret_cast<const UInt64*>(H + 4000))(h);
+        }
+    }
+    (void)fnStub(h, *reinterpret_cast<const UInt64*>(I + 640));              // #51（恒 0 ⇒ 永不失败）
+    const UInt32 k = fnConst();                                              // #52
+    *reinterpret_cast<UInt32*>(H + 3528) = k;                                // #53
+    gM7H3528 = *reinterpret_cast<const UInt32*>(H + 3528);   // 机械回读（§6.1 S5 要求读字段，不硬编码 0x4140）
+    const int rc54 = fnGetOrCreate(h, k, 1, reinterpret_cast<void**>(H + 3520));  // #54
+    gM7H3520 = *reinterpret_cast<const UInt64*>(H + 3520);
+    if (rc54 != 0) { gGvmBook.failMask |= (1U << 21); *reinterpret_cast<UInt64*>(O + 8) = 0; return rc54; }
+    if (gM7H3520 == 0 || gM7H3528 != k || *reinterpret_cast<const UInt64*>(O + 8) == 0) {
+        gGvmBook.failMask |= (1U << 21); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+    }
+    gM7Tab[0] = *reinterpret_cast<const UInt64*>(H + 3544);
+    gM7Tab[1] = *reinterpret_cast<const UInt64*>(H + 3784);
+    gM7Tab[2] = *reinterpret_cast<const UInt64*>(H + 3944);
+    gM7Tab[3] = *reinterpret_cast<const UInt64*>(H + 4000);
+    gM7Tab[4] = *reinterpret_cast<const UInt64*>(H + 4024);
+    if (!gGvmSwInitPass) { return kSwResPassGateOff; }                       // #55（门关 7）
+    return kSwResPass;                                                       // 门开 0
 }
 
 // ── 模块 9（VCN）**只读探针＋诚实失败**（R119；R121 落地）─────────────────────────────────────
