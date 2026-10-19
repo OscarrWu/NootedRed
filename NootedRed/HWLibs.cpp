@@ -3515,11 +3515,13 @@ static int nredGcSwInit(void* const info, void* const out)
             // ⚠ 比苹果严格：苹果此处**不清** `O+8`（`7e1b jne 0x7d76` 直接上抛），我方清（R160 §2 #26）。
             gGvmBook.failMask |= (1U << 22); *reinterpret_cast<UInt64*>(O + 8) = 0; return rc25;
         }
-        // #27：苹果在 #25 之后**重新读取**计数与指针（`7e21 movl 3432(%rcx),%edx`／`7e2f movq 3424(%rcx),%rsi`）
-        //  ⇒ 此处同样回读，不使用 #24 的旧值。
-        fnFill(L, *reinterpret_cast<const void* const*>(H + 3424),
-               *reinterpret_cast<const UInt32*>(H + 3432));                   // #28
     }
+    // #27/#28：⚠ 与 R160 §2 #24「n==0 跳过 25–28」的措辞不同——机器码在 n==0 时只跳过 #25/#26，
+    //  随后 `7e2d xorl %edx,%edx` 落到 `7e2f..7e3d` 仍调用 `0x9f3d(L, *(h+3424), 0)`（src 为 0 时
+    //  该函数在 `9f59/9f5c` 直接返 2，不解引用）⇒ 此处按机器码**无条件调用**；计数在 #25 之后回读
+    //  （`7e21 movl 3432(%rcx),%edx`），不使用 #24 的旧值。
+    fnFill(L, *reinterpret_cast<const void* const*>(H + 3424),
+           *reinterpret_cast<const UInt32*>(H + 3432));                       // #28（返回值不判）
     *reinterpret_cast<UInt64*>(O + 1048) = *reinterpret_cast<const UInt64*>(H + 3424);  // #29
     *reinterpret_cast<UInt32*>(O + 1056) = *reinterpret_cast<const UInt32*>(H + 3432);  // #30
     gM7O1048 = *reinterpret_cast<const UInt64*>(O + 1048);
