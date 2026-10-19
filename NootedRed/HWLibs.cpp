@@ -148,6 +148,15 @@ static UInt32 gSwLastId      = 0;       // 最近一次送达的模块号（1-ba
 static UInt64 gProbe9[6] = {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
                             0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
 static UInt32 gProbe9N   = 0;   // 探针被调次数（供"是否跑过"的判据；`[swprobe9] n=`）
+// R162：模块 2（SDMA）**只读探针**的读数载体（BSS 标量；`0xFF…FF`＝"未读到"哨兵）。
+//  产出条件＝`gSdmaN != 0`；`gSdmaBad` bit0＝p1 未过指针门、bit1＝p2 未过 ⇒ 对应读数保持哨兵。
+static UInt32 gSdmaN    = 0;                        // 探针被调次数（`[swhw2] n=`）
+static UInt32 gSdmaBad  = 0;                        // 非法指针标志（bit0=p1、bit1=p2）
+static UInt32 gSdmaP1_0 = 0xFFFFFFFFU;              // `*(u32*)p1`（苹果契约常量 0x290）
+static UInt32 gSdmaP1_3 = 0xFFFFFFFFU;              // `*(u32*)(p1+12)`（苹果契约常量 1）
+static UInt32 gSdmaP2_0 = 0xFFFFFFFFU;              // `*(u32*)p2`（苹果契约常量 0x40）
+static UInt32 gSdmaP2_1 = 0xFFFFFFFFU;              // `*(u32*)(p2+4)`
+static UInt64 gSdmaP2_8 = 0xFFFFFFFFFFFFFFFFULL;    // `*(u64*)(p2+8)`（输出槽初值）
 // R129／R143（观测）：模块 8 的**关键字段留存**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
 //  `gM8V612`＝能力位快照；`gM8H712`＝**D2 不写该字段**（`0x66d84` 属已删的 `#20`）⇒ 回读应为 0（`bit29` 佐证）；
 //  `gM8H1728`＝由保留的 `#20a`（`0x64b1a(h,h+1728,240)`）装表；`gM8N`＝模块 8 本体被进入的次数。
@@ -2636,6 +2645,7 @@ static int nredSwInitThunk(void* const info, void* const out) { return NRedSwIni
 //     仍是苹果的 ⇒ 探针只拦下 `funcs[0]` 路径（崩点 I／II 所在），其余槽未接管。
 struct NRedSwClient { UInt32 id; int (*fn)(void*, void*); UInt64 expect; };
 static const NRedSwClient kSwClients[] = {
+    { 2,  nredSwInitThunk<2>,  0x58a04 },   // R162：模块 2（SDMA）per-instance sw_init【反汇编·确凿】
     { 5,  nredSwInitThunk<5>,  0x191dc },   // R58 §1.3【反汇编·确凿】
     { 6,  nredSwInitThunk<6>,  0x48f9c },
     { 7,  nredSwInitThunk<7>,  0x7ce0  },
@@ -2785,6 +2795,17 @@ static void nredSwLogCall(const UInt32 id, const void* const info, const void* c
                       static_cast<unsigned long long>(gM7Tab[3]),
                       static_cast<unsigned long long>(gM7Tab[4]));
         if (m7 > 0) { nredTraceLine(gGvmSwLog, m7); }
+    }
+    // R162（模块 2 只读探针）：`[swhw2]` 一行（一次 snprintf ＋ 一次 nredTraceLine）。
+    //  产出条件＝`gSdmaN != 0`（探针真被调到）⇒ 未启用/未被调时一行不多。
+    if (gSdmaN != 0) {
+        const int m2 = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
+                                "[swhw2] n=%u bad=%x p1_0=%08x p1_3=%08x p2_0=%08x p2_1=%08x p2_8=%llx\n",
+                                static_cast<unsigned>(gSdmaN), static_cast<unsigned>(gSdmaBad),
+                                static_cast<unsigned>(gSdmaP1_0), static_cast<unsigned>(gSdmaP1_3),
+                                static_cast<unsigned>(gSdmaP2_0), static_cast<unsigned>(gSdmaP2_1),
+                                static_cast<unsigned long long>(gSdmaP2_8));
+        if (m2 > 0) { nredTraceLine(gGvmSwLog, m2); }
     }
 }
 
@@ -3655,6 +3676,40 @@ static int nredVcnProbeSwInit(void* const info, void* const out)
     return kSwResStepFail;                // 6
 }
 
+// ── 模块 2（SDMA）**只读探针＋诚实失败**（R162 §6）────────────────────────────────────────────
+//  目的：只取一条事实——苹果 client-2 stage-0 的 per-instance 入口 `0x58a04` 是否被调用过。
+//  判据：`n==0`（分派层从未送达本模块）⇒ E2（实例表无匹配）；`n>=1` ⇒ 已进入 per-instance 初始化
+//        （E4 方向），再按返回值区分内层 I1–I6。
+//  安全（逐条）：① `p1`／`p2` 各自先过 `nredKernelPtrOk`；② 未过者**不解引用**，读数保持哨兵并置
+//        `gSdmaBad` 对应位；③ 读宽固定（p1 ≤16 B、p2 ≤16 B，均在调用方对象内）；
+//        ④ **只读**——不写任何苹果对象字段、不改 `out`、不调用任何苹果函数；⑤ 返回值**非 0**。
+//  ⚠ 返回值语义（R162 §1.1）：本函数位于 `funcs[0]` 层，苹果约定 **0=成功** ⇒ **绝不返 0**。
+static int nredSdmaProbeSwInit(void* const p1, void* const p2)
+{
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    gSdmaN += 1;
+    gSdmaBad = 0;
+    gSdmaP1_0 = 0xFFFFFFFFU; gSdmaP1_3 = 0xFFFFFFFFU;
+    gSdmaP2_0 = 0xFFFFFFFFU; gSdmaP2_1 = 0xFFFFFFFFU; gSdmaP2_8 = 0xFFFFFFFFFFFFFFFFULL;
+    if (nredKernelPtrOk(p1)) {
+        gSdmaP1_0 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(p1) + 0);
+        gSdmaP1_3 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(p1) + 12);
+    } else {
+        gSdmaBad |= (1U << 0);
+    }
+    if (nredKernelPtrOk(p2)) {
+        gSdmaP2_0 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(p2) + 0);
+        gSdmaP2_1 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(p2) + 4);
+        gSdmaP2_8 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(p2) + 8);
+    } else {
+        gSdmaBad |= (1U << 1);
+    }
+    if (gSdmaBad != 0) { gGvmBook.failMask |= (1U << 25); }   // 非法入参（只读判定，零解引用）
+    gGvmBook.omittedMask |= (1U << 2);    // SDMA 功能未实现（本轮只读探针）
+    gGvmBook.failMask    |= (1U << 26);   // ★ fail-closed：**不得报成功**（0＝苹果语义的成功）
+    return kSwResStepFail;                // 6（非 0 ⇒ 0x9aaeb 视为失败，链条停在 2）
+}
+
 // ── 统一入口（**唯一**）：按模块号分派（R60 需求 1.2）─────────────────────────────────────
 //  · 计数：`gGvmSwCalls`（全部）与 `gSwCallN[id]`（按模块号，供 `[swi] n=`）；`gSwLastId`＝本次模块号。
 //  · 模块 5 ⇒ 本体；**其余模块 ⇒ 显式"未实现"**（只记日志 ＋ **如实返回非 0**；禁止空壳成功）。
@@ -3676,6 +3731,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
         gSwInfo12 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(info) + 12);
         gSwInfo8  = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(info) + 8);
         switch (clientId) {
+            case 2: res = nredSdmaProbeSwInit(info, out); break;     // 模块 2＝SDMA（R162 只读探针）
             case 5: res = nredGvmSwInit(info, out, o8init); break;   // 模块 5＝GVM（A1–A11）
             case 6: res = nredPspSwInit(info, out); break;           // 模块 6＝PSP（R96 阶段 1）
             case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R108 阶段 2）
