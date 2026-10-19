@@ -4234,20 +4234,22 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  门控关（默认）⇒ 本行不成立＝零行为；哪些模块安装由 `-NRedSwInitIds` 决定（默认只模块 5）。
     //  ⚠ 必须在 org（`0x9440f`）执行**之前**——否则苹果已在 handler 内读过 `*(subobj+8)`（R60 §1.1）。
     if (gGvmSwInstall) { nredSwInstallSlot(a, b, c); }
-    // ── 阶段分派层 fail-closed 护栏（第 208／209 轮 trap；R185 扩到 stage-1）──────────────────────
+    // ── 阶段分派层 fail-closed 护栏（第 208／209 轮 trap；R185：拦所有 stage≥1）────────────────────
     //  ① 第 208／209 轮实证：模块 15 已安装时苹果外层仍在 `funcs[0]` 之外读空指针（Apple HWLibs
     //     +0xa12df、CR2=0）⇒ client 15/10 的 **stage-0** 必须无条件拦截（不判断是否安装）。
     //  ② R185：`0x929ac` 遇失败**不中止**——`0x92a73 callq 0x9440f` → `testb %al,%al` → 失败仅
     //     `0x92a8e movl %eax,148(%r13)` 记录 → `0x92adc xorl %r12d,%r12d` → **继续遍历**。
-    //     故 stage-0 的返 6 不能阻止进入 stage-1；stage-1 首次进入（209 轮）即在 client 5 读空
-    //     SoC 条目表 trap（**trap 型不会自动重启**）。⇒ **stage-1 一律 fail-closed 拦截**；
-    //     这不构成倒退：stage-1 从未成功过。
-    //  ③ 条件：`((client∈{15,10} ∧ stage==0) ∨ stage==1)`；其它 stage（2–3）与 client 5/6/7/8/2/14/9
-    //     的 stage-0 不受影响；15/10 的实现函数保留，本轮不会被执行。
-    //  ④ `[swgrd]` 每次命中都打。⚠ 209 轮 `[swgrd]` 0 命中不等于未执行：L2 最后 flush 在 sec=20，
-    //     而 sw-init ≈26 s，该行即使产生也未落盘；下一轮由轮卡把 `liludump` 调小到 10 解决（不在代码里）。
+    //     故只拦 stage-0 无效：拦掉 stage-1 后仍会进入 stage-2/3。stage≥1 在本机从未成功过
+    //     （209 首次进入即 trap，**trap 型不会自动重启**）⇒ **所有 stage≥1 一律 fail-closed**，
+    //     把失败固定在驱动上下文（断言型），不构成倒退。
+    //  ③ 条件：`((client∈{15,10} ∧ stage==0) ∨ stage≥1)`；其它 client 的 stage-0 不受影响；
+    //     15/10 的实现函数保留，本轮不会被执行（`c` 恒为非负，`c>=1` 不含 stage-0）。
+    //  ④ `[swgrd]` 每次命中都打（经我方 L2：nredTraceLine→gTraceRing→NRedTraceFlush-*）。
+    //     **本轮不以该行作为主判据——主判据是 panic 首行形态（trap vs 断言型）。**
+    //     ⚠ 本命中点在 boot 遍历路径，不属于 nredTraceFlush 的安全时点（仅 ①L2 周期拍 ②dumpNow
+    //     ③panic 分片）⇒ **不同步刷写**（避免早期 APFS 挂起）。
     //  ⑤ 失败形态：返 6 ⇒ 遍历者记录失败（R185：记录后继续）；本拦截把"未知 trap"换成"记录型失败"。
-    if (((b == 15 || b == 10) && c == 0) || (c == 1)) {
+    if (((b == 15 || b == 10) && c == 0) || (c >= 1)) {
         static char grdLine[80];
         const int ng = snprintf(grdLine, sizeof(grdLine), "[swgrd] c=%u st=%u hit=1\n",
                                 static_cast<unsigned>(b), static_cast<unsigned>(c));
