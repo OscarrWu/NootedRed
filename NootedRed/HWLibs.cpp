@@ -155,6 +155,13 @@ static UInt32 gM2Step = 0;                        // 最后失败步编号（R16
 static UInt32 gM2K    = 0xFFFFFFFFU;              // 匹配到的 block type＝`*(u32*)(p1+8)`（调用方 `local_340` 写入）
 static UInt64 gM2Cfg  = 0xFFFFFFFFFFFFFFFFULL;    // `*(u64*)(obj+0x2c8)`（清零回读后的首指针，应为 0）
 static UInt64 gM2Q    = 0xFFFFFFFFFFFFFFFFULL;    // `*(u64*)(obj+0x2a8)`（queue 对象，应非 0）
+// R172：模块 14（MES）D2 实现的观测载体（BSS 标量；`0xFF…FF`＝"未读到"哨兵）。
+//  产出条件＝`gM14N != 0`；成功时 st=00。
+static UInt32 gM14N    = 0;                       // 本实现被调次数（`[swmes] n=`）
+static UInt32 gM14Step = 0;                       // 最后失败步编号（R172 §7.1：01–07）
+static UInt32 gM14Code = 0xFFFFFFU;               // A12 处 `0x48632(obj+0x6c)` 的返回值
+static UInt64 gM14Cfg  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(obj+0x790)`（清零回读后，应为 0）
+static UInt64 gM14Q    = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(obj+0x7b0)`（清零回读后，应为 0）
 // R129／R143（观测）：模块 8 的**关键字段留存**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
 //  `gM8V612`＝能力位快照；`gM8H712`＝**D2 不写该字段**（`0x66d84` 属已删的 `#20`）⇒ 回读应为 0（`bit29` 佐证）；
 //  `gM8H1728`＝由保留的 `#20a`（`0x64b1a(h,h+1728,240)`）装表；`gM8N`＝模块 8 本体被进入的次数。
@@ -2805,6 +2812,17 @@ static void nredSwLogCall(const UInt32 id, const void* const info, const void* c
                                 static_cast<unsigned long long>(gM2Q));
         if (ms > 0) { nredTraceLine(gGvmSwLog, ms); }
     }
+    // R172（模块 14 MES D2）：`[swmes]` 一行（一次 snprintf ＋ 一次 nredTraceLine）。
+    //  产出条件＝`gM14N != 0`（本实现真被调到）⇒ 未启用/未被调时一行不多。
+    if (gM14N != 0) {
+        const int mm = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
+                                "[swmes] n=%u st=%02x code=%06x cfg=%llx q=%llx\n",
+                                static_cast<unsigned>(gM14N), static_cast<unsigned>(gM14Step),
+                                static_cast<unsigned>(gM14Code),
+                                static_cast<unsigned long long>(gM14Cfg),
+                                static_cast<unsigned long long>(gM14Q));
+        if (mm > 0) { nredTraceLine(gGvmSwLog, mm); }
+    }
 }
 
 // A11 对称清理（对照上游 `723-742` 与苹果 `0x19324` 的按序释放）：释放我方资源、复位簿记；
@@ -3812,6 +3830,113 @@ static int nredSdmaSwInit(void* const p1, void* const p2)
     return kSwResPass;                                                       // 0（funcs[0] 层成功）
 }
 
+// ── 模块 14（MES）本体：**D2**（R170／R171／R172）────────────────────────────────────────────────
+//  被替换实现＝client-14 的 `funcs[0]`＝`0x42e94`（MES `sw_init`，`42e94..43417`）。
+//  保留：形状、0xB30 工作区＋0x43c30 分配/0x43cfe 初始化、字段搬运、三段 0x260 记录拷贝（含 break）、
+//  0x43a10 开关位、obj+0x9e8 两位、默认回调 0x47d58、0x43aa4。
+//  删除：0x441ad 的 per-code 门分派（保留门前两次清零 p2+8=0／obj+0x788=0）；其 per-code 产物
+//  obj+0x790..0x7af／obj+0x7b0..0x7cf 清零并逐 8 字节回读；描述符数组不写（计数 0）并登记。
+//  ⚠ 机器码修正（相对 R172 §9.1）：① A3 的 p1+0xE48/0xE40 必须写入 0xB30 工作区 +0x10/+8
+//    （`42edf..42efa`；0x43c30 经 `*(workspace+0x10)` 取服务对象，否则解引用 NULL）；
+//    ② A14 的第二实参是 `p2+0x190`（`433b7 addq $400,%r14`；400=0x190），不是 p2+0x32。
+//  ⚠ A12 的默认函数指针组（obj+0xa30..0xb28）不安装（登记 bit7，R172 §4.2／§9.2）；但 0x43aa4 会在
+//    obj+0xad0 非 0 时经它盲调（`43aca`）⇒ 显式把该槽清 0，使 §9.2 的"未装 ⇒ 0"成为机械事实。
+//  ⚠ 口径：只可写"MES 软件侧最小初始化完成（不含 per-code 队列表）"，不得写"模块 14 完成／MES 就绪"。
+static constexpr UInt32 kMesLocalBytes = 0xB30;
+static UInt8 gMesLocal[kMesLocalBytes];   // 苹果同位的 0xB30 B 栈工作区；改 static ⇒ 零栈占用（串行单写者）
+static int nredMesSwInit(void* const p1, void* const p2)
+{
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    gM14N += 1; gM14Step = 0; gM14Code = 0xFFFFFFU;
+    gM14Cfg = ~0ULL; gM14Q = ~0ULL;
+    UInt8* const L = gMesLocal;
+    __builtin_memset(L, 0, kMesLocalBytes);                                   // A1
+    if (p1 == nullptr || p2 == nullptr) {                                     // A2
+        gGvmBook.failMask |= (1U << 11); gM14Step = 0x01; return kSwResNullArg;      // 2
+    }
+    if (!nredKernelPtrOk(p1) || !nredKernelPtrOk(p2)) {
+        gGvmBook.failMask |= (1U << 11); gM14Step = 0x01; return kSwResParseFail;    // 1
+    }
+    const UInt8* const P1 = static_cast<const UInt8*>(p1);
+    UInt8* const P2 = static_cast<UInt8*>(p2);
+    const UInt64 v48 = *reinterpret_cast<const UInt64*>(P1 + 0xE48);          // A3
+    const UInt64 v40 = *reinterpret_cast<const UInt64*>(P1 + 0xE40);
+    *reinterpret_cast<UInt64*>(L + 0x10) = v48;   // 机器码 42edf/42eee：工作区 +0x10＝服务对象
+    *reinterpret_cast<UInt64*>(L + 0x08) = v40;   // 机器码 42ef2/42efa：工作区 +8
+
+    using NRedMesAlloc = int (*)(void*, UInt64, UInt32, void**);
+    using NRedMesInit  = int (*)(void*, void*, UInt32);
+    using NRedMesMisc  = void (*)(void*);
+    using NRedMesTail  = int (*)(void*, void*);
+    using NRedMesCode  = UInt32 (*)(const void*);
+    const NRedMesAlloc fnAlloc = reinterpret_cast<NRedMesAlloc>(gHwlibsSlide + 0x43C30);
+    const NRedMesInit  fnInit  = reinterpret_cast<NRedMesInit>(gHwlibsSlide + 0x43CFE);
+    const NRedMesMisc  fnMisc  = reinterpret_cast<NRedMesMisc>(gHwlibsSlide + 0x43A10);
+    const NRedMesTail  fnTail  = reinterpret_cast<NRedMesTail>(gHwlibsSlide + 0x43AA4);
+    const NRedMesCode  fnCode  = reinterpret_cast<NRedMesCode>(gHwlibsSlide + 0x48632);
+
+    UInt64 objU = 0;
+    const int rc4 = fnAlloc(L, kMesLocalBytes, 1, reinterpret_cast<void**>(&objU));   // A4
+    if (rc4 != 0) {
+        *reinterpret_cast<UInt64*>(P2 + 0) = 0;                              // 苹果：*p2=0
+        gGvmBook.failMask |= (1U << 12); gM14Step = 0x02; return rc4;
+    }
+    UInt8* const obj = reinterpret_cast<UInt8*>(objU);
+    if (!nredKernelPtrOk(obj)) { gGvmBook.failMask |= (1U << 12); gM14Step = 0x02; return kSwResStepFail; }
+    const int rc5 = fnInit(L, obj, kMesLocalBytes);                            // A5（苹果不判；我方判）
+    if (rc5 != 0) { gGvmBook.failMask |= (1U << 12); gM14Step = 0x03; return rc5; }
+    *reinterpret_cast<UInt64*>(P2 + 0) = objU;                                 // A6
+    *reinterpret_cast<UInt64*>(obj + 0x10) = v48;                              // A7
+    *reinterpret_cast<UInt64*>(obj + 0x08) = v40;
+    for (UInt32 i = 0; i != 0xE40; i += 0x260) {                               // A8
+        const UInt32 t = *reinterpret_cast<const UInt32*>(P1 + i);
+        UInt32 dst;
+        if (t == 0x21) dst = 0x524; else if (t == 0x1B) dst = 0x2C4; else if (t == 0x0B) dst = 0x64;
+        else break;                                                            // 苹果逐字：其它类型 break
+        __builtin_memcpy(obj + dst, P1 + i, 0x260);
+    }
+    fnMisc(obj);                                                               // A9
+    // A10（D2）：删 0x441ad 的门分派；保留 W2/W3，清零 per-code 产物并回读（8 槽）
+    *reinterpret_cast<UInt32*>(P2 + 8) = 0;                                    // W2
+    *reinterpret_cast<UInt32*>(obj + 0x788) = 0;                               // W3
+    __builtin_memset(obj + 0x790, 0, 0x20);
+    __builtin_memset(obj + 0x7B0, 0, 0x20);
+    for (UInt32 off = 0; off < 0x20; off += 8) {
+        if (*reinterpret_cast<const UInt64*>(obj + 0x790 + off) != 0 ||
+            *reinterpret_cast<const UInt64*>(obj + 0x7B0 + off) != 0) {
+            gGvmBook.failMask |= (1U << 12); gM14Step = 0x05; return kSwResStepFail;  // 6
+        }
+    }
+    if (*reinterpret_cast<const UInt32*>(P2 + 8) != 0 ||
+        *reinterpret_cast<const UInt32*>(obj + 0x788) != 0) {
+        gGvmBook.failMask |= (1U << 12); gM14Step = 0x04; return kSwResStepFail;      // 6
+    }
+    gGvmBook.omittedMask |= (1U << 4);   // per-code 分派跳过（版本门）
+    gGvmBook.omittedMask |= (1U << 5);   // 描述符 0 项导出
+    gGvmBook.omittedMask |= (1U << 6);   // 队列对象/字符串指针未创建
+    {                                                                          // A11
+        const UInt32 b = *reinterpret_cast<const UInt32*>(P1 + 0xE50);
+        UInt32 w = *reinterpret_cast<const UInt32*>(obj + 0x9E8);
+        w = (w & ~1U) | (b & 1U);
+        w = (w & ~2U) | (b & 2U);
+        *reinterpret_cast<UInt32*>(obj + 0x9E8) = w;
+    }
+    gGvmBook.omittedMask |= (1U << 7);   // A12 的函数指针组（obj+0xa30..0xb28）未安装
+    *reinterpret_cast<UInt64*>(obj + 0xAD0) = 0;   // 安全守卫：0x43aa4 在 43aca 经此槽盲调
+    gM14Code = fnCode(reinterpret_cast<const void*>(obj + 0x6C));   // A12 的 code（0x48632）
+    // A13：默认组回调 0x47d58（无间接调用；只写 p2+0x194/0x19c 与 obj+0xa00）
+    reinterpret_cast<void (*)(void*, void*)>(gHwlibsSlide + 0x47D58)(
+        obj, reinterpret_cast<void*>(P2 + 0x194));
+    const int rc14 = fnTail(obj, reinterpret_cast<void*>(P2 + 0x190));          // A14（+0x190，非 +0x32）
+    if (rc14 != 0 && rc14 != 3) { gGvmBook.failMask |= (1U << 12); gM14Step = 0x06; return rc14; }
+    if (*reinterpret_cast<const UInt64*>(P2 + 0) != objU) {                     // 终态 S2
+        gGvmBook.failMask |= (1U << 12); gM14Step = 0x07; return kSwResStepFail; // 6
+    }
+    gM14Cfg = *reinterpret_cast<const UInt64*>(obj + 0x790);
+    gM14Q   = *reinterpret_cast<const UInt64*>(obj + 0x7B0);
+    return kSwResPass;                                                          // 0
+}
+
 // ── 统一入口（**唯一**）：按模块号分派（R60 需求 1.2）─────────────────────────────────────
 //  · 计数：`gGvmSwCalls`（全部）与 `gSwCallN[id]`（按模块号，供 `[swi] n=`）；`gSwLastId`＝本次模块号。
 //  · 模块 5 ⇒ 本体；**其余模块 ⇒ 显式"未实现"**（只记日志 ＋ **如实返回非 0**；禁止空壳成功）。
@@ -3838,6 +3963,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
             case 6: res = nredPspSwInit(info, out); break;           // 模块 6＝PSP（R96 阶段 1）
             case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R108 阶段 2）
             case 7: res = nredGcSwInit(info, out); break;            // 模块 7＝GC（R100 阶段 1）
+            case 14: res = nredMesSwInit(info, out); break;           // 模块 14＝MES（R172 D2 替换）
             case 9: res = nredVcnProbeSwInit(info, out); break;      // 模块 9＝VCN（R119 只读探针）
             default: break;                                          // 其余模块：**显式未实现**
         }
