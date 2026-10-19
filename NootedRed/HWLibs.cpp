@@ -162,6 +162,14 @@ static UInt32 gM14Step = 0;                       // 最后失败步编号（R17
 static UInt32 gM14Code = 0xFFFFFFU;               // A12 处 `0x48632(obj+0x6c)` 的返回值
 static UInt64 gM14Cfg  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(obj+0x790)`（清零回读后，应为 0）
 static UInt64 gM14Q    = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(obj+0x7b0)`（清零回读后，应为 0）
+// R175：模块 9（VCN）实实现的观测载体（BSS 标量；`0xFF…FF`＝"未读到"哨兵）。
+//  产出条件＝`gVcnN != 0`；成功时 st=00。
+static UInt32 gVcnN    = 0;                       // 本实现被调次数（`[swvcn] n=`）
+static UInt32 gVcnStep = 0;                       // 最后失败步编号（R175 §7.1：01–06）
+static UInt64 gVcnO8   = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(out+8)`（B3）
+static UInt64 gVcnL10  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(local_28+0x10)`（应为 0）
+static UInt64 gVcnL18  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(local_28+0x18)`（应为 0）
+static UInt64 gVcnL30  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(local_28+0x30)`（应为 0）
 // R129／R143（观测）：模块 8 的**关键字段留存**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
 //  `gM8V612`＝能力位快照；`gM8H712`＝**D2 不写该字段**（`0x66d84` 属已删的 `#20`）⇒ 回读应为 0（`bit29` 佐证）；
 //  `gM8H1728`＝由保留的 `#20a`（`0x64b1a(h,h+1728,240)`）装表；`gM8N`＝模块 8 本体被进入的次数。
@@ -722,6 +730,29 @@ int nredTraceFlush(int secTag)
             static_cast<unsigned long long>(gProbe9[2]), static_cast<unsigned long long>(gProbe9[3]),
             static_cast<unsigned long long>(gProbe9[4]), static_cast<unsigned long long>(gProbe9[5]));
         if (np > 0) { off += (static_cast<size_t>(np) < capP) ? static_cast<size_t>(np) : capP; }
+    }
+    // R175：`[swvcn]`／`[swvcn2]` —— 模块 9 实实现的逐次读数＋接口指针归位用 slide。
+    //  产出条件＝`gVcnN != 0`；两行各自 snprintf 到 flush body（与 `[swprobe9]` 同区）。
+    if (gVcnN != 0 && off < sizeof(body)) {
+        const size_t capV = sizeof(body) - off;
+        const int nv = snprintf(body + off, capV,
+            "[swvcn] n=%u st=%02x o8=%llx l10=%llx l18=%llx l30=%llx\n",
+            static_cast<unsigned>(gVcnN), static_cast<unsigned>(gVcnStep),
+            static_cast<unsigned long long>(gVcnO8),
+            static_cast<unsigned long long>(gVcnL10),
+            static_cast<unsigned long long>(gVcnL18),
+            static_cast<unsigned long long>(gVcnL30));
+        if (nv > 0) { off += (static_cast<size_t>(nv) < capV) ? static_cast<size_t>(nv) : capV; }
+    }
+    if (gVcnN != 0 && off < sizeof(body)) {
+        const size_t capV2 = sizeof(body) - off;
+        const int nv2 = snprintf(body + off, capV2,
+            "[swvcn2] slide=%llx a16=%llx a24=%llx b16=%llx b32=%llx b56=%llx b64=%llx\n",
+            static_cast<unsigned long long>(gHwlibsSlide),
+            static_cast<unsigned long long>(gProbe9[0]), static_cast<unsigned long long>(gProbe9[1]),
+            static_cast<unsigned long long>(gProbe9[2]), static_cast<unsigned long long>(gProbe9[3]),
+            static_cast<unsigned long long>(gProbe9[4]), static_cast<unsigned long long>(gProbe9[5]));
+        if (nv2 > 0) { off += (static_cast<size_t>(nv2) < capV2) ? static_cast<size_t>(nv2) : capV2; }
     }
     // R129／R143：`[swm8]` —— 模块 8 **能力位快照 ＋ 两处关键字段**（R128 §4.3／§6-X1 引入；语义按 D2 更新）。
     //  **产出条件＝`gM8N != 0`**（比"跟随门控"更严：只有我方模块 8 本体**真被进入**才产出）⇒ 关态一行不多。
@@ -3659,37 +3690,102 @@ static int nredGcSwInit(void* const info, void* const out)
     return kSwResPass;                                                       // 门开 0
 }
 
-// ── 模块 9（VCN）**只读探针＋诚实失败**（R119；R121 落地）─────────────────────────────────────
-//  目的：① 在苹果实现之前拦下"接口表不全 ⇒ 零空判解引用"的崩点（R115 §3.3／R118 §3：崩点 I `0x79810`、
-//        崩点 II `0x7a1bc`）；② **只读**记录 6 个接口表指针（R118 §1.2），供扫描轮判定 G1。
-//  安全（5 条门，逐条落实在下面）：① `info`／`out` 非空；② `A = *(u64*)(I+16)` 先过 `nredKernelPtrOk`；
-//        ③ `B = *(u64*)(I+8)` 同上；④ 每次读 `A+k`／`B+k` 前 `A`／`B` 已确认形状合法；⑤ **只读**——不写任何
-//        苹果对象、不改 `out`、不调用任何苹果函数（⇒ **无需授权**）。
-//  返回值：形状不符 ⇒ 5（`failMask bit23`）；形状通过但**未做真实工作** ⇒ 6（`failMask bit24`，fail-closed）
-//        ⇒ 苹果的 `0x797e8`／`0x7a1a5` 不再执行（崩点消失），且链条**停在 9**（不误报成功）。
-static int nredVcnProbeSwInit(void* const info, void* const out)
+// ── 模块 9（VCN）本体：**D2 式实实现**（R173／R174／R175）────────────────────────────────────────
+//  被替换实现＝client-9 的 `funcs[0]`＝`0x797e8`（VCN sw_init）。保留：形状/指针门、B1 0x40 分配
+//  （`0x79b6d` 逐字入参）、B2 0x40 初始化（`0x79ca0`）、`out+8`、`local_28` 的 +0/+8/+0x2c 字段；
+//  观测 6 个接口指针＋slide。
+//  跳过：B7 `0x7a51b`（0x440 上下文）、B9 `0x7b4d8`（0x68）、B10 `0x7d120`（0x30）、B12 `0x7a363`
+//  （它读 `local_28[2]`，B7 跳过后为空 ⇒ 调用即崩）；`out+0x50`（主体成功标记）不写。
+//  不复制 `0x7a1a5` 的九项检查（R174：替换后不再执行，且其中两处取用在值为 0 时会崩）。
+//  ⚠ 残余风险：B1 成功后若 B2/回读失败，0x40 对象**无法释放**（`0x79bf5` 未读/未授权）⇒ 如实返 6 并
+//    登记"泄漏一次"；不得伪造释放。
+//  ⚠ 机器码修正（相对 R175 §9.1）：① `*(device+8)`（devSelf）也必须过 `nredKernelPtrOk`（§3.3 要求，
+//    §9.1 漏写）；② B3–B6 在 B2 调用之后、判 B2 返回值之前执行（`797e8.c:16-20` 的真实顺序）；
+//    ③ S2 除 `out+8 != 0` 外还须过 `nredKernelPtrOk`（R175 §5.1 S2）。
+//  ⚠ 口径：只可写"VCN 软件侧最小初始化完成（仅 0x40 上下文；不含 0x440/0x68/0x30 子对象）"。
+static int nredVcnSwInit(void* const info, void* const out)
 {
-    const UInt8* const I = static_cast<const UInt8*>(info);
     gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
-    if (info == nullptr || out == nullptr) { return kSwResNullArg; }          // 2
-    const UInt64 A = *reinterpret_cast<const UInt64*>(I + 16);                // `device`（苹果 worker `0x9fea6` 已写入）
-    const UInt64 B = *reinterpret_cast<const UInt64*>(I + 8);                 // `device + 304`（同上）
-    const bool aOk = nredKernelPtrOk(reinterpret_cast<const void*>(A));
-    const bool bOk = nredKernelPtrOk(reinterpret_cast<const void*>(B));
-    const UInt64 NONE = 0xFFFFFFFFFFFFFFFFULL;
-    // ★ **只读**：逐槽读（形状不合法 ⇒ 保持哨兵；**绝不越过形状校验解引用**）
-    gProbe9[0] = aOk ? *reinterpret_cast<const UInt64*>(A + 16) : NONE;       // `device+16`（`7a1b8/7a1bc`）
-    gProbe9[1] = aOk ? *reinterpret_cast<const UInt64*>(A + 24) : NONE;       // `device+24`（`7a1c3`）
-    gProbe9[2] = bOk ? *reinterpret_cast<const UInt64*>(B + 16) : NONE;       // `device+320`（`7a1ca/7a1ce`）
-    gProbe9[3] = bOk ? *reinterpret_cast<const UInt64*>(B + 32) : NONE;       // `device+336`（`7a1d5`）
-    gProbe9[4] = bOk ? *reinterpret_cast<const UInt64*>(B + 56) : NONE;       // `device+360`（`7a1e3`）
-    gProbe9[5] = bOk ? *reinterpret_cast<const UInt64*>(B + 64) : NONE;       // `device+368`（`7a1dc`）
-    gProbe9N += 1;                                                            // 戳记"跑过"判据
-    if (!aOk || !bOk) { gGvmBook.failMask |= (1U << 23); return kSwResParseFail; }   // 5（只读判定，零解引用）
-    gGvmBook.omittedMask |= (1U << 25);   // 取/建对象（探针阶段未做）
-    gGvmBook.omittedMask |= (1U << 26);   // 子步骤（探针阶段未做）
-    gGvmBook.failMask    |= (1U << 24);   // ★ fail-closed：**不得报成功**（否则链条推进到苹果的 9 ⇒ 崩点）
-    return kSwResStepFail;                // 6
+    gVcnN += 1; gVcnStep = 0; gVcnO8 = ~0ULL;
+    gVcnL10 = ~0ULL; gVcnL18 = ~0ULL; gVcnL30 = ~0ULL;
+    if (info == nullptr || out == nullptr) {                                  // A2
+        gGvmBook.failMask |= (1U << 9); gVcnStep = 0x01; return kSwResNullArg;   // 2
+    }
+    if (!nredKernelPtrOk(info) || !nredKernelPtrOk(out)) {                    // A3
+        gGvmBook.failMask |= (1U << 9); gVcnStep = 0x02; return kSwResParseFail; // 1
+    }
+    const UInt8* const I = static_cast<const UInt8*>(info);
+    UInt8* const O = static_cast<UInt8*>(out);
+    const UInt64 dev  = *reinterpret_cast<const UInt64*>(I + 0x10);           // device
+    const UInt64 devB = *reinterpret_cast<const UInt64*>(I + 8);              // device+304
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(dev))) {
+        gGvmBook.failMask |= (1U << 9); gVcnStep = 0x02; return kSwResParseFail;
+    }
+    // 观测：6 接口指针（与旧探针一致；B 侧仅当 devB 合法时读）
+    gProbe9[0] = *reinterpret_cast<const UInt64*>(dev + 16);
+    gProbe9[1] = *reinterpret_cast<const UInt64*>(dev + 24);
+    const bool bOk = nredKernelPtrOk(reinterpret_cast<const void*>(devB));
+    gProbe9[2] = bOk ? *reinterpret_cast<const UInt64*>(devB + 16) : ~0ULL;
+    gProbe9[3] = bOk ? *reinterpret_cast<const UInt64*>(devB + 32) : ~0ULL;
+    gProbe9[4] = bOk ? *reinterpret_cast<const UInt64*>(devB + 56) : ~0ULL;
+    gProbe9[5] = bOk ? *reinterpret_cast<const UInt64*>(devB + 64) : ~0ULL;
+    gProbe9N += 1;
+
+    using NRedVcnAlloc = int (*)(UInt64, void*, void**);   // *(dev+0x10)(*(dev+8), desc, &p)
+    using NRedVcnInit  = int (*)(UInt64, void*);           // *(dev+0x48)(*(dev+8), arg)
+    const UInt64 devSelf = *reinterpret_cast<const UInt64*>(dev + 8);
+    const UInt64 fnAlloc = *reinterpret_cast<const UInt64*>(dev + 0x10);
+    const UInt64 fnInit  = *reinterpret_cast<const UInt64*>(dev + 0x48);
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(devSelf)) ||
+        !nredKernelPtrOk(reinterpret_cast<const void*>(fnAlloc)) ||
+        !nredKernelPtrOk(reinterpret_cast<const void*>(fnInit))) {
+        gGvmBook.failMask |= (1U << 9); gVcnStep = 0x02; return kSwResParseFail;
+    }
+    // B1：分配 0x40（0x79b6d 的入参 {kind=1, 9, size+8=0x48}）
+    struct NRedVcnDesc { UInt64 kind; UInt64 nine; UInt64 size; } desc;
+    desc.kind = 1; desc.nine = 9; desc.size = 0x40 + 8;
+    UInt64 local28 = 0;
+    const int rc1 = reinterpret_cast<NRedVcnAlloc>(fnAlloc)(devSelf, &desc,
+                                                            reinterpret_cast<void**>(&local28));
+    if (rc1 != 0 || !nredKernelPtrOk(reinterpret_cast<const void*>(local28))) {
+        gGvmBook.failMask |= (1U << 8); gVcnStep = 0x03; return kSwResStepFail;   // 6
+    }
+    // B2：初始化 0x40（0x79ca0 的入参 {p, size=0x40}）
+    struct NRedVcnInitArg { UInt64 p; UInt32 size; UInt32 pad; } iarg;
+    iarg.p = local28; iarg.size = 0x40; iarg.pad = 0;
+    const int rc2 = reinterpret_cast<NRedVcnInit>(fnInit)(devSelf, &iarg);
+    UInt8* const L = reinterpret_cast<UInt8*>(local28);
+    *reinterpret_cast<UInt64*>(O + 8) = local28;                              // B3（分配成功后立即写）
+    *reinterpret_cast<UInt64*>(L + 8)  = dev;                                 // B4
+    *reinterpret_cast<UInt64*>(L + 0)  = devB;                                // B5
+    *(L + 0x2C) = static_cast<UInt8>((*reinterpret_cast<const UInt8*>(I + 4) >> 1) & 1U);  // B6
+    if (rc2 != 0) {
+        // ⚠ 0x40 泄漏一次：0x79bf5 不在授权清单内 ⇒ 如实返 6，不伪造释放。
+        gGvmBook.failMask |= (1U << 8); gVcnStep = 0x04; return kSwResStepFail;
+    }
+    // B7/B9/B10 跳过：清零其产物槽并回读（B12 的 0x28 同）
+    *reinterpret_cast<UInt64*>(L + 0x10) = 0;
+    *reinterpret_cast<UInt64*>(L + 0x18) = 0;
+    *reinterpret_cast<UInt32*>(L + 0x28) = 0;
+    *reinterpret_cast<UInt64*>(L + 0x30) = 0;
+    if (*reinterpret_cast<const UInt64*>(L + 0x10) != 0 ||
+        *reinterpret_cast<const UInt64*>(L + 0x18) != 0 ||
+        *reinterpret_cast<const UInt32*>(L + 0x28) != 0 ||
+        *reinterpret_cast<const UInt64*>(L + 0x30) != 0) {
+        // ⚠ 同上：0x40 泄漏一次，如实返 6。
+        gGvmBook.failMask |= (1U << 8); gVcnStep = 0x05; return kSwResStepFail;   // 6
+    }
+    gGvmBook.omittedMask |= (1U << 19);   // 0x7a51b（0x440）未执行
+    gGvmBook.omittedMask |= (1U << 20);   // 0x7b4d8（0x68）/0x7d120（0x30）未创建
+    gGvmBook.omittedMask |= (1U << 21);   // out+0x50（＝4）未写
+    gVcnO8 = *reinterpret_cast<const UInt64*>(O + 8);
+    gVcnL10 = *reinterpret_cast<const UInt64*>(L + 0x10);
+    gVcnL18 = *reinterpret_cast<const UInt64*>(L + 0x18);
+    gVcnL30 = *reinterpret_cast<const UInt64*>(L + 0x30);
+    if (gVcnO8 == 0 || !nredKernelPtrOk(reinterpret_cast<const void*>(gVcnO8))) {   // S2
+        gGvmBook.failMask |= (1U << 8); gVcnStep = 0x06; return kSwResStepFail;
+    }
+    return kSwResPass;                                                        // 0
 }
 
 // ── 模块 2（SDMA）本体：**D2 式替换**（R169）────────────────────────────────────────────────────
@@ -3964,7 +4060,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
             case 8: res = nredSmuSwInit(info, out); break;           // 模块 8＝SMU（R108 阶段 2）
             case 7: res = nredGcSwInit(info, out); break;            // 模块 7＝GC（R100 阶段 1）
             case 14: res = nredMesSwInit(info, out); break;           // 模块 14＝MES（R172 D2 替换）
-            case 9: res = nredVcnProbeSwInit(info, out); break;      // 模块 9＝VCN（R119 只读探针）
+            case 9: res = nredVcnSwInit(info, out); break;           // 模块 9＝VCN（R175 实实现）
             default: break;                                          // 其余模块：**显式未实现**
         }
     }
