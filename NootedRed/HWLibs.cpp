@@ -178,6 +178,12 @@ static UInt64 gJpegDev  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(p1+0x270)`（disc
 static UInt64 gJpegL    = 0xFFFFFFFFFFFFFFFFULL;   // `local`（0x40 对象）
 static UInt64 gJpegL10  = 0xFFFFFFFFFFFFFFFFULL;   // `local+0x10`（应为 0）
 static UInt64 gJpegL18  = 0xFFFFFFFFFFFFFFFFULL;   // `local+0x18`（应为 0）
+// R181：模块 10（DMCU）S1 的观测载体（BSS 标量；`[swdmcu]` 一行）。
+//  产出条件＝`gDmcuN != 0`；st：01 入参空／02 指针门／03 区标识／04 输出区标识／05 正常 fail-closed。
+static UInt32 gDmcuN    = 0;                       // 本实现被调次数（`[swdmcu] n=`）
+static UInt32 gDmcuStep = 0;                       // 最后步号（R181 §5.1）
+static UInt64 gDmcuF0   = 0;                       // `*(u32*)p1`（形状值，p1 已过指针门）
+static UInt64 gDmcuF280 = 0;                       // `*(u64*)(p1+0x280)`（苹果已写；仅观测）
 // R129／R143（观测）：模块 8 的**关键字段留存**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
 //  `gM8V612`＝能力位快照；`gM8H712`＝**D2 不写该字段**（`0x66d84` 属已删的 `#20`）⇒ 回读应为 0（`bit29` 佐证）；
 //  `gM8H1728`＝由保留的 `#20a`（`0x64b1a(h,h+1728,240)`）装表；`gM8N`＝模块 8 本体被进入的次数。
@@ -2874,6 +2880,16 @@ static void nredSwLogCall(const UInt32 id, const void* const info, const void* c
                                 static_cast<unsigned long long>(gJpegL18));
         if (mj > 0) { nredTraceLine(gGvmSwLog, mj); }
     }
+    // R181（模块 10 DMCU S1）：`[swdmcu]` 一行（一次 snprintf ＋ 一次 nredTraceLine）。
+    //  产出条件＝`gDmcuN != 0`；全标量、零解引用。
+    if (gDmcuN != 0) {
+        const int md = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
+                                "[swdmcu] n=%u st=%02x f0=%x f280=%llx\n",
+                                static_cast<unsigned>(gDmcuN), static_cast<unsigned>(gDmcuStep),
+                                static_cast<unsigned>(gDmcuF0),
+                                static_cast<unsigned long long>(gDmcuF280));
+        if (md > 0) { nredTraceLine(gGvmSwLog, md); }
+    }
 }
 
 // A11 对称清理（对照上游 `723-742` 与苹果 `0x19324` 的按序释放）：释放我方资源、复位簿记；
@@ -3808,6 +3824,37 @@ static int nredVcnSwInit(void* const info, void* const out)
     return kSwResPass;                                                        // 0
 }
 
+// ── 模块 10（DMCU）S1：fail-closed 最小实现（R181）────────────────────────────────────────────────
+//  为什么只做形状：`0x4d00` 的真实动作依赖 `0x51ae`/`0x7365`/`0x7977`（未知原语）与固件头解析
+//  （含 M9 trap：指针置 0 后无判空读 +6）。S1 **不调用任何外部函数**、不分配、不写 out、不置就绪位。
+//  苹果前置（`0x9f6dd:70–99`）已在我方之前完成：`*p1=0x2B8`、`*p2=0x78`、资源表项 10 判空。
+//  位：failMask bit2＝入参/指针门/形状；bit3＝S1 主动省略（如实失败）。omittedMask 本轮 32 位已满，
+//    采用 R181 P1：**不占 omitted 位**，模块 10 的省略集见 failMask bit3（待 u64 扩容后补登记）。
+//  返回值：0=成功（S1 **永不**返回）；6=如实失败（fail-closed）。
+static int nredDmcuSwInit(void* const p1, void* const p2)
+{
+    gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
+    gDmcuN += 1; gDmcuStep = 0; gDmcuF0 = 0; gDmcuF280 = 0;
+    if (p1 == nullptr || p2 == nullptr) {                                     // A1
+        gGvmBook.failMask |= (1U << 2); gDmcuStep = 0x01; return kSwResNullArg;    // 2
+    }
+    if (!nredKernelPtrOk(p1) || !nredKernelPtrOk(p2)) {                        // A2
+        gGvmBook.failMask |= (1U << 2); gDmcuStep = 0x02; return kSwResParseFail;  // 5
+    }
+    const UInt32 f0 = *reinterpret_cast<const UInt32*>(p1);
+    gDmcuF0 = f0;
+    gDmcuF280 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(p1) + 0x280);
+    if (f0 != 0x2B8) {                                                        // A3
+        gGvmBook.failMask |= (1U << 2); gDmcuStep = 0x03; return kSwResParseFail;  // 5
+    }
+    if (*reinterpret_cast<const UInt32*>(p2) != 0x78) {                        // A4
+        gGvmBook.failMask |= (1U << 2); gDmcuStep = 0x04; return kSwResParseFail;  // 5
+    }
+    gGvmBook.failMask |= (1U << 3);                                           // A5：主动省略
+    gDmcuStep = 0x05;
+    return kSwResStepFail;                                                     // 6
+}
+
 // ── 模块 15（JPEG/IPI-JPEG）本体：**D2 式实实现**（R176／R177）────────────────────────────────────
 //  被替换实现＝client-15 的 `funcs[0]`＝`0x3fc39`。保留：形状（`*p1==0x278`、`*p2==0x18`）、
 //  A7 0x40 分配（借用 `*(dev+0x10)`，描述符 {kind=1, tag=0xF, size=0x48}）、A8 初始化（`*(dev+0x48)`）、
@@ -4168,6 +4215,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
             case 14: res = nredMesSwInit(info, out); break;           // 模块 14＝MES（R172 D2 替换）
             case 9: res = nredVcnSwInit(info, out); break;           // 模块 9＝VCN（R175 实实现）
             case 15: res = nredJpegSwInit(info, out); break;          // 模块 15＝JPEG（R177 实实现）
+            case 10: res = nredDmcuSwInit(info, out); break;          // 模块 10＝DMCU（R181 S1 fail-closed）
             default: break;                                          // 其余模块：**显式未实现**
         }
     }
