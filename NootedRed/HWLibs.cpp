@@ -4234,15 +4234,15 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  门控关（默认）⇒ 本行不成立＝零行为；哪些模块安装由 `-NRedSwInitIds` 决定（默认只模块 5）。
     //  ⚠ 必须在 org（`0x9440f`）执行**之前**——否则苹果已在 handler 内读过 `*(subobj+8)`（R60 §1.1）。
     if (gGvmSwInstall) { nredSwInstallSlot(a, b, c); }
-    // ── R178 阶段分派层 fail-closed 护栏（第 208 轮 trap 的根因防护）────────────────────────────
-    //  为什么这里能拦住：client 15/10 的 stage-0 必须经 `0x9440f` 进入，而本 wrapper 是其唯一入口；
-    //  在调用 `orgMode9440f` 之前返回非 0 ⇒ 苹果的 `0xa1541→0x3fc39→0x403c7`（15）或 client-10 的
-    //  对应实现根本不会执行 ⇒ 不会再有 `0x40426 callq *0x20(%rax)` 的空槽调用。
-    //  条件：仅 (client∈{15,10}) ∧ stage==0 ∧ **该 client 的我方实现未安装/未启用**；已安装时放行，
-    //  由安装器写入 `subobj+8` 的我方 thunk 接管。其它 client 与 stage 1–3 **不受影响**。
+    // ── 阶段分派层 fail-closed 护栏（第 208／209 轮 trap 的最终防护）────────────────────────────
+    //  第 209 轮实证：模块 15 已安装（`funcs[0]` 已换我方）仍出现 `Kernel trap at Apple HWLibs
+    //  +0xa12df`、CR2=0（读空地址），且 `[swgrd]`／`[swjpeg]` 均未产出 ⇒ **苹果模块外层路径会在
+    //  `funcs[0]` 之外读空指针**，替换 `funcs[0]` 无法阻止。⇒ 必须在 dispatch 层、调用 `orgMode9440f`
+    //  之前**无条件**拦截 client 15/10 的 stage-0；不进入苹果外层，就不会有该空指针读。
+    //  条件：仅 (client∈{15,10}) ∧ stage==0；**不再判断是否安装我方实现**（安装与否都拦）。
+    //  其它 client 与全部 stage 1–3 **不受影响**；模块 15/10 的实现函数保留，本轮不会被执行。
     //  失败形态：返 6 ⇒ 遍历者停在 15/10 ⇒ 框架断言型 panic（`swip_client_id=15/10`，可自动重启）。
-    if ((b == 15 || b == 10) && c == 0 &&
-        !(b < 16 && gSwInstalled[b].installed && (gSwInitIdsMask & (1U << b)) != 0)) {
+    if ((b == 15 || b == 10) && c == 0) {
         static char grdLine[80];
         const int ng = snprintf(grdLine, sizeof(grdLine), "[swgrd] c=%u st=%u hit=1\n",
                                 static_cast<unsigned>(b), static_cast<unsigned>(c));
