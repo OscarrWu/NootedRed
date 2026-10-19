@@ -184,6 +184,9 @@ static UInt32 gDmcuN    = 0;                       // 本实现被调次数（`[
 static UInt32 gDmcuStep = 0;                       // 最后步号（R181 §5.1）
 static UInt64 gDmcuF0   = 0;                       // `*(u32*)p1`（形状值，p1 已过指针门）
 static UInt64 gDmcuF280 = 0;                       // `*(u64*)(p1+0x280)`（苹果已写；仅观测）
+// R191：护栏命中标记（1＝曾命中；纯 BSS，不依赖 `[swgrd]` 落盘）。护栏在 `wrapMode9440f` 内直接
+//  返回苹果极性的 0（失败），不进入 `NRedSwInitDispatch` ⇒ `gSwResById` 不会被记成"成功"。
+static UInt32 gGrdLastHit = 0;
 // R129／R143（观测）：模块 8 的**关键字段留存**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
 //  `gM8V612`＝能力位快照；`gM8H712`＝**D2 不写该字段**（`0x66d84` 属已删的 `#20`）⇒ 回读应为 0（`bit29` 佐证）；
 //  `gM8H1728`＝由保留的 `#20a`（`0x64b1a(h,h+1728,240)`）装表；`gM8N`＝模块 8 本体被进入的次数。
@@ -4221,6 +4224,7 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
     }
     // R98 §1（S1）：按模块留存**最近一次返回值**与**调用次数**（`0xFF`＝从未被调到；计数饱和 255）。
     if (clientId < 16) {
+        // ⚠ 护栏命中在 `wrapMode9440f` 内直接返回 0（苹果极性失败），不会进入本函数 ⇒ 本表不被污染。
         gSwResById[clientId] = static_cast<UInt8>(res);
         if (gSwCntById[clientId] != 255) { ++gSwCntById[clientId]; }
     }
@@ -4248,13 +4252,17 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //     **本轮不以该行作为主判据——主判据是 panic 首行形态（trap vs 断言型）。**
     //     ⚠ 本命中点在 boot 遍历路径，不属于 nredTraceFlush 的安全时点（仅 ①L2 周期拍 ②dumpNow
     //     ③panic 分片）⇒ **不同步刷写**（避免早期 APFS 挂起）。
-    //  ⑤ 失败形态：返 6 ⇒ 遍历者记录失败（R185：记录后继续）；本拦截把"未知 trap"换成"记录型失败"。
+    //  ⑤ 失败形态：**返 0**——苹果 `0x929ac` 的判据是 `testb %al,%al`，`%al==0` 才走失败分支
+    //     （`92a78 testb`／`92a7a je 0x92a97` → `0x92e71 logSwipFailure` → 置 `obj+0xa0` 失败位）。
+    //     **此处 0 表示失败**（与 `kSwRes*` 的"0=成功"相反）。护栏在本 wrapper 内直接返回、不进入
+    //     `NRedSwInitDispatch` ⇒ 不会把 0 记进 `gSwResById`（保持原值，通常 0xFF）；命中记 `gGrdLastHit=1`。
     if (((b == 15 || b == 10) && c == 0) || (c >= 1)) {
+        gGrdLastHit = 1;
         static char grdLine[80];
         const int ng = snprintf(grdLine, sizeof(grdLine), "[swgrd] c=%u st=%u hit=1\n",
                                 static_cast<unsigned>(b), static_cast<unsigned>(c));
         if (ng > 0) { nredTraceLine(grdLine, ng); }
-        return kSwResStepFail;   // 6
+        return 0;   // 苹果极性：0＝失败（不是 kSwRes* 的成功语义）
     }
     // 观测通道修复（需求 v2）**M2：安装点出现**（`wrapMode9440f` 入口且属**模块 5**，**不额外限制 stage**）
     //  ⇒ 打标记并刷一次；⚠ 刻意放在**安装动作之后**（上面那行）⇒ 该片头部区能读到安装侧真实值
