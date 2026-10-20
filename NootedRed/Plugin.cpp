@@ -26,3 +26,16 @@ PluginConfiguration ADDPR(config){
     KernelVersion::Tahoe,
     []() { NRed::singleton().init(); },
 };
+
+// 本地构建通道（上游 clang）兼容：
+// Apple clang 在 -fapple-kext 下会为 kext 生成 __realmain/__antimain 两个入口指针，
+// 分别指向 <PRODUCT_NAME>_kern_start/_stop；MacKernelSDK 的 libkmod.a（__start/__stop）
+// 通过 GOT 读取它们并调用。上游 clang 不生成这两个定义，产物会留下未定义符号，
+// OpenCore 注入时按 0-value 拒绝（"Symbol __realmain has 0-value"）。
+// 取值与 Apple clang 产物一致，不改变任何运行期路径。
+#if !defined(__apple_build_version__)
+extern "C" kern_return_t NootedRed_kern_start(kmod_info_t *, void *);
+extern "C" kern_return_t NootedRed_kern_stop(kmod_info_t *, void *);
+extern "C" void* __realmain = reinterpret_cast<void*>(&NootedRed_kern_start);
+extern "C" void* __antimain = reinterpret_cast<void*>(&NootedRed_kern_stop);
+#endif
