@@ -17,7 +17,8 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: macos-latest
+    # 临时绕行 macos-latest runner 故障（0 step / 15 分钟取消）：改用 macos-14 取得产物后回滚。
+    runs-on: macos-14
     permissions:
       contents: write
     steps:
