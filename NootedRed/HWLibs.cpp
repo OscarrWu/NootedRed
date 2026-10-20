@@ -139,7 +139,7 @@ static bool gTtlBisect = false;
 static bool gTtlTrim = false;
 // 230（`-NRedBgmTab`，**默认关**）：BGM 表区转储。关态 ⇒ 不安装 hook ⇒ 零输出、零行为。
 static bool gBgmTab = false;
-static bool gBgmTabHexDone = false;   // 前 256B hex 只打一次（避免多次读取刷屏）
+// （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
 static UInt64 gHwlibsSlide = 0;
@@ -2619,9 +2619,8 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
                static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
                static_cast<int>(ret));
 
-    // 前 256B：只对“大块读”（≥0x8000，即 64KB 表区）打一次，避免小读刷屏。
-    if (!gBgmTabHexDone && len >= 0x8000) {
-        gBgmTabHexDone = true;
+    // 前 256B 分块：每行 32B，最多 8 行（行数按 len 截断；任务卡要求每次转储都输出）。
+    {
         char line[128];
         for (UInt32 r = 0; r < 8; ++r) {
             const UInt32 off = r * 32;
