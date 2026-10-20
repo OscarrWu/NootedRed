@@ -137,6 +137,9 @@ static bool gTtlBisect = false;
 // 223/228/229（`-NRedTtlTrim`，**默认关**）：判据④ stage0（正向）/stage2（反向）按本机真实
 //  client 集合裁剪：stage0 跳过 15/10；stage2 跳过 15/10/3（3＝BGM）。其余 stage 与关态一律透传。
 static bool gTtlTrim = false;
+// 230（`-NRedBgmTab`，**默认关**）：BGM 表区转储。关态 ⇒ 不安装 hook ⇒ 零输出、零行为。
+static bool gBgmTab = false;
+static bool gBgmTabHexDone = false;   // 前 256B hex 只打一次（避免多次读取刷屏）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
 static UInt64 gHwlibsSlide = 0;
@@ -1220,6 +1223,10 @@ static const UInt8 kBgmQueryPattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x
                                            0x8B, 0x78, 0x08, 0x48, 0x8B, 0x40, 0x40, 0x5D, 0xFF, 0xE0, 0x55, 0x48};
 static const UInt8 kBgmStep4Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x48, 0x89,
                                            0xFB, 0x4C, 0x8D, 0x7D, 0xE4, 0x41, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00};
+// 230：BGM 表区转储挂点 `0x29b4e2`（服务读方法，无符号）。原型按反汇编：
+//  `bool f(void* self, UInt32 sel, UInt64 size, void** out)`；成功时 `*out = resp[0]+16`。
+static const UInt8 kBgmTabReadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x49,
+                                           0x89, 0xCE, 0x31, 0xDB, 0x48, 0x8D, 0x45, 0xC8, 0x48, 0x89, 0x58, 0x08};
 // `0x29a19e`：按 selector 读取（7/8 经 `0x29adb0`）。`0x2a9f0f` 用它做 selector=7 的读取 ⇒ 其返回值是判据之一。
 static const UInt8 kReadSelPattern[]   = {0x41, 0x89, 0xC9, 0x89, 0xD0, 0x83, 0xFE, 0x08, 0x74, 0x09, 0x83, 0xFE,
                                            0x07, 0x75, 0x13, 0x31, 0xF6, 0xEB, 0x05, 0xBE, 0x01, 0x00, 0x00, 0x00};
@@ -2568,6 +2575,65 @@ UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)), static_cast<unsigned long long>(inner),
                static_cast<unsigned>(mode), static_cast<unsigned long long>(f2fa8),
                static_cast<unsigned long long>(f2fb8), static_cast<unsigned>(ret));
+    }
+    return ret;
+}
+
+// ─── 230：BGM 表区转储（`-NRedBgmTab`，默认关）───────────────────────────────────
+//  挂点 0x29b4e2（服务读方法，无符号，pattern 路由）。原型（反汇编 29b4e2–29b56d）：
+//    `UInt32 f(void* self, UInt32 sel, UInt64 size, void** out)`；
+//    内部组 req{+0=(sel≠0), +4=(sel==4), +8=3, +0x10=size+16} → `call *16(container)`；
+//    成功（ret==0）时把 `resp[0]`（缓冲指针）与 `resp[1]` 写入缓冲头，`*out = resp[0]+16`。
+//  ⚠ 与实施文档的偏差（已核实）：文档写“从 resp 参数取 resp[0]，数据起点 resp[0]+16”；
+//    实际签名没有 resp 参数，第四参是 `out`，且 **`*out` 已是 resp[0]+16** ⇒ 直接从 `*out` 读。
+//  安全：`out` 与 `*out` 两级内核指针校验；长度 = min(size, 0x10000)；所有头字段读取带边界检查；
+//    不建 64KB 栈缓冲；前 256B 按 32B/行分 8 行输出，单行 ≤ 128B 缓冲。
+UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UInt64 size, void** const out)
+{
+    const UInt32 ret = FunctionCast(wrapBgmTabRead, singleton().orgBgmTabRead)(self, sel, size, out);
+    if (!gBgmTab) { return ret; }   // 理论不可达（门控关不安装）；双保险
+    if (ret != 0) {
+        NRED_TRACE("[bgmtab] hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=%d bad=0", static_cast<int>(ret));
+        return ret;
+    }
+    if (!nredKernelPtrOk(out) || !nredKernelPtrOk(*out)) {
+        NRED_TRACE("[bgmtab] hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=0 bad=1");
+        return ret;
+    }
+
+    const UInt8* const p = static_cast<const UInt8*>(*out);
+    const UInt32 len = (size > 0x10000ULL) ? 0x10000U : static_cast<UInt32>(size);
+    auto rd32 = [p, len](const UInt32 off) -> UInt32 {
+        if (static_cast<UInt64>(off) + 4 > len) { return 0; }
+        return *reinterpret_cast<const UInt32*>(p + off);
+    };
+    const UInt32 hdr = rd32(0x00);
+    const UInt32 ver = (len >= 6) ? static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x04)) : 0;
+    const UInt32 ipds = rd32(rd32(0x0C));      // p+ipds_off 处魔数（越界 ⇒ 0）
+    const UInt32 harv = rd32(rd32(0x1C));      // p+harv_off 处魔数
+    UInt32 sum = 0;
+    for (UInt32 i = 0; i < len; ++i) { sum += p[i]; }
+
+    NRED_TRACE("[bgmtab] hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0",
+               static_cast<unsigned>(hdr), static_cast<unsigned>(ver), static_cast<unsigned>(ipds),
+               static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
+               static_cast<int>(ret));
+
+    // 前 256B：只对“大块读”（≥0x8000，即 64KB 表区）打一次，避免小读刷屏。
+    if (!gBgmTabHexDone && len >= 0x8000) {
+        gBgmTabHexDone = true;
+        char line[128];
+        for (UInt32 r = 0; r < 8; ++r) {
+            const UInt32 off = r * 32;
+            if (off >= len) { break; }
+            int n = snprintf(line, sizeof(line), "[bgmtab-b] off=0x%03X ", static_cast<unsigned>(off));
+            for (UInt32 k = 0; k < 32 && off + k < len && n > 0 &&
+                              static_cast<size_t>(n) + 2 < sizeof(line); ++k) {
+                n += snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%02X",
+                              static_cast<unsigned>(p[off + k]));
+            }
+            if (n > 0) { NRED_TRACE("%s", line); }
+        }
     }
     return ret;
 }
@@ -4830,6 +4896,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 观测通道修复门控（**默认关**）：纯开关（存在即开、无取值）⇒ 用既有 `checkKernelArgument`。
     //  ⚠ 判定处只读标量 `gTraceAtIpSeq`（不在包装内调用 `checkKernelArgument`，遵守既有纪律）。
     gTraceAtIpSeq = checkKernelArgument("-NRedTraceAtIpSeq");
+    // 230：BGM 表区转储（默认关）。关态 ⇒ 不注册 hook ⇒ 零输出、零行为。
+    gBgmTab = checkKernelArgument("-NRedBgmTab");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
@@ -5156,6 +5224,14 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("bgm-step4", kBgmStep4Pattern, nullptr, arrsize(kBgmStep4Pattern),
                                            0x2AA5BC)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmStep4, this->orgBgmStep4}, "bgm-step4");
+        }
+        // 230：BGM 表区转储（默认关）。⚠ 仅在门控开时注册 ⇒ 关态该 wrapper 完全不存在。
+        if (gBgmTab) {
+            if (const auto from = resolveProbe("bgm-tab", kBgmTabReadPattern, nullptr,
+                                               arrsize(kBgmTabReadPattern), 0x29B4E2)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmTabRead, this->orgBgmTabRead},
+                          "bgm-tab");
+            }
         }
         if (const auto from = resolveProbe("read-sel", kReadSelPattern, nullptr, arrsize(kReadSelPattern), 0x29A19E)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapReadSel, this->orgReadSel}, "read-sel");
