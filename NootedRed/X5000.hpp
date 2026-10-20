@@ -70,7 +70,7 @@ private:
     static UInt32 computeSubmitCommandBuffer(void* self, void* info);
     static bool   wrapAccelStart(void* self, void* provider);   // 第八步观测探针（注册链前置）
     static IOService* wrapAccelProbe(void* self, void* provider, SInt32* score);   // 第八步观测探针（匹配失败定位）
-    static void   wrapInitializeTtl(void* self, void* gartParams);                 // 第八步观测探针（TTL 入参链）
+    static bool   wrapInitializeTtl(void* self, void* gartParams);                 // 第八步观测探针（TTL 入参链；`-NRedTtlRc` 时转发原件真实返回值）
     static UInt64 wrapConfigureDevice(void* self, void* provider);                 // 第八步观测（f140 设置者）
     static bool   wrapAmdHwInit(void* self, void* provider, void* handler, UInt32* a3, void* gart, void* fb);  // A-25：AMDHardware::init 只读包装（快照水印）
     static bool   wrapInitExtIfaces(void* self);                                   // A-47：P5 判据函数入口只读采样（C2/C3/C4 分辨）

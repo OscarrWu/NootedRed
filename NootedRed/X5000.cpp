@@ -1219,7 +1219,7 @@ static IOReturn ttlStubCallback(void* ctx, void* in, void** out)
     return kIOReturnSuccess;
 }
 
-void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
+bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 {
     // B62：纳入门控 `-NRedAccelLog`（基线轮须让该链上我方打印/刷盘整体静默）；
     //  不改读值/控制流/返回值；落盘调用已按规矩 28 移除（本处只写内存环）。
@@ -1312,7 +1312,7 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(load64(f338, 0xA0)));
     }
 
-    FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
+    const bool orgRet = FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
 
     UInt64 ttl568 = 0, ttl570 = 0, ttl578 = 0, ttl580 = 0, ttl588 = 0, ttl590 = 0, ttl598 = 0, ttl5a0 = 0;
     // 0x8b10e 的第一步 0x90d75 检查 `&TTL+0x50` 处的一个子结构（离线：`f0 >= 0x130`、
@@ -1418,6 +1418,15 @@ void X5000::wrapInitializeTtl(void* const self, void* const gartParams)
             }
         }
     }
+
+    // P1（`-NRedTtlRc`，默认关）：`AMDHardware::init` 序 8（`0x72fde testb %al`）检查本函数返回值的
+    //  真实语义 ⇒ 默认回 `true`（与本 wrapper 旧 `void` 形态下"门近似恒通过"的观测行为语义等价），
+    //  开启时转发原件 `AMDRTHardware::initializeTtl` 的真实返回值。不改原件、不改任何判定输入。
+    const bool ttlRc = checkKernelArgument("-NRedTtlRc");
+    if (ttlRc) {
+        SYSLOG("X5000", "ttlrc: org=%d ret=%d", orgRet ? 1 : 0, orgRet ? 1 : 0);
+    }
+    return ttlRc ? orgRet : true;
 }
 
 // ─── 第八步观测（2026-09-28）：`configureDevice` 与 `initLinkToPeer` ────────────
@@ -2120,6 +2129,11 @@ bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const ha
         putSent(sent[nred::SentryId::P10_3B0], rd64(s, 0x3B0));
         putSent(sent[nred::SentryId::P12_530], rd64(s, 0x530));
         putBit(sent[nred::SentryId::P13_bit18], 18);   // A-42：bit18 = `initializeTtl` 返回值的忠实位
+        // 序 9（`configureRegisterBases`，`0x72fed call *0x5e0`）：`this+0x206A4` 是该函数经
+        //  `this+0x338` 寄存器对象读入的基址写缓冲。该字段在原件中**只有 32 位访问**
+        //  （`0x5f03d lea 0x206a4(%r15),%r8` 传入缓冲；`0x63c2e/0x64a71/0x6580c` 等均为 `%esi`/`%r?d` 读）
+        //  ⇒ 必须用 `rd32`；按 u64 读会跨入 `+0x206A8` 无关字段（重演 `P14_2F8` 的"恒非零、判据失效"，见上）。
+        putSent(sent[nred::SentryId::P9_206A4], rd32(s, 0x206A4));
         putSent(sent[nred::SentryId::P14_2F8], rd32(s, 0x2F8));
         putSent(sent[nred::SentryId::P16_378], rd64(s, 0x378));
         putBit(sent[nred::SentryId::P17_bit19], 19);

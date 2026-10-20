@@ -74,7 +74,8 @@ enum SentryId : uint32_t {
     P7_bit14, P8_bit15,
     P10_3B0,                         // P11 恒真，无哨兵
     P12_530,
-    P13_bit18, P14_2F8,              // {P13,P14} 二元窗口（A-42：bit18 为 `initializeTtl` 返回值的忠实位）
+    P13_bit18, P9_206A4,             // 序 8（bit18）→ 序 9（`configureRegisterBases` 基址写缓冲 `this+0x206A4`）
+    P14_2F8,                         // {P13,P14} 二元窗口（A-42：bit18 为 `initializeTtl` 返回值的忠实位）
     P16_378, P17_bit19, P18_380, P19_bit20,
     P21_388, P22_bit21, P23_518, P24_205F8,
     P25_bit22, P26_bit23, P27_3A0, P28_bit24,
@@ -228,6 +229,7 @@ inline const char* sentryName(const uint32_t id)
         case SentryId::P10_3B0:    return "P10+0x3B0";
         case SentryId::P12_530:    return "P12+0x530";
         case SentryId::P13_bit18:  return "P13 bit18";
+        case SentryId::P9_206A4:   return "P9+0x206A4";
         case SentryId::P14_2F8:    return "P14+0x2F8";
         case SentryId::P16_378:    return "P16+0x378";
         case SentryId::P17_bit19:  return "P17 bit19";
