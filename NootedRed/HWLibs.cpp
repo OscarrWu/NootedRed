@@ -122,9 +122,6 @@ static bool gDevTablePatch = false;
 //    （唯一例外＝N-3 的守卫式只读解引用，与既有 `tls-swinit` 同类）。
 //  ⚠ 关态纪律：零标量写入、零戳记行、零新增解引用 ⇒ 与现状逐字一致。
 static bool gTtlBisect = false;
-// 223（`-NRedTtlTrim`，**默认关**）：判据④ stage0 按本机真实 client 集合裁剪（跳过 15/10）。
-//  ⚠ 关态：`wrapIpEntrySeq` 只做既有只读观测（逐字透传原件）⇒ 行为与现状一致。
-static bool gTtlTrim = false;
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
 static UInt64 gHwlibsSlide = 0;
@@ -1916,99 +1913,15 @@ UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
     return ret;
 }
 
-// ─── 223：判据④ stage0 裁剪（`-NRedTtlTrim`，默认关）─────────────────────────────────
-//  目的：原件 `0x929ac`（TlsExecuteIpEntrySeq）的 stage0 正向循环按 client 数组顺序逐个调用
-//  `0x9440f`；R222 实测：stage0 的最后一次 `0x9440f` 是 client 15 且返回 0（失败）⇒ r12=0 ⇒ 判据④失败；
-//  其余 client 已在此之前被逐条处理（我方 dispatch 对 2/5/7/8/9/14 返回 0，对应 `[swres]` 的 n=1）。
-//  ⇒ 裁掉 client 15/10 后，最后一个被处理的 client 14 成功 ⇒ r12=1 ⇒ 判据④应可过。本函数按**文档 v2** 只接管 stage0，
-//  以本机真实 client 集合运行原 `0x9440f`：client 15/10 **完全不触碰**（不调钩子/不置位图/不改 r12/progress）。
-//
-//  控制流逐条对齐 `kb/序列数据/反汇编/HWLibs_full.asm`（0x929ac–0x92be8），并修正实施文档的三处偏差：
-//   ① 循环前有 `0x943b1(ctx+8, stage, arg)`（`929de`，文档 §2.2 未列）；
-//   ② `0x9440f` **返回 0＝失败、非 0＝成功**（`92a78 testb; je 92a97`：0 走失败支；非 0 走成功支）。
-//      r12 的**最终值**由 `92b7d movl -44(%rbp),%r12d` 恢复，而 `-44` 只在失败支被置 0（`92ac9`）：
-//        成功支 → 写进度 `ctx+0x94=i+1`，`-44` 保持 1 ⇒ 最终 r12=1（下一轮顶部继续）；
-//        失败支 → `0x92e71` + 置位 `ctx+0x160`（bit=client）+ `r12=0`，`-44=0` ⇒ 最终 r12=0（下一轮顶部退出）。
-//      ⇒ 循环在**首个失败的 client** 处停下；全部成功则 r12=1（返回 1＝成功）。
-//      R222 佐证：`[ttlchain4] n=2`（stage0 返回 0 后才进 stage2）与调用方 `9295b testb; jne` 一致 ⇒ 0＝失败。
-//      ⚠ `[swres] r[15]=6` 是我方 dispatch 的返回值，不是 `0x9440f` 的返回，不能直接当极性证据。
-//   ③ 失败/0 结尾分支在原件里还会走 `0x92b97` 的 TTL_LOG（ttl_tls.c:357 "SWIP init/power-up failed"）；
-//      本实现不复刻该**纯日志**调用（不影响返回值/状态），由 `[ttltrim]` 行替代。
-//  ⚠ `ctx+0x1c` 不是写点（原件写的是栈局部 `-60(%rbp)`；文档 §2.2 的 `ctx+0x1c=client` 有误）。
-//  ⚠ 只接管 stage==0；stage 1/2/5/6/8 一律透传原件（文件名档 §5 推荐的最小口径）。
-//  ⚠ 两级指针校验（ctx / ctx+0、ctx+8）；任一失败 ⇒ 返回 false（调用方透传原件）。
-//  返回 true 表示已接管并写出 `retOut`（0=失败/1=成功，同原件 `r12&1`）。
-static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg, UInt32& retOut)
-{
-    auto badLine = [stage]() {
-        NRED_TRACE("[ttltrim] st=%u n=0 skip=0 last=0 r12=0 ret=0 bad=1", static_cast<unsigned>(stage));
-    };
-    if (gHwlibsSlide == 0 || !nredKernelPtrOk(ctx)) { badLine(); return false; }
-
-    UInt8* const base = static_cast<UInt8*>(ctx);
-    if (!nredKernelPtrOk(*reinterpret_cast<void**>(base + 0x00)) ||
-        !nredKernelPtrOk(*reinterpret_cast<void**>(base + 0x08))) { badLine(); return false; }
-
-    // 原件内部调用（slide + 归零 VM 偏移；`0x9440f` 入口已被 `wrapMode9440f` 占位 ⇒ 调用它等价于原路径）。
-    using TrimCall = void (*)(void*, UInt32, UInt64);                  // 0x943b1 / 0x94166
-    using TrimHook = void (*)(void*, UInt32, UInt32, UInt64, UInt32);  // 0x91222(root, client, stage, arg, mode)
-    using TrimFail = void (*)(void*, UInt32, UInt32, UInt64);          // 0x92e71(root, client, stage, arg)
-    using TrimStep = UInt8 (*)(void*, UInt32, UInt32, UInt64);         // 0x9440f(obj, client, stage, arg)
-    const auto pre  = reinterpret_cast<TrimCall>(gHwlibsSlide + 0x943B1);
-    const auto post = reinterpret_cast<TrimCall>(gHwlibsSlide + 0x94166);
-    const auto hook = reinterpret_cast<TrimHook>(gHwlibsSlide + 0x91222);
-    const auto fail = reinterpret_cast<TrimFail>(gHwlibsSlide + 0x92E71);
-    const auto step = reinterpret_cast<TrimStep>(gHwlibsSlide + 0x9440F);
-
-    UInt32 n = 0, skip = 0, last = 0, r12 = 1;
-
-    // 原件顺序：`0x943b1(*(ctx+8), stage, arg)`（929de）→ 读 count（929ed）；且每次调用前重新读
-    //  `*(ctx)`／`*(ctx+8)`（92a33/92a64/92a97/92adf）⇒ 以下同法就地重取、不缓存。
-    pre(*reinterpret_cast<void**>(base + 0x08), stage, arg);
-    const UInt32 count = *reinterpret_cast<UInt32*>(base + 0x10);
-    for (UInt32 i = 0; i < count; ++i) {
-        const UInt32 client = *reinterpret_cast<UInt32*>(base + 0x14 + i * 4);
-        if (client == 0) { r12 = 0; break; }                       // 0 结尾 ⇒ 原件走 92b97（r12=0）
-        if (client == 15 || client == 10) { ++skip; continue; }    // 裁剪：完全不触碰（无钩子/无位图/无 progress）
-        if ((arg & 1) != 0 && client != 10) { continue; }          // 原 `cl&1` 判定（TlsSwInit 传 arg=0 ⇒ 不触发）
-        last = client;
-        ++n;
-        hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 0);
-        const UInt8 ok = step(*reinterpret_cast<void**>(base + 0x08), client, stage, arg);
-        if (ok != 0) {                                             // 成功（原件：写进度 ctx+0x94=i+1；r12 保持 1）
-            *reinterpret_cast<UInt32*>(base + 0x94) = i + 1;
-            r12 = 1;
-        } else {                                                   // 失败（原件：0x92e71 + 置位 ctx+0x160 + r12=0）
-            fail(*reinterpret_cast<void**>(base + 0x00), client, stage, arg);
-            *reinterpret_cast<UInt32*>(base + 0x160) |= (1U << (client & 31));
-            r12 = 0;
-        }
-        hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 1);
-        if (r12 == 0) { break; }                                   // 原件：下一轮顶部 `testb $1,%r12b` 退出
-    }
-    post(*reinterpret_cast<void**>(base + 0x08), stage, arg);
-    retOut = r12 & 1;
-
-    NRED_TRACE("[ttltrim] st=%u n=%u skip=%u last=%u r12=%u ret=%d bad=0",
-               static_cast<unsigned>(stage), static_cast<unsigned>(n), static_cast<unsigned>(skip),
-               static_cast<unsigned>(last), static_cast<unsigned>(r12), static_cast<int>(retOut));
-    return true;
-}
-
-// P7c 包D：判据④ `0x929ac`（TlsExecuteIpEntrySeq）钩子——默认只记返回值、逐字透传；
-//  `-NRedTtlTrim` 开启且 stage==0 时改由 `nredTrimStage0` 接管（跳过 client 15/10，其余逐条按原件控制流）。
-//  ⚠ 原件 `0x9440f` 的 0＝失败（`92a78 testb; je 92a97`）：失败 client 触发 `0x92e71` 与 `ctx+0x160` 位图，
-//     r12 的最终值由失败支的 `-44=0` 决定（见 `nredTrimStage0` 注释）。
-UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt64 c)
+// P7c 包D：判据④ `0x929ac`（TlsExecuteIpEntrySeq）只读钩子——只记返回值，逐字透传。
+//  判假条件（同 §D.5）：逐项 `0x9440f(*(obj+8), ids[i], sub, out)` 任一项返 0 ⇒ 断言 ttl_tls.c:357 ⇒ 返 0。
+UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c)
 {
     // 观测通道修复（需求 v2）**M1：进入 TTL 阶段**（`0x929ac` 包装入口）⇒ 门控开时打标记并刷一次。
     //  ⚠ 位置＝函数体第一行之前（早于 org 调用）；不触碰 `a`／`b`／`c`／`ret` ⇒ 返回值/控制流/ABI 不变。
     if (gTraceAtIpSeq) { nredTraceMark(gFlushedAtIpSeq, kMarkM1, static_cast<int>(sizeof(kMarkM1) - 1)); }
-    UInt32 ret = 0;
-    if (!(gTtlTrim && b == 0 && nredTrimStage0(a, b, c, ret))) {
-        ret = (singleton().orgIpEntrySeq != 0)
-                  ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
-    }
+    const UInt32 ret = (singleton().orgIpEntrySeq != 0)
+                           ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
     // P7f 包E″：**无条件记录前 3 次**（R6 证明"按假设过滤"全部落空 ⇒ 先看真实形态再谈过滤）。
     //  RA＝`__builtin_return_address(0)` − kcSlide ⇒ 归零 VM；kcSlide==0 时记原始 RA（供判读）。
     //  ★三槽按到达顺序、不覆盖；第 4 次起只 ++gIpSeqN（限流硬约束：只写标量、不入环、不打印）。
@@ -4722,8 +4635,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  解析一次存标量；判定处只读标量（遵守"探针里不调 checkKernelArgument"的既有纪律）。
     //  ⚠ 关态：零标量写入、零戳记行、零新增解引用 ⇒ 与现状逐字一致。
     gTtlBisect = checkKernelArgument("-NRedTtlBisect");
-    // 223：判据④ stage0 裁剪（默认关）。⚠ 判定处只读标量（不在包装内调 checkKernelArgument）。
-    gTtlTrim = checkKernelArgument("-NRedTtlTrim");
     // GVM 软件初始化替换门控（**默认全关**）：解析一次存标量；判定处只读标量。
     //  ⚠ 关态：不安装、不介入、零新增日志、零新增解引用 ⇒ 与现状逐字一致。
     gGvmSwInstall  = checkKernelArgument("-NRedGvmSwInstall");
