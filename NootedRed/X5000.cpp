@@ -1496,13 +1496,13 @@ bool X5000::wrapConfigureRegisterBases(void* const self)
     sCfgRbBusy = false;
 
     // `ttl==0` ⇒ 采集失败（valid=0，需求文档 §4）；此时其余字段保持 0，不得据此判 F2/F3。
-    SYSLOG("X5000",
-           "[cfgrb] ttl=%llx v5a8=%llx v5a8b=%llx t38=%llx b0=%x b1=%x b2=%x b3=%x b4=%x b5=%x ret=%d",
-           static_cast<unsigned long long>(ttl), static_cast<unsigned long long>(v5a8),
-           static_cast<unsigned long long>(v5a8b), static_cast<unsigned long long>(t38),
-           static_cast<unsigned int>(b0), static_cast<unsigned int>(b1),
-           static_cast<unsigned int>(b2), static_cast<unsigned int>(b3),
-           static_cast<unsigned int>(b4), static_cast<unsigned int>(b5), ret ? 1 : 0);
+    // 通道：NRED_TRACE（L2 内存环＋安全时点刷盘，与 `win-probe-*` 同通道；门控开时才执行）。
+    NRED_TRACE("[cfgrb] ttl=%llx v5a8=%llx v5a8b=%llx t38=%llx b0=%x b1=%x b2=%x b3=%x b4=%x b5=%x ret=%d",
+               static_cast<unsigned long long>(ttl), static_cast<unsigned long long>(v5a8),
+               static_cast<unsigned long long>(v5a8b), static_cast<unsigned long long>(t38),
+               static_cast<unsigned int>(b0), static_cast<unsigned int>(b1),
+               static_cast<unsigned int>(b2), static_cast<unsigned int>(b3),
+               static_cast<unsigned int>(b4), static_cast<unsigned int>(b5), ret ? 1 : 0);
     return ret;
 }
 
