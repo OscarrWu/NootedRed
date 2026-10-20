@@ -134,8 +134,8 @@ static bool gDevTablePatch = false;
 //    （唯一例外＝N-3 的守卫式只读解引用，与既有 `tls-swinit` 同类）。
 //  ⚠ 关态纪律：零标量写入、零戳记行、零新增解引用 ⇒ 与现状逐字一致。
 static bool gTtlBisect = false;
-// 223/228（`-NRedTtlTrim`，**默认关**）：判据④ stage0（正向）与 stage2（反向）按本机真实
-//  client 集合裁剪（跳过 15/10）；其余 stage 与关态一律透传原件。
+// 223/228/229（`-NRedTtlTrim`，**默认关**）：判据④ stage0（正向）/stage2（反向）按本机真实
+//  client 集合裁剪：stage0 跳过 15/10；stage2 跳过 15/10/3（3＝BGM）。其余 stage 与关态一律透传。
 static bool gTtlTrim = false;
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -2030,7 +2030,9 @@ static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg
 //   · 每 client：0x91222(pre) → 0x9440f → 失败（0）：0x92e71 + 置位 ctx+0x160 + r12=0（**粘滞**，
 //     不中断循环）→ decq → 0x91222(post) → rbx!=0 继续；
 //   · 不写 ctx+0x94；无 `arg&1` 分支；尾部 0x94166；返回 r12&1（1=成功）。
-//  裁剪：client 15/10 完全不触碰（跳过但仍 decq，保持遍历节奏）。
+//  裁剪（仅 stage2）：跳过 client 15／10／3（3＝BGM HW_INIT；R-228 判读其失败为独立问题）。
+//  跳过 = 完全不触碰（不调钩子/不调 0x9440f/不置位图/不改 r12），但仍 decq 以保持遍历节奏。
+//  ⚠ stage0 **不**跳过 3（保持 227 的单变量口径）；stage0 的失败语义与 227 逐字相同。
 static bool trimRunStage2(void* const ctx, const UInt32 stage, const UInt64 arg, UInt32& retOut)
 {
     if (gHwlibsSlide == 0 || !nredKernelPtrOk(ctx)) { nredTrimRecord(stage, 0, 0, 0, 0, 1); return false; }
@@ -2058,7 +2060,7 @@ static bool trimRunStage2(void* const ctx, const UInt32 stage, const UInt64 arg,
     while (idx != 0) {
         const UInt32 client = *reinterpret_cast<UInt32*>(base + 0x10 + idx * 4);   // 92c5c
         if (client == 0) { r12 = 0; break; }                       // 92c67 ⇒ 92d4b（Invalid entry）：r12=0 结束
-        if (client == 15 || client == 10) { ++skip; --idx; continue; }  // 裁剪：完全不触碰
+        if (client == 15 || client == 10 || client == 3) { ++skip; --idx; continue; }  // 裁剪：完全不触碰（仅 stage2 含 3）
         last = client;
         ++n;
         hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 0);
@@ -2079,7 +2081,7 @@ static bool trimRunStage2(void* const ctx, const UInt32 stage, const UInt64 arg,
 
 // P7c 包D：判据④ `0x929ac`（TlsExecuteIpEntrySeq）钩子——默认只记返回值、逐字透传；
 //  `-NRedTtlTrim` 开启且 stage∈{0,2} 时改由 `nredTrimStage0`／`trimRunStage2` 接管
-//  （跳过 client 15/10，其余逐条按原件控制流）；其余 stage 与关态一律透传原件。
+//  （stage0 跳过 15/10；stage2 跳过 15/10/3，其余逐条按原件控制流）；其余 stage 与关态一律透传。
 //  ⚠ 原件 `0x9440f` 的 0＝失败（`92a78 testb; je 92a97`）：失败 client 触发 `0x92e71` 与 `ctx+0x160` 位图。
 //  ⚠ 第三参保持 466a954 的 `UInt32` 契约（关态逐字等价）：stage0/2 的调用点
 //     (`928f4: xor esi,esi; xor edx,edx` / `92dbe: xorl %edx,%edx`) arg 恒 0；其余调用点
