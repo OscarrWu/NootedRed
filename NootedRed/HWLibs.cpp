@@ -1918,16 +1918,20 @@ UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
 
 // ─── 223：判据④ stage0 裁剪（`-NRedTtlTrim`，默认关）─────────────────────────────────
 //  目的：原件 `0x929ac`（TlsExecuteIpEntrySeq）的 stage0 正向循环按 client 数组顺序逐个调用
-//  `0x9440f`；本机数组含 client 15（R222 `[swres]`：client 15 返回 6＝失败，其余 2/5/7/8/9/14 返回 0＝成功）
-//  ⇒ 最后处理的 client 15 决定 `r12=0`（失败）⇒ 判据④失败。本函数按**文档 v2** 只接管 stage0，
+//  `0x9440f`；R222 实测：stage0 的最后一次 `0x9440f` 是 client 15 且返回 0（失败）⇒ r12=0 ⇒ 判据④失败；
+//  其余 client 已在此之前被逐条处理（我方 dispatch 对 2/5/7/8/9/14 返回 0，对应 `[swres]` 的 n=1）。
+//  ⇒ 裁掉 client 15/10 后，最后一个被处理的 client 14 成功 ⇒ r12=1 ⇒ 判据④应可过。本函数按**文档 v2** 只接管 stage0，
 //  以本机真实 client 集合运行原 `0x9440f`：client 15/10 **完全不触碰**（不调钩子/不置位图/不改 r12/progress）。
 //
 //  控制流逐条对齐 `kb/序列数据/反汇编/HWLibs_full.asm`（0x929ac–0x92be8），并修正实施文档的三处偏差：
 //   ① 循环前有 `0x943b1(ctx+8, stage, arg)`（`929de`，文档 §2.2 未列）；
-//   ② `0x9440f` **返回 0＝成功、非 0＝失败**（`92a78 testb; je 92a97`：0 走「`0x92e71`+置位图+`r12=1`」
-//      支并继续；非 0 走「写进度 `ctx+0x94=i+1` + `r12=0`」支，下一轮顶部 `testb $1,%r12b` 退出）。
-//      R222 `[swres]` 实证：client 2/5/7/8/9/14 返回 0（成功，循环越过）、client 15 返回 6（失败）
-//      ⇒ 最后处理的 client 15 决定 `r12=0` ⇒ 判据④失败；实施文档把成功/失败两支的后果写反了。
+//   ② `0x9440f` **返回 0＝失败、非 0＝成功**（`92a78 testb; je 92a97`：0 走失败支；非 0 走成功支）。
+//      r12 的**最终值**由 `92b7d movl -44(%rbp),%r12d` 恢复，而 `-44` 只在失败支被置 0（`92ac9`）：
+//        成功支 → 写进度 `ctx+0x94=i+1`，`-44` 保持 1 ⇒ 最终 r12=1（下一轮顶部继续）；
+//        失败支 → `0x92e71` + 置位 `ctx+0x160`（bit=client）+ `r12=0`，`-44=0` ⇒ 最终 r12=0（下一轮顶部退出）。
+//      ⇒ 循环在**首个失败的 client** 处停下；全部成功则 r12=1（返回 1＝成功）。
+//      R222 佐证：`[ttlchain4] n=2`（stage0 返回 0 后才进 stage2）与调用方 `9295b testb; jne` 一致 ⇒ 0＝失败。
+//      ⚠ `[swres] r[15]=6` 是我方 dispatch 的返回值，不是 `0x9440f` 的返回，不能直接当极性证据。
 //   ③ 失败/0 结尾分支在原件里还会走 `0x92b97` 的 TTL_LOG（ttl_tls.c:357 "SWIP init/power-up failed"）；
 //      本实现不复刻该**纯日志**调用（不影响返回值/状态），由 `[ttltrim]` 行替代。
 //  ⚠ `ctx+0x1c` 不是写点（原件写的是栈局部 `-60(%rbp)`；文档 §2.2 的 `ctx+0x1c=client` 有误）。
@@ -1971,13 +1975,13 @@ static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg
         ++n;
         hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 0);
         const UInt8 ok = step(*reinterpret_cast<void**>(base + 0x08), client, stage, arg);
-        if (ok != 0) {                                             // 失败（原件：写进度 + r12=0）
+        if (ok != 0) {                                             // 成功（原件：写进度 ctx+0x94=i+1；r12 保持 1）
             *reinterpret_cast<UInt32*>(base + 0x94) = i + 1;
-            r12 = 0;
-        } else {                                                   // 成功（原件：0x92e71 + 置成功位 + r12=1）
+            r12 = 1;
+        } else {                                                   // 失败（原件：0x92e71 + 置位 ctx+0x160 + r12=0）
             fail(*reinterpret_cast<void**>(base + 0x00), client, stage, arg);
             *reinterpret_cast<UInt32*>(base + 0x160) |= (1U << (client & 31));
-            r12 = 1;
+            r12 = 0;
         }
         hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 1);
         if (r12 == 0) { break; }                                   // 原件：下一轮顶部 `testb $1,%r12b` 退出
@@ -1993,7 +1997,8 @@ static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg
 
 // P7c 包D：判据④ `0x929ac`（TlsExecuteIpEntrySeq）钩子——默认只记返回值、逐字透传；
 //  `-NRedTtlTrim` 开启且 stage==0 时改由 `nredTrimStage0` 接管（跳过 client 15/10，其余逐条按原件控制流）。
-//  ⚠ 旧注释「任一项返 0 ⇒ ttl_tls.c:357 断言 ⇒ 返 0」**极性写反**：0＝成功、非 0＝失败（见 helper 注释与 R222）。
+//  ⚠ 原件 `0x9440f` 的 0＝失败（`92a78 testb; je 92a97`）：失败 client 触发 `0x92e71` 与 `ctx+0x160` 位图，
+//     r12 的最终值由失败支的 `-44=0` 决定（见 `nredTrimStage0` 注释）。
 UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt64 c)
 {
     // 观测通道修复（需求 v2）**M1：进入 TTL 阶段**（`0x929ac` 包装入口）⇒ 门控开时打标记并刷一次。
