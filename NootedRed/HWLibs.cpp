@@ -109,6 +109,18 @@ enum : UInt32 {
     kInsSkipDev  = 1,   // 键不匹配我方设备（k1≠0x15BF 或 k2≠9）⇒ 不接管
 };
 static const char* const kInsSkipReason[] = {"none", "dev-mismatch"};
+// 227/228：`[ttltrim]` 头部戳记数据（仅由 `nredTrimStage0`/`trimRunStage2` 写、`nredTraceFlush` 头部区读）。
+//  ⚠ 环正文区受 4096 B 硬上限"保头丢尾"⇒ 判别行必须落头部区（同 `[ttlchain]`）。
+//  ⚠ 关态：两个 seen 恒 0 ⇒ 不输出本行，未命中形态输出逐字不变。
+struct NredTrimStat { UInt32 seen, n, skip, last, r12, bad; SInt32 ret; };
+static NredTrimStat gTrimStat[2] = {};   // [0]=stage0、[1]=stage2（各自最后一次裁剪读数）
+static void nredTrimRecord(const UInt32 stage, const UInt32 n, const UInt32 skip, const UInt32 last,
+                           const UInt32 r12, const UInt32 bad)
+{
+    NredTrimStat& d = gTrimStat[(stage == 2) ? 1 : 0];
+    d.seen = 1; d.n = n; d.skip = skip; d.last = last; d.r12 = r12; d.bad = bad;
+    d.ret = static_cast<SInt32>(r12 & 1);
+}
 // B95v2 门控标量（**默认 false**＝关）：由 `processKext` 解析 `-NRedDevTablePatch` 后置位。
 //  ⚠️ 刻意用**文件作用域**而非类成员：`nredTraceFlush` 是**自由函数**（拿不到私有的
 //  `X5000HWLibs::singleton()`），而执行确认戳记（O-1）必须由它输出 ⇒ 单点状态、无重复。
@@ -554,6 +566,22 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gSeq3RA), static_cast<unsigned>(gSeq3Sub),
                                 static_cast<unsigned>(gSeq3Al));
         if (n6 > 0) { off += (static_cast<size_t>(n6) < cap) ? static_cast<size_t>(n6) : cap; }
+    }
+    // 227/228：`[ttltrim]` 头部戳记（stage0／stage2 各一行；仅在裁剪真正执行后输出）。
+    //  为什么必须放头部区：与 `[ttlchain]` 同理，环正文区尾部会被 4096 B 上限截掉。
+    //  关态或未命中 ⇒ `seen==0` ⇒ 不输出，未命中形态逐字不变。
+    for (int k = 0; k < 2; ++k) {
+        if (gTrimStat[k].seen == 0 || off >= sizeof(body)) { continue; }
+        const size_t cap = sizeof(body) - off;
+        const int nt = snprintf(body + off, cap,
+                                "[ttltrim] st=%u n=%u skip=%u last=%u r12=%u ret=%d bad=%u\n",
+                                static_cast<unsigned>(k * 2), static_cast<unsigned>(gTrimStat[k].n),
+                                static_cast<unsigned>(gTrimStat[k].skip),
+                                static_cast<unsigned>(gTrimStat[k].last),
+                                static_cast<unsigned>(gTrimStat[k].r12),
+                                static_cast<int>(gTrimStat[k].ret),
+                                static_cast<unsigned>(gTrimStat[k].bad));
+        if (nt > 0) { off += (static_cast<size_t>(nt) < cap) ? static_cast<size_t>(nt) : cap; }
     }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
@@ -1935,21 +1963,21 @@ UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
 //   ③ 失败/0 结尾分支在原件里还会走 `0x92b97` 的 TTL_LOG（ttl_tls.c:357 "SWIP init/power-up failed"）；
 //      本实现不复刻该**纯日志**调用（不影响返回值/状态），由 `[ttltrim]` 行替代。
 //  ⚠ `ctx+0x1c` 不是写点（原件写的是栈局部 `-60(%rbp)`；文档 §2.2 的 `ctx+0x1c=client` 有误）。
-//  ⚠ 只接管 stage==0；stage 1/2/3/4/5/6/7/8 一律透传原件（文档 §5 推荐的最小口径）。
-//  ⚠ 调用方 `wrapIpEntrySeq` 的第三参保持 `UInt32`（关态逐字等价）：stage0 只来自 TlsSwInit
-//     (`928f4: xor esi,esi; xor edx,edx`) ⇒ arg 恒 0，故此处零扩展不丢信息；其它 stage 不走本函数。
+//  ⚠ 接管范围＝stage 0（正向）与 stage 2（反向）；stage 1/3/4/5/6/7/8 一律透传原件。
+//  ⚠ 调用方 `wrapIpEntrySeq` 的第三参保持 `UInt32`（关态逐字等价）：stage0/2 的调用点
+//     (`928f4`/`92dbe`) 均 `xor edx,edx` ⇒ arg 恒 0，故此处零扩展不丢信息；其它 stage 不走本文件的两个裁剪函数。
 //  ⚠ 两级指针校验（ctx / ctx+0、ctx+8）；任一失败 ⇒ 返回 false（调用方透传原件）。
 //  返回 true 表示已接管并写出 `retOut`（0=失败/1=成功，同原件 `r12&1`）。
 static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg, UInt32& retOut)
 {
-    auto badLine = [stage]() {
-        NRED_TRACE("[ttltrim] st=%u n=0 skip=0 last=0 r12=0 ret=0 bad=1", static_cast<unsigned>(stage));
-    };
-    if (gHwlibsSlide == 0 || !nredKernelPtrOk(ctx)) { badLine(); return false; }
+    if (gHwlibsSlide == 0 || !nredKernelPtrOk(ctx)) { nredTrimRecord(stage, 0, 0, 0, 0, 1); return false; }
 
     UInt8* const base = static_cast<UInt8*>(ctx);
     if (!nredKernelPtrOk(*reinterpret_cast<void**>(base + 0x00)) ||
-        !nredKernelPtrOk(*reinterpret_cast<void**>(base + 0x08))) { badLine(); return false; }
+        !nredKernelPtrOk(*reinterpret_cast<void**>(base + 0x08))) {
+        nredTrimRecord(stage, 0, 0, 0, 0, 1);
+        return false;
+    }
 
     // 原件内部调用（slide + 归零 VM 偏移；`0x9440f` 入口已被 `wrapMode9440f` 占位 ⇒ 调用它等价于原路径）。
     using TrimCall = void (*)(void*, UInt32, UInt64);                  // 0x943b1 / 0x94166
@@ -1991,26 +2019,83 @@ static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg
     post(*reinterpret_cast<void**>(base + 0x08), stage, arg);
     retOut = r12 & 1;
 
-    NRED_TRACE("[ttltrim] st=%u n=%u skip=%u last=%u r12=%u ret=%d bad=0",
-               static_cast<unsigned>(stage), static_cast<unsigned>(n), static_cast<unsigned>(skip),
-               static_cast<unsigned>(last), static_cast<unsigned>(r12), static_cast<int>(retOut));
+    nredTrimRecord(stage, n, skip, last, r12, 0);
+    return true;
+}
+
+// ─── 228：stage2 反向路径裁剪（`-NRedTtlTrim`）────────────────────────────────────
+//  原件（92bfa→92c24→92c5c–92d46）逐指令复刻：
+//   · count/起点 = *(u32*)(ctx+0x94)（92c2e），索引 rbx 从 count 递减；
+//   · 读 `*(u32*)(ctx+0x10 + 4*rbx)`（即 client[rbx-1]）；client==0 ⇒ r12=0 + 结束；
+//   · 每 client：0x91222(pre) → 0x9440f → 失败（0）：0x92e71 + 置位 ctx+0x160 + r12=0（**粘滞**，
+//     不中断循环）→ decq → 0x91222(post) → rbx!=0 继续；
+//   · 不写 ctx+0x94；无 `arg&1` 分支；尾部 0x94166；返回 r12&1（1=成功）。
+//  裁剪：client 15/10 完全不触碰（跳过但仍 decq，保持遍历节奏）。
+static bool trimRunStage2(void* const ctx, const UInt32 stage, const UInt64 arg, UInt32& retOut)
+{
+    if (gHwlibsSlide == 0 || !nredKernelPtrOk(ctx)) { nredTrimRecord(stage, 0, 0, 0, 0, 1); return false; }
+
+    UInt8* const base = static_cast<UInt8*>(ctx);
+    if (!nredKernelPtrOk(*reinterpret_cast<void**>(base + 0x00)) ||
+        !nredKernelPtrOk(*reinterpret_cast<void**>(base + 0x08))) {
+        nredTrimRecord(stage, 0, 0, 0, 0, 1);
+        return false;
+    }
+
+    using TrimCall = void (*)(void*, UInt32, UInt64);
+    using TrimHook = void (*)(void*, UInt32, UInt32, UInt64, UInt32);
+    using TrimFail = void (*)(void*, UInt32, UInt32, UInt64);
+    using TrimStep = UInt8 (*)(void*, UInt32, UInt32, UInt64);
+    const auto pre  = reinterpret_cast<TrimCall>(gHwlibsSlide + 0x943B1);
+    const auto post = reinterpret_cast<TrimCall>(gHwlibsSlide + 0x94166);
+    const auto hook = reinterpret_cast<TrimHook>(gHwlibsSlide + 0x91222);
+    const auto fail = reinterpret_cast<TrimFail>(gHwlibsSlide + 0x92E71);
+    const auto step = reinterpret_cast<TrimStep>(gHwlibsSlide + 0x9440F);
+
+    UInt32 n = 0, skip = 0, last = 0, r12 = 1;
+    pre(*reinterpret_cast<void**>(base + 0x08), stage, arg);      // 92c41：先 0x943b1
+    UInt64 idx = *reinterpret_cast<UInt32*>(base + 0x94);         // 92c2e/92c35：count=*(ctx+0x94)
+    while (idx != 0) {
+        const UInt32 client = *reinterpret_cast<UInt32*>(base + 0x10 + idx * 4);   // 92c5c
+        if (client == 0) { r12 = 0; break; }                       // 92c67 ⇒ 92d4b（Invalid entry）：r12=0 结束
+        if (client == 15 || client == 10) { ++skip; --idx; continue; }  // 裁剪：完全不触碰
+        last = client;
+        ++n;
+        hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 0);
+        const UInt8 ok = step(*reinterpret_cast<void**>(base + 0x08), client, stage, arg);
+        if (ok == 0) {                                             // 92c9a：失败 ⇒ 0x92e71 + 位图 + r12=0
+            fail(*reinterpret_cast<void**>(base + 0x00), client, stage, arg);
+            *reinterpret_cast<UInt32*>(base + 0x160) |= (1U << (client & 31));
+            r12 = 0;
+        }
+        --idx;                                                     // 92ccc decq（在 post 之前）
+        hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 1);
+    }
+    post(*reinterpret_cast<void**>(base + 0x08), stage, arg);
+    retOut = r12 & 1;
+    nredTrimRecord(stage, n, skip, last, r12, 0);
     return true;
 }
 
 // P7c 包D：判据④ `0x929ac`（TlsExecuteIpEntrySeq）钩子——默认只记返回值、逐字透传；
-//  `-NRedTtlTrim` 开启且 stage==0 时改由 `nredTrimStage0` 接管（跳过 client 15/10，其余逐条按原件控制流）。
-//  ⚠ 原件 `0x9440f` 的 0＝失败（`92a78 testb; je 92a97`）：失败 client 触发 `0x92e71` 与 `ctx+0x160` 位图，
-//     r12 的最终值由失败支的 `-44=0` 决定（见 `nredTrimStage0` 注释）。
-//  ⚠ 第三参保持 466a954 的 `UInt32` 契约（关态逐字等价）：0x929ac 的 stage0 仅来自 TlsSwInit
-//     (`928f4: xor esi,esi; xor edx,edx`)，arg 恒 0；其余调用点 stage∈{2,4,5,6,7,8} 一律透传，
-//     必须维持旧的“转发时 edx 零扩展”行为（223/224 关态回归的根因即此处改为 UInt64 后透传了 rdx 高 32 位）。
+//  `-NRedTtlTrim` 开启且 stage∈{0,2} 时改由 `nredTrimStage0`／`trimRunStage2` 接管
+//  （跳过 client 15/10，其余逐条按原件控制流）；其余 stage 与关态一律透传原件。
+//  ⚠ 原件 `0x9440f` 的 0＝失败（`92a78 testb; je 92a97`）：失败 client 触发 `0x92e71` 与 `ctx+0x160` 位图。
+//  ⚠ 第三参保持 466a954 的 `UInt32` 契约（关态逐字等价）：stage0/2 的调用点
+//     (`928f4: xor esi,esi; xor edx,edx` / `92dbe: xorl %edx,%edx`) arg 恒 0；其余调用点
+//     stage∈{3,4,5,6,7,8} 一律透传，必须维持旧的“转发时 edx 零扩展”行为（223/224 关态回归根因）。
 UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c)
 {
     // 观测通道修复（需求 v2）**M1：进入 TTL 阶段**（`0x929ac` 包装入口）⇒ 门控开时打标记并刷一次。
     //  ⚠ 位置＝函数体第一行之前（早于 org 调用）；不触碰 `a`／`b`／`c`／`ret` ⇒ 返回值/控制流/ABI 不变。
     if (gTraceAtIpSeq) { nredTraceMark(gFlushedAtIpSeq, kMarkM1, static_cast<int>(sizeof(kMarkM1) - 1)); }
     UInt32 ret = 0;
-    if (!(gTtlTrim && b == 0 && nredTrimStage0(a, b, static_cast<UInt64>(c), ret))) {
+    bool handled = false;
+    if (gTtlTrim) {
+        if (b == 0) { handled = nredTrimStage0(a, b, static_cast<UInt64>(c), ret); }
+        else if (b == 2) { handled = trimRunStage2(a, b, static_cast<UInt64>(c), ret); }
+    }
+    if (!handled) {
         ret = (singleton().orgIpEntrySeq != 0)
                   ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
     }
