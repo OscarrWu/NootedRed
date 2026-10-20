@@ -23,8 +23,6 @@
 #include <DisplaySeq/Dcn314OdmSeq.hpp>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSMetaClass.h>
-#include <pexpert/pexpert.h>   // R201 M6：PE_boot_args()（-NRedDispStage 解析）
-#include <kern/debug.h>        // R201 M5：panic()
 
 // ⚠️ 此处原先有两份"像素分频纯策略函数"的手写实现（`dcn314_calc_k1_k2_values` /
 //    `dcn314_calc_pix_rate_divider`）与一组 `dc_is_*_signal` helper，均**无调用者**。
@@ -44,10 +42,6 @@
 // -----------------------------------------------------------------------------
 static bool (*superInit)(AMDRadeonX5000_AMDHWDisplay*, void*, void*)                   = nullptr;
 static bool sDisplayInitSeqApplied = false;
-// R201 M1/M2：段掩码（-NRedDispStage）。默认 0xF＝四段全开；首次进入编排时解析一次并缓存
-//  （显式守卫，不用带副作用的静态初始化）。
-static UInt32 sStageMask = 0xF;
-static bool   sStageInit = false;
 
 // 前置声明：编排入口（applyPixelRateDiv / applyInitialDisplaySequence）用到 DCN 段的
 // 寄存器通道构造函数，而它的定义在本文件后部的「update_odm / resync_fifo 寄存器级直译」一节。
@@ -168,57 +162,22 @@ static bool makeSmuChannel(display::RegChannel* const out)
     return true;
 }
 
-// 时钟段（S1a）：只做 SMU 版本探测（R199 的 6 条：3 写＋2 轮询＋1 读），**不下发任何时钟**。
-//   R200 B3／R201 §7：两次 apply（S1b）不在本件；probeSmuVersion 是 applyInitial 的第一句，
-//   其失败路径不触碰时钟寄存器 ⇒ 拆出后与"整段第一步"逐位一致。
-//   三态：NoCtx（环境不可用，不 panic）／Timeout（2 s 轮询超时，panic）／NoSmu（版本==0，不 panic）。
-enum class DispClkResult : UInt32 { Ok, NoCtx, NoSmu, Timeout };
-
-static DispClkResult applyInitialDisplayClocks()
+// 初始化阶段的一次性下发：Linux `dcn314_clk_mgr_construct` + 首次 `update_clocks` 的等价物。
+// 与影子运行器共用 `ClkMgr::applyInitial` 这一条路径（真机行为与离线比对的序列因此同源）：
+//   ① SMU 版本探测 → ② 首次下发（safe_to_lower = false）→ ③ 允许 zstate（safe_to_lower = true）
+static bool applyInitialDisplayClocks()
 {
     display::RegChannel ch{};
-    if (!makeSmuChannel(&ch)) { return DispClkResult::NoCtx; }
+    if (!makeSmuChannel(&ch)) { return false; }
     display::InjectedRegSink sink(ch);
 
-    if (!sClkMgr.probeSmuVersion(sink)) {
-        // 6 条里唯一的失败源是 Poll 超时（2 s 上限）；现有 API 不暴露 #1/#5 的索引，op 记为 wait。
-        const UInt32 vMask = sStageMask;
-        const UInt32 vDone = 0;
-        const UInt32 vFail = 0x4;   // R201 §6：0x4＝超时
-        SYSLOG("GFX9DCN314Display", "[disp] mask=%x done=%x fail=%x", vMask, vDone, vFail);
-        const char* const vStage = "clocks";
-        const UInt32 vReg = 0x29B;
-        const char* const vOp = "wait";
-        panic("NootedRed: display stage %s failed (reg=0x%03x op=%s mask=0x%x)",
-              vStage, vReg, vOp, vMask);
-    }
-    if (!sClkMgr.smuPresent()) {
-        SYSLOG("GFX9DCN314Display", "initial display clocks: SMU not present (version=0)");
-        return DispClkResult::NoSmu;
-    }
-    // R201 裁决：默认只做 S1a 探测；仅显式 `-NRedDispFullClk` 时才执行旧的全量时钟序列
-    //  （probe 之后的两次 apply，与旧 applyInitial 等价）。失败按新策略主动 panic（断言型）。
-    if (checkKernelArgument("-NRedDispFullClk")) {
-        const auto tgt = sClkMgr.profile().toTarget();
-        if (!sClkMgr.apply(tgt, false, sink)) {
-            const UInt32 vMask = sStageMask;
-            const char* const vStage = "clocks";
-            const UInt32 vReg = 0x0;
-            const char* const vOp = "update_clocks";
-            panic("NootedRed: display stage %s failed (reg=0x%03x op=%s mask=0x%x)", vStage, vReg, vOp, vMask);
-        }
-        if (!sClkMgr.apply(tgt, true, sink)) {
-            const UInt32 vMask = sStageMask;
-            const char* const vStage = "clocks";
-            const UInt32 vReg = 0x0;
-            const char* const vOp = "update_clocks";
-            panic("NootedRed: display stage %s failed (reg=0x%03x op=%s mask=0x%x)", vStage, vReg, vOp, vMask);
-        }
-        DBGLOG("GFX9DCN314Display", "initial display clocks: full sequence applied by -NRedDispFullClk");
+    if (!sClkMgr.applyInitial(sink)) {
+        SYSLOG("GFX9DCN314Display", "initial display clock sequence failed (lastOps=%zu)", sClkMgr.lastOpCount());
+        return false;
     }
     DBGLOG("GFX9DCN314Display", "initial display clocks applied (smuVersion=0x%X, lastOps=%zu)", sClkMgr.smuVersion(),
            sClkMgr.lastOpCount());
-    return DispClkResult::Ok;
+    return true;
 }
 
 // DCN 3.1.4 显示时钟下发（VBIOSSMC 完整主流程）。
@@ -282,58 +241,7 @@ enum DisplayInitStage : UInt32 {
     kStagePixelRate  = 1u << 1,
     kStageOdm        = 1u << 2,
     kStageFifoResync = 1u << 3,
-    kStageAll        = 0xF,
 };
-
-// R201 M6：解析 -NRedDispStage=<mask>（0x0..0xF，支持 0x 十六进制或十进制）。
-//  · 无参数 ⇒ 0xF（不改现状）；· 0x0..0xF ⇒ 原样；· 非法 ⇒ 0xF ＋ 一行 invalid 日志（不得静默按 0）。
-static UInt32 parseStageMask()
-{
-    const char* const ba = PE_boot_args();
-    if (ba == nullptr) { return kStageAll; }
-
-    static const char kKey[] = "-NRedDispStage=";
-    const char* p = nullptr;
-    for (const char* q = ba; *q != '\0'; q += 1) {
-        if (q[0] != '-' || q[1] != 'N') { continue; }
-        bool hit = true;
-        for (UInt32 k = 0; kKey[k] != '\0'; k += 1) {
-            if (q[k] != kKey[k]) { hit = false; break; }
-        }
-        if (hit) { p = q + (sizeof(kKey) - 1); break; }
-    }
-    if (p == nullptr) { return kStageAll; }
-
-    UInt32 v = 0;
-    bool any = false;
-    bool bad = false;
-    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-        p += 2;
-        for (UInt32 n = 0; n < 8 && *p != '\0'; n += 1) {
-            UInt32 d;
-            if (*p >= '0' && *p <= '9') { d = static_cast<UInt32>(*p - '0'); }
-            else if (*p >= 'a' && *p <= 'f') { d = static_cast<UInt32>(*p - 'a') + 10; }
-            else if (*p >= 'A' && *p <= 'F') { d = static_cast<UInt32>(*p - 'A') + 10; }
-            else { break; }
-            v = (v << 4) | d;
-            any = true;
-            p += 1;
-        }
-    } else {
-        for (UInt32 n = 0; n < 9 && *p != '\0'; n += 1) {
-            if (*p < '0' || *p > '9') { break; }
-            v = v * 10 + static_cast<UInt32>(*p - '0');
-            any = true;
-            p += 1;
-        }
-    }
-    if (!any || (*p != '\0' && *p != ' ' && *p != '\t') || v > kStageAll) { bad = true; }
-    if (bad) {
-        SYSLOG("GFX9DCN314Display", "[disp] mask=f (invalid arg, fallback to 0xF)");
-        return kStageAll;
-    }
-    return v;
-}
 
 // 像素率分频：Linux `dccg314_set_pixel_rate_div`（dccg/dcn314/dcn314_dccg.c:101-146）
 //
@@ -438,86 +346,65 @@ static void seqStageProbe(UInt32 stage, UInt32 stages)
 // 显示初始化编排入口：由 `init` 调用一次（守卫在 init 里）。
 void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX5000_AMDGFX9DCN314Display* const self)
 {
-    // R201 M2：首次进入解析一次并缓存（显式守卫）。
-    if (!sStageInit) {
-        sStageInit = true;
-        sStageMask = parseStageMask();
-    }
-
-    UInt32 stages  = 0;
-    UInt32 fail    = 0;
-    bool   aborted = false;
+    UInt32 stages = 0;
 
     DBGLOG("GFX9DCN314Display", "display-init: sequence start");
     StageMark::mark("seq-start");
 
-    // ① 显示时钟（S1a）：只探测 SMU 版本，不下发时钟（R200 N4／B3；R201 §7）。
-    if (sStageMask & kStageClocks) {
-        const DispClkResult r = applyInitialDisplayClocks();
-        if (r == DispClkResult::Ok) {
-            stages |= kStageClocks;
-            seqStageProbe(1, stages);
-        } else {
-            if (r == DispClkResult::NoCtx)      { fail |= 0x1; }
-            else if (r == DispClkResult::NoSmu) { fail |= 0x2; }
-            else                                { fail |= 0x4; }   // Timeout 已在函数内 panic
-            aborted = true;
-            SYSLOG("GFX9DCN314Display", "display-init: stage clocks failed (fail=0x%X)", fail);
+    // ① 显示时钟（第五步）：VBIOSSMC 完整主流程。
+    //    对应 Linux `dcn31_init_hw` 的第一步 `clk_mgr->funcs->init_clocks`（dcn31_hwseq.c:124-125）。
+    //    ⚠️ 顺序修正：原先 init 里是"先 ODM 后时钟"，与 Linux 相反（时钟是显示管线的前提，必须先上）。
+    if (applyInitialDisplayClocks()) {
+        stages |= kStageClocks;
+    } else {
+        SYSLOG("GFX9DCN314Display", "display-init: stage clocks FAILED");
+    }
+    seqStageProbe(1, stages);
+
+    auto* const regs = self->getHWRegisters();
+    if (regs == nullptr) {
+        SYSLOG("GFX9DCN314Display", "display-init: HW registers unavailable, stages 2-4 skipped (mask=0x%X)", stages);
+        return;
+    }
+
+    // ② 像素率分频（第七步新增）：Linux `dcn20_enable_stream_timing` 的首步（dcn20_hwseq.c:846-847）。
+    //    对全部 OTG 实例下发（Linux 逐 pipe 调用，本驱动没有 pipe 模型，按实例遍历）。
+    for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
+        applyPixelRateDiv(*regs, i);
+    }
+    stages |= kStagePixelRate;
+    seqStageProbe(2, stages);
+
+    // ③ ODM 拓扑（第六步）：Linux `dcn20_apply_single_controller_ctx_to_hw` 里的
+    //    `hws->funcs.update_odm`（dcn20_hwseq.c:1954）。
+    {
+        const UInt32 oppInst[1] = {0};
+        for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
+            update_odm_direct(*regs, i, oppInst, 1, 0);
         }
+        DBGLOG("GFX9DCN314Display", "display-init: update_odm_direct (bypass) applied for %u OTG(s)",
+               MAX_SUPPORTED_DISPLAYS_RV);
+        stages |= kStageOdm;
     }
+    seqStageProbe(3, stages);
 
-    const bool laterSelected = (sStageMask != 0) && (sStageMask != kStageClocks);
-    if (!aborted && laterSelected) {
-        auto* const regs = self->getHWRegisters();
-        if (regs == nullptr) {
-            fail |= 0x1;   // 环境不可用，不 panic；按段停
-            SYSLOG("GFX9DCN314Display", "display-init: HW registers unavailable, stages 2-4 skipped (mask=0x%X)",
-                   sStageMask);
-        } else {
-            // ② 像素率分频（第七步新增）：Linux `dcn20_enable_stream_timing` 的首步（dcn20_hwseq.c:846-847）。
-            if (sStageMask & kStagePixelRate) {
-                for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
-                    applyPixelRateDiv(*regs, i);
-                }
-                stages |= kStagePixelRate;
-                seqStageProbe(2, stages);
-            }
+    // ④ FIFO 重同步（第六步）：Linux `dce110_apply_ctx_to_hw` 每 pipe 应用后调
+    //    `resync_fifo_dccg_dio`（dce110_hwseq.c:2737）→ `trigger_dio_fifo_resync`。
+    //    ⚠️ 挂接点迁移：原先挂在 `setCurrentDisplayOffset`（该 vft 槽在 Ventura 上**不安装**，
+    //    是死代码）；现并入本编排，使目标系统上确实会执行。
+    //    与 Linux 的时机差异（Linux 在 stream enable 之后，本驱动在 init 之后）见执行记录 §五。
+    resync_fifo_dccg_dio_direct(*regs);
+    DBGLOG("GFX9DCN314Display", "display-init: resync_fifo_dccg_dio_direct applied");
+    stages |= kStageFifoResync;
+    seqStageProbe(4, stages);
 
-            // ③ ODM 拓扑（第六步）：Linux `dcn20_apply_single_controller_ctx_to_hw` 的 update_odm。
-            if (sStageMask & kStageOdm) {
-                const UInt32 oppInst[1] = {0};
-                for (UInt32 i = 0; i < MAX_SUPPORTED_DISPLAYS_RV; i += 1) {
-                    update_odm_direct(*regs, i, oppInst, 1, 0);
-                }
-                DBGLOG("GFX9DCN314Display", "display-init: update_odm_direct (bypass) applied for %u OTG(s)",
-                       MAX_SUPPORTED_DISPLAYS_RV);
-                stages |= kStageOdm;
-                seqStageProbe(3, stages);
-            }
-
-            // ④ FIFO 重同步（第六步）：Linux `dce110_apply_ctx_to_hw` → `resync_fifo_dccg_dio`。
-            if (sStageMask & kStageFifoResync) {
-                resync_fifo_dccg_dio_direct(*regs);
-                DBGLOG("GFX9DCN314Display", "display-init: resync_fifo_dccg_dio_direct applied");
-                stages |= kStageFifoResync;
-                seqStageProbe(4, stages);
-            }
-        }
-    }
-
-    if (sStageMask == 0) {
-        SYSLOG("GFX9DCN314Display", "display-init: all stages skipped");
-    }
-
-    // 汇总标记（保持既有格式；默认成功路径 stages 仍为 0xF）。
+    // 汇总标记：真机取回日志后，用这一行判断"编排走到哪一段"。
     DBGLOG("GFX9DCN314Display",
            "display-init: sequence done (stages=0x%X clocks=%u pixrate=%u odm=%u resync=%u)", stages,
            (stages & kStageClocks) != 0, (stages & kStagePixelRate) != 0, (stages & kStageOdm) != 0,
            (stages & kStageFifoResync) != 0);
+    // NVRAM 侧的同一信息（`-NRedStageMark` 时生效）：崩溃发生在编排之后也能取回阶段位图
     StageMark::markHex("seq-done", stages);
-    // R201 M4：纯标量观测（fail：0x1 环境／0x2 无 SMU／0x4 超时）。
-    SYSLOG("GFX9DCN314Display", "[disp] mask=%x done=%x fail=%x", sStageMask, stages, fail);
-    // 注：stage 2–4 的失败暂只记日志、不 panic（其失败判据未定义；待另出需求件）。
 }
 
 // init 覆写：先走基类 init（super chain：原版 init → isDCN → initDCNRegOffs 经 vft slot 0 分发到本类），
