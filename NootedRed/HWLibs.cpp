@@ -170,14 +170,14 @@ static UInt64 gVcnO8   = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(out+8)`（B3）
 static UInt64 gVcnL10  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(local_28+0x10)`（应为 0）
 static UInt64 gVcnL18  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(local_28+0x18)`（应为 0）
 static UInt64 gVcnL30  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(local_28+0x30)`（应为 0）
-// R177：模块 15（JPEG）实实现的观测载体（BSS 标量；`0xFF…FF`＝"未读到"哨兵）。
-//  产出条件＝`gJpegN != 0`；成功时 st=00。**不取** `0x958d8(*subobj,0xf)`（入口拿不到 subobj，见 R177 §6.2）。
-static UInt32 gJpegN    = 0;                       // 本实现被调次数（`[swjpeg] n=`）
-static UInt32 gJpegStep = 0;                       // 最后失败步编号（R177 §7.1：01–08）
-static UInt64 gJpegDev  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(p1+0x270)`（discovery 第 2 条记录）
-static UInt64 gJpegL    = 0xFFFFFFFFFFFFFFFFULL;   // `local`（0x40 对象）
-static UInt64 gJpegL10  = 0xFFFFFFFFFFFFFFFFULL;   // `local+0x10`（应为 0）
-static UInt64 gJpegL18  = 0xFFFFFFFFFFFFFFFFULL;   // `local+0x18`（应为 0）
+// R194：模块 15（JPEG）**只读探针**的观测载体（BSS 标量；`0xFF…FF`＝"未读到"哨兵）。
+//  产出条件＝`gJpegN != 0`；st：01 空参／02 指针门／03 *p1 不符／04 *p2 不符／05 指针非法／06 读取完成。
+static UInt32 gJpegN    = 0;                       // 本探针被调次数（`[swjpeg] n=`）
+static UInt32 gJpegStep = 0;                       // 最后步号（R194）
+static UInt64 gJpegDev  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(p1+0x270)`（dev_A）
+static UInt64 gJpegSelf = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(dev_A+8)`（devSelf）
+static UInt64 gJpegFa   = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(dev_A+0x10)`（fnAlloc 槽）
+static UInt64 gJpegFi   = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(dev_A+0x48)`（fnInit 槽）
 // R181：模块 10（DMCU）S1 的观测载体（BSS 标量；`[swdmcu]` 一行）。
 //  产出条件＝`gDmcuN != 0`；st：01 入参空／02 指针门／03 区标识／04 输出区标识／05 正常 fail-closed。
 static UInt32 gDmcuN    = 0;                       // 本实现被调次数（`[swdmcu] n=`）
@@ -2871,16 +2871,16 @@ static void nredSwLogCall(const UInt32 id, const void* const info, const void* c
                                 static_cast<unsigned long long>(gM14Q));
         if (mm > 0) { nredTraceLine(gGvmSwLog, mm); }
     }
-    // R177（模块 15 JPEG）：`[swjpeg]` 一行（一次 snprintf ＋ 一次 nredTraceLine）。
-    //  产出条件＝`gJpegN != 0`（本实现真被调到）⇒ 未启用/未被调时一行不多。
+    // R194（模块 15 JPEG 只读探针）：`[swjpeg]` 一行（一次 snprintf ＋ 一次 nredTraceLine）。
+    //  产出条件＝`gJpegN != 0`；全标量、零解引用。
     if (gJpegN != 0) {
         const int mj = snprintf(gGvmSwLog, sizeof(gGvmSwLog),
-                                "[swjpeg] n=%u st=%02x dev=%llx l=%llx l10=%llx l18=%llx\n",
+                                "[swjpeg] n=%u st=%02x dev=%llx self=%llx fa=%llx fi=%llx\n",
                                 static_cast<unsigned>(gJpegN), static_cast<unsigned>(gJpegStep),
                                 static_cast<unsigned long long>(gJpegDev),
-                                static_cast<unsigned long long>(gJpegL),
-                                static_cast<unsigned long long>(gJpegL10),
-                                static_cast<unsigned long long>(gJpegL18));
+                                static_cast<unsigned long long>(gJpegSelf),
+                                static_cast<unsigned long long>(gJpegFa),
+                                static_cast<unsigned long long>(gJpegFi));
         if (mj > 0) { nredTraceLine(gGvmSwLog, mj); }
     }
     // R181（模块 10 DMCU S1）：`[swdmcu]` 一行（一次 snprintf ＋ 一次 nredTraceLine）。
@@ -3858,90 +3858,54 @@ static int nredDmcuSwInit(void* const p1, void* const p2)
     return kSwResStepFail;                                                     // 6
 }
 
-// ── 模块 15（JPEG/IPI-JPEG）本体：**D2 式实实现**（R176／R177）────────────────────────────────────
-//  被替换实现＝client-15 的 `funcs[0]`＝`0x3fc39`。保留：形状（`*p1==0x278`、`*p2==0x18`）、
-//  A7 0x40 分配（借用 `*(dev+0x10)`，描述符 {kind=1, tag=0xF, size=0x48}）、A8 初始化（`*(dev+0x48)`）、
-//  `out+8` 与三字段搬运（dev / p1+0x268 / p1+0x264 bit0）。
-//  跳过：A10 `0x40d17`（0x2a8 主体）、A11 `0x403c7`（收尾，实参未定义；**第 208 轮 trap 的 0x40426
-//  就在其内**）、A12 取值门（`p2[4]=4`）——均如实登记；`p2[4]` 不写。
-//  ⚠ 位：**failMask bit17＝模块 15 的 D2 护栏；bit8 已被模块 9 使用，故不复用**（形状仍用 bit7）。
-//  ⚠ 残余风险：A7 成功后若 A8/回读失败，0x40 对象无法释放（`0x40134` 未授权）⇒ 如实返 6 并登记
-//    "泄漏一次"；不得伪造释放。
-//  ⚠ 口径：只可写"JPEG 软件侧最小初始化完成（仅 0x40 上下文）"，不得写"模块 15 完成／JPEG 就绪"。
+// ── 模块 15（JPEG）**只读探针**（R194；替换 R177 的实实现）────────────────────────────────────────
+//  目的：只取 `dev_A` 与其两个运行时函数指针槽（fa/fi）的地址，供离线归属；**不调用任何设备原语**、
+//  不分配、不写对象、不写 out、不置就绪位。
+//  ⚠ 形状常量以机器码为准：`0x3fc39` 的判据是 `*p1==0x278`、`*p2==0x18`（`3fc39.c:30`；`0xa1541`
+//    写 local_2a8=0x278 / local_30 低 32=0x18）。任务卡写的 0x2B8/0x78 属模块 10（`0x4d00`），
+//    照抄会让探针在 A3 就返回、永远读不到 fa/fi。
+//  ⚠ 返回值：恒返 6（fail-closed）；苹果 `0xa1541` 见非 0 ⇒ 返回失败（断言型），**不进入 0x3fc39**。
+//  ⚠ 所有解引用前过 nredKernelPtrOk；非法值记哨兵。st：05 指针非法／06 读取完成（均返 6）。
 static int nredJpegSwInit(void* const p1, void* const p2)
 {
     gGvmBook.failMask = 0; gGvmBook.omittedMask = 0;
     gJpegN += 1; gJpegStep = 0;
-    gJpegDev = ~0ULL; gJpegL = ~0ULL; gJpegL10 = ~0ULL; gJpegL18 = ~0ULL;
-    if (p1 == nullptr || p2 == nullptr) {                                       // A2
+    gJpegDev = ~0ULL; gJpegSelf = ~0ULL; gJpegFa = ~0ULL; gJpegFi = ~0ULL;
+    if (p1 == nullptr || p2 == nullptr) {                                       // A1
         gGvmBook.failMask |= (1U << 7); gJpegStep = 0x01; return kSwResNullArg;   // 2
     }
-    if (!nredKernelPtrOk(p1) || !nredKernelPtrOk(p2)) {                          // A3
-        gGvmBook.failMask |= (1U << 7); gJpegStep = 0x02; return kSwResParseFail; // 1
+    if (!nredKernelPtrOk(p1) || !nredKernelPtrOk(p2)) {                          // A2
+        gGvmBook.failMask |= (1U << 7); gJpegStep = 0x02; return kSwResParseFail; // 5
     }
     const UInt8* const P = static_cast<const UInt8*>(p1);
-    UInt8* const Q = static_cast<UInt8*>(p2);
-    if (*reinterpret_cast<const UInt32*>(P + 0) != 0x278 ||                      // A4
-        *reinterpret_cast<const UInt32*>(Q + 0) != 0x18) {
-        gGvmBook.failMask |= (1U << 7); gJpegStep = 0x03; return kSwResParseFail; // 2
+    if (*reinterpret_cast<const UInt32*>(P + 0) != 0x278) {                      // A3
+        gGvmBook.failMask |= (1U << 7); gJpegStep = 0x03; return kSwResParseFail; // 5
     }
-    // A5：dev 来自 discovery 第 2 条记录（int* 索引 0x9c ⇒ 字节 0x270）；为 0 时苹果会崩，我方如实失败。
-    const UInt64 dev = *reinterpret_cast<const UInt64*>(P + 0x270);
-    gJpegDev = dev;
-    if (!nredKernelPtrOk(reinterpret_cast<const void*>(dev))) {
-        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x04; return kSwResStepFail;  // 6
+    if (*reinterpret_cast<const UInt32*>(p2) != 0x18) {                          // A4
+        gGvmBook.failMask |= (1U << 7); gJpegStep = 0x04; return kSwResParseFail; // 5
     }
-    // A6：三个槽（全部先过指针门；任一为 0/非法 ⇒ 6，不进入苹果原语）
-    const UInt64 devSelf = *reinterpret_cast<const UInt64*>(dev + 0x08);
-    const UInt64 fnAlloc = *reinterpret_cast<const UInt64*>(dev + 0x10);
-    const UInt64 fnInit  = *reinterpret_cast<const UInt64*>(dev + 0x48);
-    if (!nredKernelPtrOk(reinterpret_cast<const void*>(devSelf)) ||
-        !nredKernelPtrOk(reinterpret_cast<const void*>(fnAlloc)) ||
-        !nredKernelPtrOk(reinterpret_cast<const void*>(fnInit))) {
-        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x05; return kSwResStepFail;
+    // dev_A＝discovery 第 2 条记录（p1+0x270）；非法则记哨兵并返 6。
+    const UInt64 devA = *reinterpret_cast<const UInt64*>(P + 0x270);
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(devA))) {
+        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x05; return kSwResStepFail; // 6
     }
-    // A7：分配 0x40（0x400b5 的描述符 {kind=1, 0xF, size+8=0x48}）
-    struct NRedJpegDesc { UInt64 kind, tag, size; } desc;
-    desc.kind = 1; desc.tag = 0x0F; desc.size = 0x40 + 8;
-    UInt64 local = 0;
-    const int rcA = reinterpret_cast<int (*)(UInt64, void*, void**)>(fnAlloc)(
-        devSelf, &desc, reinterpret_cast<void**>(&local));
-    if (rcA != 0 || !nredKernelPtrOk(reinterpret_cast<const void*>(local))) {
-        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x06; return kSwResStepFail;
+    gJpegDev = devA;
+    // 两个原语槽＋devSelf：读后逐一过门；非法值保持哨兵（不调用、不写对象）。
+    const UInt64 selfRaw = *reinterpret_cast<const UInt64*>(devA + 0x08);
+    const UInt64 faRaw   = *reinterpret_cast<const UInt64*>(devA + 0x10);
+    const UInt64 fiRaw   = *reinterpret_cast<const UInt64*>(devA + 0x48);
+    const bool selfOk = nredKernelPtrOk(reinterpret_cast<const void*>(selfRaw));
+    const bool faOk   = nredKernelPtrOk(reinterpret_cast<const void*>(faRaw));
+    const bool fiOk   = nredKernelPtrOk(reinterpret_cast<const void*>(fiRaw));
+    if (selfOk) { gJpegSelf = selfRaw; }
+    if (faOk)   { gJpegFa = faRaw; }
+    if (fiOk)   { gJpegFi = fiRaw; }
+    if (!selfOk || !faOk || !fiOk) {
+        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x05; return kSwResStepFail; // 6
     }
-    // A8：初始化 {p, 0x40}
-    struct NRedJpegInit { UInt64 p; UInt32 size; UInt32 pad; } ia;
-    ia.p = local; ia.size = 0x40; ia.pad = 0;
-    const int rcB = reinterpret_cast<int (*)(UInt64, void*)>(fnInit)(devSelf, &ia);
-    if (rcB != 0) {
-        // ⚠ 0x40 泄漏一次：0x40134 不在授权清单内 ⇒ 如实返 6，不伪造释放。
-        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x07; return kSwResStepFail;
-    }
-    // A9：四个字段
-    UInt8* const L = reinterpret_cast<UInt8*>(local);
-    *reinterpret_cast<UInt64*>(Q + 8) = local;
-    *reinterpret_cast<UInt64*>(L + 8) = dev;
-    *reinterpret_cast<UInt64*>(L + 0) = *reinterpret_cast<const UInt64*>(P + 0x268);
-    *(L + 7) = static_cast<UInt8>(*reinterpret_cast<const UInt8*>(P + 0x264) & 1U);
-    // A10/A11/A12 跳过：清零其产物并回读
-    *reinterpret_cast<UInt64*>(L + 0x10) = 0;
-    *reinterpret_cast<UInt64*>(L + 0x18) = 0;
-    if (*reinterpret_cast<const UInt64*>(L + 0x10) != 0 ||
-        *reinterpret_cast<const UInt64*>(L + 0x18) != 0) {
-        // ⚠ 同上：0x40 泄漏一次，如实返 6。
-        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x08; return kSwResStepFail;
-    }
-    gGvmBook.omittedMask |= (1U << 25);   // 0x40d17（0x2a8 主体）未执行 + p2[4] 未写
-    gGvmBook.omittedMask |= (1U << 26);   // 0x403c7（0x30/收尾）未执行（实参未定义；0x40426 trap 所在）
-    gJpegL   = local;
-    gJpegL10 = *reinterpret_cast<const UInt64*>(L + 0x10);
-    gJpegL18 = *reinterpret_cast<const UInt64*>(L + 0x18);
-    // 注：不读 `0x958d8(*subobj,0xf)` —— 正确实参是 subobj 首字段，本入口只有 p1/p2（R177 §6.2）。
-    if (*reinterpret_cast<const UInt64*>(Q + 8) == 0 ||
-        !nredKernelPtrOk(*reinterpret_cast<void* const*>(Q + 8))) {              // S2
-        gGvmBook.failMask |= (1U << 17); gJpegStep = 0x08; return kSwResStepFail;
-    }
-    return kSwResPass;                                                        // 0
+    gGvmBook.failMask |= (1U << 17);   // 读取完成但**主动 fail-closed**（不伪造成功）
+    gJpegStep = 0x06;
+    return kSwResStepFail;   // 6（探针永不报成功）
 }
 
 // ── 模块 2（SDMA）本体：**D2 式替换**（R169）────────────────────────────────────────────────────
@@ -4238,16 +4202,15 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  门控关（默认）⇒ 本行不成立＝零行为；哪些模块安装由 `-NRedSwInitIds` 决定（默认只模块 5）。
     //  ⚠ 必须在 org（`0x9440f`）执行**之前**——否则苹果已在 handler 内读过 `*(subobj+8)`（R60 §1.1）。
     if (gGvmSwInstall) { nredSwInstallSlot(a, b, c); }
-    // ── 阶段分派层 fail-closed 护栏（第 208／209 轮 trap；R185：拦所有 stage≥1）────────────────────
-    //  ① 第 208／209 轮实证：模块 15 已安装时苹果外层仍在 `funcs[0]` 之外读空指针（Apple HWLibs
-    //     +0xa12df、CR2=0）⇒ client 15/10 的 **stage-0** 必须无条件拦截（不判断是否安装）。
+    // ── 阶段分派层 fail-closed 护栏（R185／R191／R194）────────────────────────────────────────────
+    //  ① 208／209 轮实证：苹果模块外层会在 `funcs[0]` 之外读空指针（Apple HWLibs +0xa12df、CR2=0）。
+    //     ⇒ client 10 的 stage-0 一律拦；client 15 的 stage-0 **仅在我方探针已安装/启用时放行**
+    //     （探针只读、恒返 6，不进入 0x3fc39/0x403c7）。**未安装时放行＝苹果外层执行＝trap 重现**。
     //  ② R185：`0x929ac` 遇失败**不中止**——`0x92a73 callq 0x9440f` → `testb %al,%al` → 失败仅
     //     `0x92a8e movl %eax,148(%r13)` 记录 → `0x92adc xorl %r12d,%r12d` → **继续遍历**。
     //     故只拦 stage-0 无效：拦掉 stage-1 后仍会进入 stage-2/3。stage≥1 在本机从未成功过
-    //     （209 首次进入即 trap，**trap 型不会自动重启**）⇒ **所有 stage≥1 一律 fail-closed**，
-    //     把失败固定在驱动上下文（断言型），不构成倒退。
-    //  ③ 条件：`((client∈{15,10} ∧ stage==0) ∨ stage≥1)`；其它 client 的 stage-0 不受影响；
-    //     15/10 的实现函数保留，本轮不会被执行（`c` 恒为非负，`c>=1` 不含 stage-0）。
+    //     （209 首次进入即 trap，**trap 型不会自动重启**）⇒ **所有 stage≥1 一律 fail-closed**。
+    //  ③ 条件：`(b==10 && c==0) || (c>=1) || (b==15 && c==0 && !已安装/已启用)`。
     //  ④ `[swgrd]` 每次命中都打（经我方 L2：nredTraceLine→gTraceRing→NRedTraceFlush-*）。
     //     **本轮不以该行作为主判据——主判据是 panic 首行形态（trap vs 断言型）。**
     //     ⚠ 本命中点在 boot 遍历路径，不属于 nredTraceFlush 的安全时点（仅 ①L2 周期拍 ②dumpNow
@@ -4256,7 +4219,8 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //     （`92a78 testb`／`92a7a je 0x92a97` → `0x92e71 logSwipFailure` → 置 `obj+0xa0` 失败位）。
     //     **此处 0 表示失败**（与 `kSwRes*` 的"0=成功"相反）。护栏在本 wrapper 内直接返回、不进入
     //     `NRedSwInitDispatch` ⇒ 不会把 0 记进 `gSwResById`（保持原值，通常 0xFF）；命中记 `gGrdLastHit=1`。
-    if (((b == 15 || b == 10) && c == 0) || (c >= 1)) {
+    if ((b == 10 && c == 0) || (c >= 1) ||
+        (b == 15 && c == 0 && !(gSwInstalled[15].installed && (gSwInitIdsMask & (1U << 15)) != 0))) {
         gGrdLastHit = 1;
         static char grdLine[80];
         const int ng = snprintf(grdLine, sizeof(grdLine), "[swgrd] c=%u st=%u hit=1\n",
