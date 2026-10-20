@@ -196,6 +196,26 @@ static DispClkResult applyInitialDisplayClocks()
         SYSLOG("GFX9DCN314Display", "initial display clocks: SMU not present (version=0)");
         return DispClkResult::NoSmu;
     }
+    // R201 裁决：默认只做 S1a 探测；仅显式 `-NRedDispFullClk` 时才执行旧的全量时钟序列
+    //  （probe 之后的两次 apply，与旧 applyInitial 等价）。失败按新策略主动 panic（断言型）。
+    if (checkKernelArgument("-NRedDispFullClk")) {
+        const auto tgt = sClkMgr.profile().toTarget();
+        if (!sClkMgr.apply(tgt, false, sink)) {
+            const UInt32 vMask = sStageMask;
+            const char* const vStage = "clocks";
+            const UInt32 vReg = 0x0;
+            const char* const vOp = "update_clocks";
+            panic("NootedRed: display stage %s failed (reg=0x%03x op=%s mask=0x%x)", vStage, vReg, vOp, vMask);
+        }
+        if (!sClkMgr.apply(tgt, true, sink)) {
+            const UInt32 vMask = sStageMask;
+            const char* const vStage = "clocks";
+            const UInt32 vReg = 0x0;
+            const char* const vOp = "update_clocks";
+            panic("NootedRed: display stage %s failed (reg=0x%03x op=%s mask=0x%x)", vStage, vReg, vOp, vMask);
+        }
+        DBGLOG("GFX9DCN314Display", "initial display clocks: full sequence applied by -NRedDispFullClk");
+    }
     DBGLOG("GFX9DCN314Display", "initial display clocks applied (smuVersion=0x%X, lastOps=%zu)", sClkMgr.smuVersion(),
            sClkMgr.lastOpCount());
     return DispClkResult::Ok;
@@ -497,6 +517,7 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
     StageMark::markHex("seq-done", stages);
     // R201 M4：纯标量观测（fail：0x1 环境／0x2 无 SMU／0x4 超时）。
     SYSLOG("GFX9DCN314Display", "[disp] mask=%x done=%x fail=%x", sStageMask, stages, fail);
+    // 注：stage 2–4 的失败暂只记日志、不 panic（其失败判据未定义；待另出需求件）。
 }
 
 // init 覆写：先走基类 init（super chain：原版 init → isDCN → initDCNRegOffs 经 vft slot 0 分发到本类），
