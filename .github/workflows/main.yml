@@ -17,8 +17,9 @@ on:
 jobs:
   build:
     name: Build
-    # 临时绕行 macos-latest runner 故障（0 step / 15 分钟取消）：改用 macos-14 取得产物后回滚。
-    runs-on: macos-14
+    # 临时绕行：macos-latest 连续 0 step 取消；macos-14(Xcode 15.4) 不认 -std=c23
+    # （run #449：error: invalid value 'c23'）⇒ 固定 macos-15（Xcode 16）。取得产物后回滚。
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
