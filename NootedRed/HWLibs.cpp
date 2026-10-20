@@ -134,8 +134,8 @@ static bool gDevTablePatch = false;
 //    （唯一例外＝N-3 的守卫式只读解引用，与既有 `tls-swinit` 同类）。
 //  ⚠ 关态纪律：零标量写入、零戳记行、零新增解引用 ⇒ 与现状逐字一致。
 static bool gTtlBisect = false;
-// 223（`-NRedTtlTrim`，**默认关**）：判据④ stage0 按本机真实 client 集合裁剪（跳过 15/10）。
-//  ⚠ 关态：`wrapIpEntrySeq` 只做既有只读观测（逐字透传原件）⇒ 行为与现状一致。
+// 223/228（`-NRedTtlTrim`，**默认关**）：判据④ stage0（正向）与 stage2（反向）按本机真实
+//  client 集合裁剪（跳过 15/10）；其余 stage 与关态一律透传原件。
 static bool gTtlTrim = false;
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。

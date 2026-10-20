@@ -152,7 +152,7 @@ private:
     static UInt8 wrapPred90(void* ctx);   // B81 观测点 A：Apple 就绪门谓词 0x6839e（读 C2PMSG_90→setne）
     static UInt8 wrap93F64(void* obj, UInt32 id);   // B88 观测 R2'：Apple 0x93f64（查位过滤器，原样透传返回值）
     static UInt32 wrapIpiInit(void* a, UInt32 b, void* c);        // P7c 包D：判据③ 0x9405e（只记返回值）
-    static UInt32 wrapIpEntrySeq(void* a, UInt32 b, UInt32 c);    // P7c 包D：判据④ 0x929ac（只记返回值；`-NRedTtlTrim` 时接管 stage0）
+    static UInt32 wrapIpEntrySeq(void* a, UInt32 b, UInt32 c);    // P7c 包D：判据④ 0x929ac（只记返回值；`-NRedTtlTrim` 时接管 stage0/2）
     // 第八步观测（2026-09-28 第十九轮）：`0x8b10e` 的 4 个候选失败出口判据函数（只读）
     static void* wrapTtlCollect(void* ctx);
     static void* wrapTtlAllocA(void* ctx);
