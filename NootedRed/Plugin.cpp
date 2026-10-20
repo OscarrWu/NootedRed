@@ -7,6 +7,7 @@
 #include <Headers/kern_util.hpp>
 #include <Headers/plugin_start.hpp>
 #include <NRed.hpp>
+#include <IOKit/IOLib.h>
 
 static const char* bootargOff   = "-NRedOff";
 static const char* bootargDebug = "-NRedDebug";
@@ -39,3 +40,9 @@ extern "C" kern_return_t NootedRed_kern_stop(kmod_info_t *, void *);
 extern "C" void* _realmain = reinterpret_cast<void*>(&NootedRed_kern_start);
 extern "C" void* _antimain = reinterpret_cast<void*>(&NootedRed_kern_stop);
 #endif
+
+// 无条件超早期标记：kext 加载即执行（__mod_init_func，早于 kern_start），
+// 不依赖 boot-arg、Lilu 访问判定与 trace 初始化。仅用于判定我方代码是否被执行。
+__attribute__((constructor)) static void nredEarlyStartMarker() {
+    IOLog("NRed: EARLY-START build=%s\n", __DATE__ " " __TIME__);
+}
