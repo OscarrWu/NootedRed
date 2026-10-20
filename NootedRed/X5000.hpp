@@ -43,6 +43,7 @@ class X5000
     mach_vm_address_t              orgAccelStart{0};    // 第八步观测：AMDGraphicsAccelerator::start（注册链前置）
     mach_vm_address_t              orgAccelProbe{0};    // 第八步观测：AMDGraphicsAccelerator::probe（匹配为何失败）
     mach_vm_address_t              orgInitializeTtl{0}; // 第八步观测：AMDRTHardware::initializeTtl（TTL 入参链）
+    mach_vm_address_t              orgConfigureRegisterBases{0}; // 序 9 观测（`-NRedCfgRbProbe`）：configureRegisterBases（F2/F3 分离）
     mach_vm_address_t              orgConfigureDevice{0}; // 第八步观测：accelerator::configureDevice（f140 的设置者）
     mach_vm_address_t              orgInitLinkToPeer{0};  // 第八步观测：accelerator::initLinkToPeer（按名查服务）
     mach_vm_address_t              orgAmdHwInit{0};     // A-25：AMDHardware::init（`0x4ba9cea`）只读包装
@@ -71,6 +72,7 @@ private:
     static bool   wrapAccelStart(void* self, void* provider);   // 第八步观测探针（注册链前置）
     static IOService* wrapAccelProbe(void* self, void* provider, SInt32* score);   // 第八步观测探针（匹配失败定位）
     static bool   wrapInitializeTtl(void* self, void* gartParams);                 // 第八步观测探针（TTL 入参链；`-NRedTtlRc` 时转发原件真实返回值）
+    static bool   wrapConfigureRegisterBases(void* self);                          // 序 9 只读观测（`-NRedCfgRbProbe`，默认关）
     static UInt64 wrapConfigureDevice(void* self, void* provider);                 // 第八步观测（f140 设置者）
     static bool   wrapAmdHwInit(void* self, void* provider, void* handler, UInt32* a3, void* gart, void* fb);  // A-25：AMDHardware::init 只读包装（快照水印）
     static bool   wrapInitExtIfaces(void* self);                                   // A-47：P5 判据函数入口只读采样（C2/C3/C4 分辨）

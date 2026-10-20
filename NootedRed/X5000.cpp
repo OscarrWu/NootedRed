@@ -488,6 +488,21 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         }
     }
 
+    // 序 9 只读观测（`-NRedCfgRbProbe`，默认关）：`AMDRTHardware::configureRegisterBases`
+    //  （kc `0x4b9600e`；`AMDHardware::init` 序 9 = `0x72fed call *0x5e0`）。目的是分离序 9 失败的
+    //  两态：F2 = `*(TTL+0x5A8)`（IP 信息查询回调）为 0；F3 = 回调已装但查询返回非 0。
+    //  门控关 ⇒ 不 route ⇒ 不劫持 ⇒ 零输出、零行为（与既有各观测 hook 同形）。
+    if (checkKernelArgument("-NRedCfgRbProbe")) {
+        PenguinWizardry::PatternRouteRequest cfgRbReq{
+            "__ZN28AMDRadeonX5000_AMDRTHardware22configureRegisterBasesEv", wrapConfigureRegisterBases,
+            this->orgConfigureRegisterBases};
+        if (!cfgRbReq.route(patcher, id, slide, size)) {
+            SYSLOG("X5000", "cfgrb: failed to route AMDRTHardware::configureRegisterBases");
+        } else {
+            DBGLOG("X5000", "cfgrb: routed AMDRTHardware::configureRegisterBases");
+        }
+    }
+
     // 第八步观测（第 15 轮）：**已移除** `probe` 的 hook —— 第 14 轮实测它**有副作用**
     //  （hook 后系统未再走到 PP 上电、直接跑到 userspace watchdog ⇒ 匹配阶段行为被改变）。
     //  ⇒ 改为纯被动取证：`DriverInjector::wrapAddDrivers` 只记录"注入的 personality 是否在数组里"，
@@ -1427,6 +1442,68 @@ bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
         SYSLOG("X5000", "ttlrc: org=%d ret=%d", orgRet ? 1 : 0, orgRet ? 1 : 0);
     }
     return ttlRc ? orgRet : true;
+}
+
+// ─── 序 9 只读观测（`-NRedCfgRbProbe`，默认关）：分离 F2／F3 ─────────────────────
+//  序 9 = `AMDRTHardware::configureRegisterBases`（kc `0x4b9600e`，macho `0x5f00e`，392 B）：
+//  先 `call *0x60` 取基址表，再对 6 个 blockId（`0xb/0x42/0x7/0x4b/0x4/0x46`）经 `self+0x338`
+//  的 TTL 对象 `*0x58` 槽查询，输出依次写入 `self+0x206A4/0x206BC/0x20704/0x206D4/0x206EC/0x2071C`
+//  （`x5_full.asm:108713-108753` 逐条 `add $0x206xx,%r8`）。
+//  两态失败：F2 = `*(TTL+0x5A8)`（IP 信息查询回调）为 0（装表器未运行，返 `0xE00002BC`）；
+//            F3 = 回调已装但查询返回非 0。本 wrapper 进入前读一次 `v5a8`，出口再读 `v5a8b`，
+//            以区分“进入序 9 时未装、序 9 内部装表”（实施文档 §3.3）。
+//  纪律：只读；零 MMIO；不替换 `*0x58`／`*0x60`；不复刻控制流；原件只调一次，返回值原样转发。
+bool X5000::wrapConfigureRegisterBases(void* const self)
+{
+    // 防重入（实施文档 §3.2）：重入时只转发原件，不改行为、不重复观测。
+    static bool sCfgRbBusy = false;
+    if (sCfgRbBusy) {
+        return FunctionCast(wrapConfigureRegisterBases, singleton().orgConfigureRegisterBases)(self);
+    }
+
+    auto isKernelPtr = [](UInt64 p) -> bool { return p >= 0xffffff7f80000000ULL; };
+    auto load64 = [](UInt64 base, UInt64 off) -> UInt64 {
+        return *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(base) + off);
+    };
+    auto load32 = [](UInt64 base, UInt64 off) -> UInt32 {
+        return *reinterpret_cast<const UInt32*>(reinterpret_cast<const UInt8*>(base) + off);
+    };
+
+    const UInt64 s = reinterpret_cast<UInt64>(self);
+    UInt64 ttl = 0, v5a8 = 0;
+    if (isKernelPtr(s)) {
+        ttl = load64(s, 0x338);
+        if (isKernelPtr(ttl)) { v5a8 = load64(ttl, 0x5A8); }   // 仅作数值读取，不解引用该函数指针
+    }
+
+    sCfgRbBusy = true;
+    const bool ret = FunctionCast(wrapConfigureRegisterBases, singleton().orgConfigureRegisterBases)(self);
+
+    UInt64 v5a8b = 0, t38 = 0;
+    UInt32 b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
+    if (isKernelPtr(s)) {
+        if (isKernelPtr(ttl)) {
+            v5a8b = load64(ttl, 0x5A8);
+            t38   = load64(ttl, 0x38);
+        }
+        b0 = load32(s, 0x206A4);
+        b1 = load32(s, 0x206BC);
+        b2 = load32(s, 0x20704);
+        b3 = load32(s, 0x206D4);
+        b4 = load32(s, 0x206EC);
+        b5 = load32(s, 0x2071C);
+    }
+    sCfgRbBusy = false;
+
+    // `ttl==0` ⇒ 采集失败（valid=0，需求文档 §4）；此时其余字段保持 0，不得据此判 F2/F3。
+    SYSLOG("X5000",
+           "[cfgrb] ttl=%llx v5a8=%llx v5a8b=%llx t38=%llx b0=%x b1=%x b2=%x b3=%x b4=%x b5=%x ret=%d",
+           static_cast<unsigned long long>(ttl), static_cast<unsigned long long>(v5a8),
+           static_cast<unsigned long long>(v5a8b), static_cast<unsigned long long>(t38),
+           static_cast<unsigned int>(b0), static_cast<unsigned int>(b1),
+           static_cast<unsigned int>(b2), static_cast<unsigned int>(b3),
+           static_cast<unsigned int>(b4), static_cast<unsigned int>(b5), ret ? 1 : 0);
+    return ret;
 }
 
 // ─── 第八步观测（2026-09-28）：`configureDevice` 与 `initLinkToPeer` ────────────
