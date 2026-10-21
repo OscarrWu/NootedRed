@@ -214,6 +214,12 @@ static bool       gGc7HitSeen = false;
 static UInt32     gGc7xSlot = 0;
 static UInt64     gGc7xVal = 0;
 static UInt32     gGc7xSeen = 0;
+// 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
+struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
+static bool       gSt1B = false;
+static NRedSt1BRec gSt1BRec[8];
+static UInt32     gSt1BN = 0;     // 已记录条数（≤8）
+static UInt32     gSt1BSeq = 0;   // 全局调用序号（饱和 255）
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -698,6 +704,35 @@ static void nredGc7Stamp(char* const body, size_t& off, const size_t cap)
     }
 }
 
+// 252：`[st1b]` 原始调次行（≤8 条；noinline、零解引用）。
+//  固定 27 字节模板 + 三位十进制直写（避开 snprintf 3 变参的溢出槽，函数帧 ≤64 B）。
+__attribute__((noinline))
+static void nredSt1BStamp(char* const body, size_t& off, const size_t cap)
+{
+    static const char kTpl[] = "[st1b] b=000 c=000 seq=000\n";
+    static_assert(sizeof(kTpl) == 28, "st1b line length");
+    constexpr size_t kLen = sizeof(kTpl) - 1;
+    size_t room = cap;
+    for (unsigned i = 0; i < gSt1BN && i < 8; ++i) {
+        if (room < kLen) { return; }
+        __builtin_memcpy(body + off, kTpl, kLen);
+        const UInt32 b = gSt1BRec[i].b % 1000;
+        const UInt32 c = gSt1BRec[i].c % 1000;
+        const UInt32 s = gSt1BRec[i].seq % 1000;
+        body[off + 9]  = static_cast<char>('0' + b / 100);
+        body[off + 10] = static_cast<char>('0' + (b / 10) % 10);
+        body[off + 11] = static_cast<char>('0' + b % 10);
+        body[off + 15] = static_cast<char>('0' + c / 100);
+        body[off + 16] = static_cast<char>('0' + (c / 10) % 10);
+        body[off + 17] = static_cast<char>('0' + c % 10);
+        body[off + 23] = static_cast<char>('0' + s / 100);
+        body[off + 24] = static_cast<char>('0' + (s / 10) % 10);
+        body[off + 25] = static_cast<char>('0' + s % 10);
+        off += kLen;
+        room -= kLen;
+    }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -809,6 +844,8 @@ int nredTraceFlush(int secTag)
     if (gSt1W2 && off < sizeof(body)) { nredSt1W2Stamp(body, off, sizeof(body) - off); }
     // 251：`[gc7]/[gc7x]` 双侧观测（仅 -NRedGc7；关态一字不变）。
     if (gGc7 && off < sizeof(body)) { nredGc7Stamp(body, off, sizeof(body) - off); }
+    // 252：`[st1b]` 原始调次（仅 -NRedSt1B；关态一字不变）。
+    if (gSt1B && off < sizeof(body)) { nredSt1BStamp(body, off, sizeof(body) - off); }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
     //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
@@ -5063,9 +5100,24 @@ static void nredStage1ORecord(const void* const a, const UInt32 client)
     if (r1.used != 0) { return; }   // 最多 2 条：后续变化不再记录
     r1.ctx = reinterpret_cast<UInt64>(a); r1.p = p; r1.seq = gSt1OSeq[idx]; r1.used = 1;
 }
+// ─── 252：`[st1b]` 原始 `(b,c)` 调次（`-NRedSt1B`，默认关）────────────────────────────
+//  入口、护栏之前；前 8 次调用（不论 b/c）各记 1 条；全局 seq 饱和 255；零解引用、只写 BSS。
+static void nredStage1BRecord(const UInt32 b, const UInt32 c)
+{
+    if (gSt1BSeq < 255) { ++gSt1BSeq; }
+    if (gSt1BN >= 8) { return; }
+    NRedSt1BRec& r = gSt1BRec[gSt1BN];
+    r.b = b;
+    r.c = c;
+    r.seq = gSt1BSeq;
+    ++gSt1BN;
+}
+
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 252：原始调次（默认关）——入口最前，只写 BSS，不改返回值。
+    if (gSt1B) { nredStage1BRecord(b, c); }
     // 249：对齐观测（默认关）——入口、护栏之前；仅 c==1；只写 BSS，不改返回值。
     if (gSt1O && c == 1) { nredStage1ORecord(a, b); }
     // ── 软件初始化替换：安装动作（R60 §1.1）——**在入口执行**（入参即带模块号 `b`，1-based）──────
@@ -5562,6 +5614,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1O = checkKernelArgument("-NRedSt1O");
     // 251：client 7 双侧观测（默认关）。仅在开时安装 0x93d18/0x93998 两个只读 hook。
     gGc7 = checkKernelArgument("-NRedGc7");
+    // 252：原始 (b,c) 调次（默认关）。只在前 8 次调用时写 BSS，头部区输出。
+    gSt1B = checkKernelArgument("-NRedSt1B");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
