@@ -192,6 +192,12 @@ static UInt32 gSt1RunN  = 0;   // 放行尝试次数（饱和 255）
 static UInt64 gSt1Mes  = 0;   // ③ 读出的 MES 对象地址
 static UInt64 gSt1M8   = 0;   // ④ *(MES+0x08)
 static UInt64 gSt1M790 = 0;   // ⑤ *(MES+0x790)
+// 246（`-NRedSt1W`，默认关）：client 7 只读探针（不放行、不调原件）；值由探针读出，头戳零解引用。
+static bool   gSt1W    = false;
+static UInt64 gSt1P7   = 0;   // *(ctx+0x40)
+static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
+static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
+static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -581,6 +587,29 @@ static void nredSt1vStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 246：`[st1w]/[st1x]/[st1y]` 三行（client 7 探针；独立 noinline 帧，零解引用）。
+__attribute__((noinline))
+static void nredSt1WStamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room, "[st1w] p7=%llx h=%llx svc=%llx\n",
+                     static_cast<unsigned long long>(gSt1P7),
+                     static_cast<unsigned long long>(gSt1H),
+                     static_cast<unsigned long long>(gSt1Svc));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1x] s10=%llx s18=%llx s20=%llx s38=%llx s40=%llx\n",
+                 static_cast<unsigned long long>(gSt1S[0]), static_cast<unsigned long long>(gSt1S[1]),
+                 static_cast<unsigned long long>(gSt1S[2]), static_cast<unsigned long long>(gSt1S[3]),
+                 static_cast<unsigned long long>(gSt1S[4]));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1y] s90=%llx s100=%llx s118=%llx s120=%llx\n",
+                 static_cast<unsigned long long>(gSt1S[5]), static_cast<unsigned long long>(gSt1S[6]),
+                 static_cast<unsigned long long>(gSt1S[7]), static_cast<unsigned long long>(gSt1S[8]));
+    if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -682,6 +711,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1rStamp(body, off, sizeof(body) - off); }
     // 245：`[st1v]` 补充观测（仅 -NRedStage1；值来自 guard 内读数，头部零解引用）。
     if (gStage1 && off < sizeof(body)) { nredSt1vStamp(body, off, sizeof(body) - off); }
+    // 246：`[st1w]/[st1x]/[st1y]` client 7 探针（仅 -NRedSt1W；关态一字不变）。
+    if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
     //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
@@ -4829,6 +4860,31 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
     return true;
 }
 
+// ─── 246：client 7 只读探针（`-NRedSt1W`，默认关；不放行、不调原件）──────────────────────
+//  规格 `tmp/tech-manager/R-client7只读探针规格-2026-10-21.md` §1/§2。
+//  链：ctx → P7=*(ctx+0x40) → handle=*(P7+0x28) → svc=*(handle+8)；每级先 `nredKernelPtrOk`，
+//  失败即记 0 并停止（不再解引用）。本函数不写非 BSS 内存、不跟随函数指针、无等待/轮询。
+static void nredStage1WProbe(const void* const ctx)
+{
+    gSt1P7 = 0;
+    gSt1H = 0;
+    gSt1Svc = 0;
+    for (unsigned k = 0; k < 9; ++k) { gSt1S[k] = 0; }
+    if (!nredKernelPtrOk(ctx)) { return; }
+    const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x40);
+    if (!nredKernelPtrOk(p7)) { return; }
+    gSt1P7 = reinterpret_cast<UInt64>(p7);
+    const UInt8* const h = *reinterpret_cast<const UInt8* const*>(p7 + 0x28);
+    if (!nredKernelPtrOk(h)) { return; }
+    gSt1H = reinterpret_cast<UInt64>(h);
+    const UInt8* const svc = *reinterpret_cast<const UInt8* const*>(h + 8);
+    if (!nredKernelPtrOk(svc)) { return; }
+    gSt1Svc = reinterpret_cast<UInt64>(svc);
+    static const UInt32 kOff[9] = {0x10, 0x18, 0x20, 0x38, 0x40, 0x90, 0x100, 0x118, 0x120};
+    for (unsigned k = 0; k < 9; ++k) {
+        gSt1S[k] = *reinterpret_cast<const UInt64*>(svc + kOff[k]);
+    }
+}
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
@@ -4853,6 +4909,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //     （`92a78 testb`／`92a7a je 0x92a97` → `0x92e71 logSwipFailure` → 置 `obj+0xa0` 失败位）。
     //     **此处 0 表示失败**（与 `kSwRes*` 的"0=成功"相反）。护栏在本 wrapper 内直接返回、不进入
     //     `NRedSwInitDispatch` ⇒ 不会把 0 记进 `gSwResById`（保持原值，通常 0xFF）；命中记 `gGrdLastHit=1`。
+    // ── 246：client 7 只读探针（`-NRedSt1W`，默认关）──────────────────────────────────────
+    //  放在所有 `return 0` 之前 ⇒ 无论护栏走哪条分支都能取到读数；只写 BSS，不改返回值。
+    if (gSt1W && c == 1 && b == 7) { nredStage1WProbe(a); }
     // ── 244：stage1 首批放行（`-NRedStage1`，默认关；批 1 仅 client 14）────────────────────
     //  关 ⇒ 本块不成立，行为与逐字不变的 `c>=1` fail-closed 护栏一致。
     //  开且 c==1 ⇒ 先跑前置检查；通过才调用原件并**原样返回其返回值**（真实执行 stage1）。
@@ -5314,6 +5373,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1Pre = checkKernelArgument("-NRedSt1Pre");
     // 244：stage1 首批放行（默认关；仅 client 14 通过前置检查后调用原件）。
     gStage1 = checkKernelArgument("-NRedStage1");
+    // 246：client 7 只读探针（默认关）。只写 BSS 观测值，不影响护栏返回值。
+    gSt1W = checkKernelArgument("-NRedSt1W");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
