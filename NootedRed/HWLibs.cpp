@@ -227,6 +227,12 @@ static bool       gSt1C = false;
 static NRedSt1CRec gSt1CRec[8];
 static UInt32     gSt1CN = 0;     // 已记录条数（≤8）
 static UInt32     gSt1CSeq = 0;   // stage≥1 调用序号（饱和 255）
+// 257（`-NRedSt1P`，默认关）：client 3 stage1 时刻的 P3 观测（仅首次；只读一次）。
+static bool   gSt1P = false;
+static bool   gSt1PDone = false;
+static UInt64 gSt1P3Obs = 0;   // *(ctx+0x20)（原样）
+static UInt64 gSt1P3V18 = 0;   // *(P3+0x18)（P3 过 KPtr 才读）
+static UInt64 gSt1P3V28 = 0;   // *(P3+0x28)（同上）
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -781,6 +787,17 @@ static void nredSt1CStamp(char* const body, size_t& off, const size_t cap)
     }
 }
 
+// 257：`[st1p]` client 3 stage1 时刻的 P3 观测行（noinline、零解引用）。
+__attribute__((noinline))
+static void nredSt1PStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[st1p] p3=%llx v18=%llx v28=%llx\n",
+                           static_cast<unsigned long long>(gSt1P3Obs),
+                           static_cast<unsigned long long>(gSt1P3V18),
+                           static_cast<unsigned long long>(gSt1P3V28));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -919,6 +936,8 @@ int nredTraceFlush(int secTag)
     if (gSt1B && off < sizeof(body)) { nredSt1BStamp(body, off, sizeof(body) - off); }
     // 256：`[st1c]` 仅 c>=1 的调次（仅 -NRedSt1C；关态一字不变）。
     if (gSt1C && off < sizeof(body)) { nredSt1CStamp(body, off, sizeof(body) - off); }
+    // 257：`[st1p]` client 3 stage1 时刻的 P3 观测（仅 -NRedSt1P；关态一字不变）。
+    if (gSt1P && off < sizeof(body)) { nredSt1PStamp(body, off, sizeof(body) - off); }
     // 253：`[mes]` MES stage0 真实路径观测（仅 -NRedMesReal；关态一字不变）。
     if (gMesReal && off < sizeof(body)) { nredMesStamp(body, off, sizeof(body) - off); }
     // 254：`[mesb]` b 系列提供者观测（仅 -NRedMesB；关态一字不变）。
@@ -5264,10 +5283,29 @@ static void nredStage1CRecord(const UInt32 b, const UInt32 c)
     r.seq = gSt1CSeq;
     ++gSt1CN;
 }
+// ─── 257：`[st1p]` client 3 stage1 时刻的 P3 观测（`-NRedSt1P`，默认关）─────────────────
+//  仅在 c==1 && b==3 且尚未记录时执行一次：ctx 过 KPtr 后读 P3=*(ctx+0x20)（原样保存）；
+//  P3 再过 KPtr 才读 +0x18/+0x28。只写 BSS、零解引用副作用、不跟随函数指针。
+__attribute__((noinline))
+static void nredStage1PRecord(const void* const ctx)
+{
+    gSt1PDone = true;
+    gSt1P3Obs = 0;
+    gSt1P3V18 = 0;
+    gSt1P3V28 = 0;
+    if (!nredKernelPtrOk(ctx)) { return; }
+    const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
+    gSt1P3Obs = reinterpret_cast<UInt64>(p3);
+    if (!nredKernelPtrOk(p3)) { return; }
+    gSt1P3V18 = *reinterpret_cast<const UInt64*>(p3 + 0x18);
+    gSt1P3V28 = *reinterpret_cast<const UInt64*>(p3 + 0x28);
+}
 
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 257：client 3 stage1 时刻的 P3 观测（默认关；仅首次）。
+    if (gSt1P && !gSt1PDone && c == 1 && b == 3) { nredStage1PRecord(a); }
     // 256：仅 c>=1 的调次（默认关）——入口最前，只写 BSS，不改返回值。
     if (gSt1C && c >= 1) { nredStage1CRecord(b, c); }
     // 252：原始调次（默认关）——入口最前，只写 BSS，不改返回值。
@@ -5772,6 +5810,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1B = checkKernelArgument("-NRedSt1B");
     // 256：仅 c>=1 的调次（默认关）。钉死 stage1 实际 client 集合。
     gSt1C = checkKernelArgument("-NRedSt1C");
+    // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
+    gSt1P = checkKernelArgument("-NRedSt1P");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
     gMesReal = checkKernelArgument("-NRedMesReal");
     // 254：MES b 系列提供者（默认关）。仅构造静态描述符并挂到 +0x790；不调 0x441ad、不写 MMIO。
