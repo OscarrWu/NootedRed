@@ -2608,6 +2608,35 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
         snprintf(pre, sizeof(pre), "sel=%u size=%u ra=%llx", selU, sizeU,
                  static_cast<unsigned long long>(ra));
     }
+
+    // 234：provider B 归因（只读；不调用、不等待）。反汇编 29b50c/29b532/29b53c 已证：
+    //  `provB = *(self+0x148)`，`target = *(provB+8)`，`method = *(provB+0x10)`（该方法的实现地址）。
+    //  ⚠ 与任务卡缩写格式的差异：实施文档 §7.2 的格式含 `target`，本实现按文档输出。
+    {
+        void* provB = nullptr;
+        void* target = nullptr;
+        void* method = nullptr;
+        unsigned bad = 0;
+        if (nredKernelPtrOk(self)) {
+            provB = *reinterpret_cast<void**>(static_cast<UInt8*>(self) + 0x148);
+            if (nredKernelPtrOk(provB)) {
+                target = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 8);
+                method = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 0x10);
+            } else {
+                bad = 1;
+            }
+        } else {
+            bad = 1;
+        }
+        void* buf = nullptr;
+        if (nredKernelPtrOk(out) && nredKernelPtrOk(*out)) { buf = *out; }
+        NRED_TRACE("[bgmcmd] sel=%u size=%u buf=%llx provB=%llx target=%llx method=%llx ret=%d bad=%u",
+                   selU, sizeU, static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)),
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(provB)),
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(target)),
+                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(method)),
+                   static_cast<int>(ret), bad);
+    }
     if (ret != 0) {
         NRED_TRACE("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=%d bad=0", pre,
                    static_cast<int>(ret));
