@@ -171,6 +171,11 @@ static_assert(sizeof(gBgmRealContainer) == 65536, "BGM real container size must 
 static const UInt64 kBgmRealFnv1a64 = 0x2A8B614310F42766ULL;   // FNV-1a64（离线对成品文件计算）
 static bool   gBgmReal = false;
 static SInt32 gBgmRealCheck = -1;        // -1 未校验、0 fail、1 ok
+// 241（`-NRedBgmHw`，默认关）：BGM `EVENT__HW_INIT` 上报点观测（0x91222 TrimHook）。
+//  限流：每个 (stage,mode) 只打首 2 条，总计 ≤8；表为 BSS 静态，wrapper 零局部数组。
+static bool   gBgmHw = false;
+static UInt8  gBgmHwCnt[9][5] = {};
+static UInt32 gBgmHwTotal = 0;
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -1268,6 +1273,11 @@ static const UInt8 kBgmTabReadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0
 //  实际字节（已在全库验证唯一、且位于函数头）。
 static const UInt8 kBgm64MemcpyPattern[] = {0x31, 0xC0, 0x48, 0x85, 0xFF, 0x74, 0x22, 0x48, 0x85, 0xF6, 0x74, 0x1D,
                                             0x48, 0x85, 0xD2, 0x7E, 0x19, 0x55, 0x48, 0x89, 0xE5};
+// 241：`0x91222` TrimHook（`void(root, client, stage, arg, mode)`）。文档/任务卡无 pattern，按本机实际
+//  函数头字节取前 28 B（已离线验证全库唯一、位于函数头，CALL xrefs = 7）。
+static const UInt8 kBgmHwNotifyPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
+                                            0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x18, 0xBB, 0x02, 0x00,
+                                            0x00, 0x00, 0x48, 0x85, 0xFF, 0x0F, 0x84, 0x03};
 // `0x29a19e`：按 selector 读取（7/8 经 `0x29adb0`）。`0x2a9f0f` 用它做 selector=7 的读取 ⇒ 其返回值是判据之一。
 static const UInt8 kReadSelPattern[]   = {0x41, 0x89, 0xC9, 0x89, 0xD0, 0x83, 0xFE, 0x08, 0x74, 0x09, 0x83, 0xFE,
                                            0x07, 0x75, 0x13, 0x31, 0xF6, 0xEB, 0x05, 0xBE, 0x01, 0x00, 0x00, 0x00};
@@ -2869,6 +2879,29 @@ UInt64 X5000HWLibs::wrapBgm64Memcpy(void* const dst, const void* const src, cons
         nredBgm64Dump(2, dst, (len > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : static_cast<UInt32>(len));
     }
     return ret;
+}
+
+// ─── 241：BGM `EVENT__HW_INIT` 上报点观测（`-NRedBgmHw`，默认关）──────────────────────
+//  0x91222 是 0x929ac 的 pre/post/fail 通知（原件仅副作用，无返回值）。只在 client==3 时取样：
+//  `sub = *(void**)(root+0x20)`（client3 子对象，先做内核指针校验）。
+//  限流：每个 (stage,mode) 首 2 条、总计 ≤8；表与计数在 BSS，wrapper 零局部数组。
+void X5000HWLibs::wrapBgmHwNotify(void* const root, const UInt32 client, const UInt32 stage,
+                                  const UInt64 arg, const UInt32 mode)
+{
+    if (gBgmHw && client == 3 && stage < 9 && mode < 5 &&
+        gBgmHwCnt[stage][mode] < 2 && gBgmHwTotal < 8) {
+        ++gBgmHwCnt[stage][mode];
+        ++gBgmHwTotal;
+        UInt64 sub = 0;
+        if (nredKernelPtrOk(root)) {
+            sub = reinterpret_cast<UInt64>(*reinterpret_cast<void* const*>(static_cast<const UInt8*>(root) + 0x20));
+            if (!nredKernelPtrOk(reinterpret_cast<const void*>(sub))) { sub = 0; }
+        }
+        fw::fwTrace("[bgmhw] stage=%u mode=%u arg=%llx sub=%llx", static_cast<unsigned>(stage),
+                    static_cast<unsigned>(mode), static_cast<unsigned long long>(arg),
+                    static_cast<unsigned long long>(sub));
+    }
+    FunctionCast(wrapBgmHwNotify, singleton().orgBgmHwNotify)(root, client, stage, arg, mode);
 }
 
 UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 a2, const UInt32 a3, void* const buf,
@@ -5153,6 +5186,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gBgm64 = checkKernelArgument("-NRedBgm64");
     // 238：真实容器接管（默认关）。仅当此开关或 -NRedBgmTab 开时需要安装 0x29b4e2 路由。
     gBgmReal = checkKernelArgument("-NRedBgmReal");
+    // 241：BGM HW_INIT 事件观测（默认关）。仅门控开时安装 0x91222 函数级 hook。
+    gBgmHw = checkKernelArgument("-NRedBgmHw");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
@@ -5518,6 +5553,14 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                 }
             }
             bgm64H(2, ok, addr);
+        }
+        // 241：`0x91222` TrimHook（BGM 事件观测）。⚠ 仅门控开时注册 ⇒ 关态零输出、零行为。
+        if (gBgmHw) {
+            if (const auto from = resolveProbe("bgmhw-notify", kBgmHwNotifyPattern, nullptr,
+                                               arrsize(kBgmHwNotifyPattern), 0x91222)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmHwNotify, this->orgBgmHwNotify},
+                          "bgmhw-notify");
+            }
         }
         if (const auto from = resolveProbe("read-sel", kReadSelPattern, nullptr, arrsize(kReadSelPattern), 0x29A19E)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapReadSel, this->orgReadSel}, "read-sel");
