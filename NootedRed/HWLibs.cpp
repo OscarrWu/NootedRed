@@ -2747,7 +2747,8 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
 UInt64 X5000HWLibs::wrapBgm64Memcpy(void* const dst, const void* const src, const UInt64 len)
 {
     const UInt64 ret = FunctionCast(wrapBgm64Memcpy, singleton().orgBgm64Memcpy)(dst, src, len);
-    if (gBgm64 && !gBgm64Once2 && len >= 0x10000) {
+    // 长度窗口：64KB ≤ len ≤ 16MB（排除负 size 被当 UInt64 巨值与异常大拷贝）。
+    if (gBgm64 && !gBgm64Once2 && len >= 0x10000 && len <= 0x1000000ULL) {
         gBgm64Once2 = true;
         nredBgm64Dump(2, dst, (len > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : static_cast<UInt32>(len));
     }
