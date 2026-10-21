@@ -558,6 +558,24 @@ static inline bool nredKernelPtrOk(const void* const p)
     return p != nullptr && (reinterpret_cast<UInt64>(p) >> 48) == 0xFFFF;
 }
 
+// 257：boot-arg **精确 token** 匹配（避免 `-NRedSt1P` 与既有 `-NRedSt1Pre`、
+//  `-NRedSt1W` 与 `-NRedSt1W2` 这类“前缀开关”互相误开）。只读 `PE_boot_args()` 字符串，
+//  不解析值、不分配内存。
+static bool nredExactBootArg(const char* const name)
+{
+    const char* const ba = PE_boot_args();
+    if (ba == nullptr || name == nullptr) { return false; }
+    const size_t n = strlen(name);
+    const char* p = ba;
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == '\n') { ++p; }
+        const char* const q = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n') { ++p; }
+        if (static_cast<size_t>(p - q) == n && strncmp(q, name, n) == 0) { return true; }
+    }
+    return false;
+}
+
 // A-22/A-28：把内存环里的早期 trace 行**刷盘**（仅在**既有安全时点**调用）。
 //  安全时点（A-28 起）：
 //    ① L2 周期拍 `dumpTick` 的 **stBusy 保护区**内（**本卡新增**，每拍都刷 ⇒ 死亡时点可读到秒）；
@@ -5795,13 +5813,15 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 241：BGM HW_INIT 事件观测（默认关）。仅门控开时安装 0x91222 函数级 hook。
     gBgmHw = checkKernelArgument("-NRedBgmHw");
     // 242：stage1 预检（默认关）。只影响护栏分支内的只读观测。
-    gSt1Pre = checkKernelArgument("-NRedSt1Pre");
+    // 257：改用**精确 token** 匹配 —— `-NRedSt1P` 是 `-NRedSt1Pre` 的前缀；若底层解析器做前缀
+    //  匹配，任一开关会同时打开另一个（破坏关态零行为）。仅改解析方式，语义不变。
+    gSt1Pre = nredExactBootArg("-NRedSt1Pre");
     // 244：stage1 首批放行（默认关；仅 client 14 通过前置检查后调用原件）。
     gStage1 = checkKernelArgument("-NRedStage1");
     // 246：client 7 只读探针（默认关）。只写 BSS 观测值，不影响护栏返回值。
-    gSt1W = checkKernelArgument("-NRedSt1W");
+    gSt1W = nredExactBootArg("-NRedSt1W");
     // 248：client 7 槽值探针（默认关）。与 -NRedSt1W 独立；开此开关才会 deref svc。
-    gSt1W2 = checkKernelArgument("-NRedSt1W2");
+    gSt1W2 = nredExactBootArg("-NRedSt1W2");
     // 249：client 一级对象对齐观测（默认关）。入口记录，头部区输出。
     gSt1O = checkKernelArgument("-NRedSt1O");
     // 251：client 7 双侧观测（默认关）。仅在开时安装 0x93d18/0x93998 两个只读 hook。
@@ -5811,7 +5831,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 256：仅 c>=1 的调次（默认关）。钉死 stage1 实际 client 集合。
     gSt1C = checkKernelArgument("-NRedSt1C");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
-    gSt1P = checkKernelArgument("-NRedSt1P");
+    gSt1P = nredExactBootArg("-NRedSt1P");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
     gMesReal = checkKernelArgument("-NRedMesReal");
     // 254：MES b 系列提供者（默认关）。仅构造静态描述符并挂到 +0x790；不调 0x441ad、不写 MMIO。
