@@ -2555,7 +2555,7 @@ UInt32 X5000HWLibs::wrapBgmStep1(void* const a, void* const b, void* const c, vo
             o0 = reinterpret_cast<UInt64*>(d)[0];
             o8 = reinterpret_cast<UInt64*>(d)[1];
         }
-        NRED_TRACE("bgm-step1: a1=%llx a2=%llx a3=%llx out=%llx o0=%llx o8=%llx ret=%u",
+        fw::fwTrace("bgm-step1: a1=%llx a2=%llx a3=%llx out=%llx o0=%llx o8=%llx ret=%u",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(c)),
@@ -2585,7 +2585,7 @@ UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
             f2fa8 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(a) + 0x2fa8);
             f2fb8 = *reinterpret_cast<UInt64*>(reinterpret_cast<UInt8*>(a) + 0x2fb8);
         }
-        NRED_TRACE("bgm-step4: obj=%llx inner=%llx mode=%u f2fa8=%llx f2fb8=%llx ret=%u",
+        fw::fwTrace("bgm-step4: obj=%llx inner=%llx mode=%u f2fa8=%llx f2fb8=%llx ret=%u",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)), static_cast<unsigned long long>(inner),
                static_cast<unsigned>(mode), static_cast<unsigned long long>(f2fa8),
                static_cast<unsigned long long>(f2fb8), static_cast<unsigned>(ret));
@@ -2608,14 +2608,14 @@ static void nredBgm64Dump(const UInt32 pt, const void* const p, const UInt32 len
             if ((i + 1) * 4 <= cap) { w[i] = *reinterpret_cast<const UInt32*>(b + i * 4); }
         }
     }
-    NRED_TRACE("[bgm64] pt=%u n=%u buf=%llx len=%u hdr=%08X b0=%08X b4=%08X b8=%08X bc=%08X bad=%u",
+    fw::fwTrace("[bgm64] pt=%u n=%u buf=%llx len=%u hdr=%08X b0=%08X b4=%08X b8=%08X bc=%08X bad=%u",
                static_cast<unsigned>(pt), static_cast<unsigned>(n),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(p)), static_cast<unsigned>(len),
                static_cast<unsigned>(w[0]), static_cast<unsigned>(w[1]),
                static_cast<unsigned>(w[2]), static_cast<unsigned>(w[3]), ok ? 0u : 1u);
     if (!ok) { return; }
     const UInt8* const b = static_cast<const UInt8*>(p);
-    char line[128];
+    static char line[128];   // 236：static（不再占栈；236 崩溃根因之一是深栈 + SYSLOG 1KB）
     for (UInt32 r = 0; r < 2; ++r) {
         const UInt32 off = r * 32;
         if (off >= cap) { break; }
@@ -2626,7 +2626,7 @@ static void nredBgm64Dump(const UInt32 pt, const void* const p, const UInt32 len
             k += snprintf(line + k, sizeof(line) - static_cast<size_t>(k), "%02X",
                           static_cast<unsigned>(b[off + i]));
         }
-        if (k > 0) { NRED_TRACE("%s", line); }
+        if (k > 0) { fw::fwTrace("%s", line); }
     }
 }
 
@@ -2651,7 +2651,7 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
     const UInt64 raOff = hasOff ? (ra - gHwlibsSlide) : 0;
     const unsigned selU  = static_cast<unsigned>(sel);
     const unsigned sizeU = (size > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : static_cast<unsigned>(size);
-    char pre[96];
+    static char pre[96];   // 236：static（与 line 同理；BGM 路径单线程诊断）
     if (hasOff) {
         snprintf(pre, sizeof(pre), "sel=%u size=%u ra=%llx raoff=%llx", selU, sizeU,
                  static_cast<unsigned long long>(ra), static_cast<unsigned long long>(raOff));
@@ -2682,7 +2682,7 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
         void* buf = nullptr;
         // `buf` 仅在成功时有效（文档：成功时 *out = resp[0]+16）；失败时保持 0。
         if (ret == 0 && nredKernelPtrOk(out) && nredKernelPtrOk(*out)) { buf = *out; }
-        NRED_TRACE("[bgmcmd] sel=%u size=%u buf=%llx provB=%llx target=%llx method=%llx ret=%d bad=%u",
+        fw::fwTrace("[bgmcmd] sel=%u size=%u buf=%llx provB=%llx target=%llx method=%llx ret=%d bad=%u",
                    selU, sizeU, static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)),
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(provB)),
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(target)),
@@ -2690,12 +2690,12 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
                    static_cast<int>(ret), bad);
     }
     if (ret != 0) {
-        NRED_TRACE("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=%d bad=0", pre,
+        fw::fwTrace("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=%d bad=0", pre,
                    static_cast<int>(ret));
         return ret;
     }
     if (!nredKernelPtrOk(out) || !nredKernelPtrOk(*out)) {
-        NRED_TRACE("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=0 bad=1", pre);
+        fw::fwTrace("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=0 bad=1", pre);
         return ret;
     }
 
@@ -2717,14 +2717,14 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
     UInt32 sum = 0;
     for (UInt32 i = 0; i < len; ++i) { sum += p[i]; }
 
-    NRED_TRACE("[bgmtab] %s hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0", pre,
+    fw::fwTrace("[bgmtab] %s hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0", pre,
                static_cast<unsigned>(hdr), static_cast<unsigned>(ver), static_cast<unsigned>(ipds),
                static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
                static_cast<int>(ret));
 
     // 前 256B 分块：每行 32B，最多 8 行（行数按 len 截断；每行带 sel）。
     {
-        char line[128];
+        static char line[128];   // 236：static（同行缓冲复用；BGM 路径单线程诊断）
         for (UInt32 r = 0; r < 8; ++r) {
             const UInt32 off = r * 32;
             if (off >= len) { break; }
@@ -2735,7 +2735,7 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
                 n += snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%02X",
                               static_cast<unsigned>(p[off + k]));
             }
-            if (n > 0) { NRED_TRACE("%s", line); }
+            if (n > 0) { fw::fwTrace("%s", line); }
         }
     }
     return ret;
@@ -5316,7 +5316,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         // 235：`[bgm64-h]` 安装自证（仅 -NRedBgm64 时输出；state=1 已安装、0 未安装/未尝试）。
         const auto bgm64H = [](const UInt32 pt, const bool ok, const mach_vm_address_t addr) {
             if (!gBgm64) { return; }
-            NRED_TRACE("[bgm64-h] pt=%u state=%u addr=%llx", static_cast<unsigned>(pt),
+            fw::fwTrace("[bgm64-h] pt=%u state=%u addr=%llx", static_cast<unsigned>(pt),
                        ok ? 1u : 0u, static_cast<unsigned long long>(addr));
         };
 

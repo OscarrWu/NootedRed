@@ -29,8 +29,9 @@ inline void fwTrace(const char* /*fmt*/, ...) {}
 
 namespace fw {
 
-// 单份行缓冲：最长行按项目惯例 ≤191 字符；留 NUL 与换行余量。
-static char gFwTraceBuf[192];
+// 单份行缓冲：236 轮修复——由 192 B 扩到 256 B（`[bgmtab]` 满行含 sel/size/ra/raoff ≈180 字符，
+//  加上多字段后接近 192 上限；256 B 留足 NUL/换行余量，避免被截断）。
+static char gFwTraceBuf[256];
 
 __attribute__((format(printf, 1, 2)))
 inline void fwTrace(const char* const fmt, ...)
