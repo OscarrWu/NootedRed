@@ -101,6 +101,9 @@ class X5000HWLibs
     mach_vm_address_t                                            orgTtlCheckD{0};    // 0xa285f
     mach_vm_address_t                                            orgTtlInit{0};     // 0x8af60 ttl_initialize（B67；无符号内部函数，地址路由）
     mach_vm_address_t                                            orgTtlRegIface{0};  // 0x8b9a5 接口表注册（idx/值）
+    // 251（`-NRedGc7`）：client 7 双侧只读观测
+    mach_vm_address_t                                            orgGc7Install{0};  // 0x93d18 安装子分派
+    mach_vm_address_t                                            orgGc7SetSlot{0};  // 0x93998 setter（13 trampoline 共用）
     mach_vm_address_t                                            orgTlsCreate{0};    // 0x93f76 TlsCreateInstance 判据
     mach_vm_address_t                                            orgDevLookup{0};    // 0xa2691 第二次三键查表（B95v2 介入挂点）
     mach_vm_address_t                                            orgTlsSwInit{0};    // 0x95e9f TlsSwInit 内部创建
@@ -166,6 +169,9 @@ private:
     static void* wrapTtlAllocA(void* ctx);
     static void* wrapTtlAllocB(void* ctx);
     static bool  wrapTtlCheckD(void* obj, void* param);
+    // 251：client 7 双侧观测（只读；al 原样透传）
+    static bool wrapGc7Install(void* ctx, UInt32 sel);
+    static void wrapGc7SetSlot(void* obj, UInt32 id, UInt64 val);
     static UInt32 wrapTtlInit(void* a1, void* a2);   // B67：ttl_initialize 出入口两读（零行为改动）
     // 第八步观测（2026-09-28 第二十一轮）：接口表注册函数 `0x8b9a5(table, idx, obj, val)`（只读）
     static void wrapTtlRegIface(void* table, UInt32 idx, void* obj, void* val);

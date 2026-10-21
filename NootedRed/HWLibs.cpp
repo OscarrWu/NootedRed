@@ -205,6 +205,15 @@ struct NRedSt1ORec { UInt64 ctx; UInt64 p; UInt32 seq; UInt32 used; };
 static bool        gSt1O = false;
 static NRedSt1ORec gSt1ORec[7][2];   // 7 个 client × 至多 2 条
 static UInt8       gSt1OSeq[7];      // 逐 client 调用序号（饱和 255）
+// 251（`-NRedGc7`，默认关）：client 7 双侧观测（安装侧 + 注销侧）。
+struct NRedGc7Rec { UInt64 p7; UInt32 sel; UInt32 hit; };
+static bool       gGc7 = false;
+static NRedGc7Rec gGc7Rec[2];
+static UInt32     gGc7N = 0;
+static bool       gGc7HitSeen = false;
+static UInt32     gGc7xSlot = 0;
+static UInt64     gGc7xVal = 0;
+static UInt32     gGc7xSeen = 0;
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -668,6 +677,27 @@ static void nredSt1GStamp(char* const body, size_t& off, const size_t cap)
     off += sizeof(kTpl) - 1;
 }
 
+// 251：`[gc7]/[gc7x]` 头部行（noinline、零解引用）。
+__attribute__((noinline))
+static void nredGc7Stamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    for (unsigned i = 0; i < gGc7N && i < 2; ++i) {
+        const NRedGc7Rec& r = gGc7Rec[i];
+        const int n = snprintf(body + off, room, "[gc7] sel=%u hit=%u p7=%llx\n",
+                               static_cast<unsigned>(r.sel), static_cast<unsigned>(r.hit),
+                               static_cast<unsigned long long>(r.p7));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
+    if (gGc7xSeen != 0 && room != 0) {
+        const int n = snprintf(body + off, room, "[gc7x] slot=%u val=%llx\n",
+                               static_cast<unsigned>(gGc7xSlot),
+                               static_cast<unsigned long long>(gGc7xVal));
+        if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+    }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -777,6 +807,8 @@ int nredTraceFlush(int secTag)
     if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // 248：槽值行独立开关（-NRedSt1W2）；W 开而 W2 关 ⇒ 不 deref svc、不输出这两行。
     if (gSt1W2 && off < sizeof(body)) { nredSt1W2Stamp(body, off, sizeof(body) - off); }
+    // 251：`[gc7]/[gc7x]` 双侧观测（仅 -NRedGc7；关态一字不变）。
+    if (gGc7 && off < sizeof(body)) { nredGc7Stamp(body, off, sizeof(body) - off); }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
     //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
@@ -1345,6 +1377,14 @@ static const UInt8 kPred90PatternMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0
 //  callq 0x93f64 全库 1 处（0x95c7c）；交叉口径 0x9e505 21B 同法唯一 1 次 ⇒ 搜索方法可信。
 static const UInt8 kFlt93F64Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x8B, 0x87, 0xB8, 0x07, 0x00, 0x00,
                                          0x0F, 0xA3, 0xF0, 0x0F, 0x92, 0xC0, 0x5D, 0xC3};
+// 251（`-NRedGc7`）：client 7 双侧观测的两个入口。
+//  安装侧 `0x93d18`：`al f(ctx=rdi, sel=esi)`；16B 字面量在 __text 内**唯一 1 次**@0x93d18（函数头✓）。
+//  注销侧 `0x93998`：`void f(obj=rdi, id=esi, val=rdx)`；规格给的 16B **不唯一**（0x93982 的 getter
+//   0x93980 内部同样匹配）⇒ 延长到 18B（多含 `89 54`，与 getter 的 `8B 44` 区分），唯一 1 次@0x93998。
+static const UInt8 kGc7InstallPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x89,
+                                           0xF3, 0x49, 0x89, 0xFE, 0x31, 0xC0, 0x8D, 0x4B};
+static const UInt8 kGc7SetSlotPattern[] = {0x48, 0x85, 0xFF, 0x74, 0x10, 0x85, 0xF6, 0x74, 0x0C,
+                                           0x55, 0x48, 0x89, 0xE5, 0x89, 0xF0, 0x48, 0x89, 0x54};
 // 第八步观测（2026-09-28 第十九轮）：定位 TTL 初始化 `0x8b10e` 的失败出口。
 //  `0x8b10e` 共 6 条出口，离线已排除 A（`0x90d75` 校验失败⇒将不做任何查询，与实测的 8 次查询矛盾）
 //  与 B（`0x8b5de` 返回 NULL⇒但其内部的 3 次查询实测均成功）。剩余候选即下面 4 个函数：
@@ -1979,6 +2019,38 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
         }
     }
     return ret;
+}
+
+// 251（`-NRedGc7`）：client 7 双侧观测。
+//  安装侧 `0x93d18(ctx=rdi, sel=esi)`：调原件后、若 `sel==7` 且 ctx 通过 KPtr，读 `p7=*(ctx+0x40)`
+//    （写入后值）；`al` 原样透传。限流：首次调用 + 首次 `hit=1` 各 1 条（≤2）。
+//  注销侧 `0x93998(obj=rdi, id=esi, val=rdx)`：只在 `val==0 && id==7` 记一次（`[gc7x]`，≤1 条）。
+//  两处均只读入参/固定偏移，不跟随函数指针、不解引用返回值；门控关 ⇒ 不安装 hook、零行为。
+bool X5000HWLibs::wrapGc7Install(void* const ctx, const UInt32 sel)
+{
+    const bool hit = (sel == 7);
+    const bool ret = FunctionCast(wrapGc7Install, singleton().orgGc7Install)(ctx, sel);
+    if (gGc7 && nredKernelPtrOk(ctx) && (!gGc7N || (hit && !gGc7HitSeen))) {
+        if (gGc7N < 2) {
+            NRedGc7Rec& r = gGc7Rec[gGc7N];
+            r.p7 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(ctx) + 0x40);
+            r.sel = sel;
+            r.hit = hit ? 1u : 0u;
+            ++gGc7N;
+            if (hit) { gGc7HitSeen = true; }
+        }
+    }
+    return ret;
+}
+
+void X5000HWLibs::wrapGc7SetSlot(void* const obj, const UInt32 id, const UInt64 val)
+{
+    FunctionCast(wrapGc7SetSlot, singleton().orgGc7SetSlot)(obj, id, val);
+    if (gGc7 && val == 0 && id == 7 && gGc7xSeen == 0) {
+        gGc7xSlot = id;
+        gGc7xVal = val;
+        gGc7xSeen = 1;
+    }
 }
 
 // B81 观测点 A：拦截 Apple 就绪门谓词 0x6839e（读 C2PMSG_90(0x29A)→setne→ret al）。
@@ -5486,6 +5558,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1W2 = checkKernelArgument("-NRedSt1W2");
     // 249：client 一级对象对齐观测（默认关）。入口记录，头部区输出。
     gSt1O = checkKernelArgument("-NRedSt1O");
+    // 251：client 7 双侧观测（默认关）。仅在开时安装 0x93d18/0x93998 两个只读 hook。
+    gGc7 = checkKernelArgument("-NRedGc7");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
@@ -5947,6 +6021,21 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         //  通道＝nredTraceLine（内存环，零新增 SYSLOG）；缓冲 static（不占栈）；定长 ≤191。
         //  截断：内容 >180 ⇒ 截到 179 并加 `~` 标记（10 前缀+179+1+换行=191 ≤191）。
         //  失败出口：PE_boot_args() 返回 nullptr ⇒ 记 `bootargs: (null)` 行，不悬停。
+        // 251（`-NRedGc7`）：client 7 双侧观测。模式已在离线核对为 __text 唯一；
+        //  `resolveProbe` 先按**预期偏移**逐字节校验（等同 hook-check 的“期望偏移＝函数头”），
+        //  回退扫描也要求命中偏移一致 ⇒ 绝不 patch 错位置；失败只记日志、不 panic。
+        if (gGc7) {
+            if (const auto from = resolveProbe("gc7-inst", kGc7InstallPattern, nullptr,
+                                               arrsize(kGc7InstallPattern), 0x93D18)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapGc7Install, this->orgGc7Install},
+                          "gc7-inst");
+            }
+            if (const auto from = resolveProbe("gc7-set", kGc7SetSlotPattern, nullptr,
+                                               arrsize(kGc7SetSlotPattern), 0x93998)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapGc7SetSlot, this->orgGc7SetSlot},
+                          "gc7-set");
+            }
+        }
         {
             static char lineBoot[192];
             const char* const ba = PE_boot_args();
