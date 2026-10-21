@@ -178,6 +178,10 @@ static UInt8  gBgmHwCnt[9][5] = {};
 static UInt32 gBgmHwTotal = 0;
 // 242（`-NRedSt1Pre`，默认关）：stage1 预检观测（护栏 return 0 之前、只读一级指针）。
 static bool gSt1Pre = false;
+// 243：预检结果写入 BSS 标量，由 `nredTraceFlush` 头部区只读输出（正文区会系统性丢失）。
+static UInt32 gSt1Mask  = 0;   // bit i = client i 一级对象存在且指针合法（i∈{2,5,6,7,8,9,14}）
+static UInt32 gSt1N     = 0;   // 预检调用次数（饱和 255）
+static UInt32 gSt1CtxOk = 0;   // ctx 合法 = 1
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -628,6 +632,15 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned>(gTrimStat[k].firstFail),
                                 static_cast<unsigned>(gTrimStat[k].nFail));
         if (nt > 0) { off += (static_cast<size_t>(nt) < cap) ? static_cast<size_t>(nt) : cap; }
+    }
+    // 243：`[st1m]` 头部戳记（stage1 预检结果；仅 -NRedSt1Pre 时输出，关态一字不变）。
+    //  **零解引用**：只读 gSt1Mask/gSt1CtxOk/gSt1N 三个 BSS 标量；单行约 32 字符。
+    if (gSt1Pre && off < sizeof(body)) {
+        const size_t cap = sizeof(body) - off;
+        const int n8 = snprintf(body + off, cap, "[st1m] mask=%04x ctx=%u n=%u\n",
+                                static_cast<unsigned>(gSt1Mask), static_cast<unsigned>(gSt1CtxOk),
+                                static_cast<unsigned>(gSt1N));
+        if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
     }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
@@ -4726,32 +4739,27 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
     nredSwLogCall(clientId, info, out, o8init, res);
     return res;
 }
-// ─── 242：stage1 预检（`-NRedSt1Pre`，默认关）────────────────────────────────────────
+// ─── 242/243：stage1 预检（`-NRedSt1Pre`，默认关）────────────────────────────────────────
 //  仅在护栏分支 c==1 且 `return 0` 之前调用（不调原件、不解引用 P_i 内部）。
 //  P_i = *(void**)(ctx + 8 + i*8)（子对象 getter 0x93980 的统一入口）。
-//  每 client 仅首 1 条（BSS 标记），ctx 非法只打一行；通道 fw::fwTrace（无 SYSLOG）。
+//  243：不再直接打印（正文区系统性丢失）——结果写入 BSS 标量，由 `nredTraceFlush` 头部区输出。
+//  每次调用刷新 mask（先清零再置位）；n 饱和 255；头部行内零解引用。
 static void nredStage1Precheck(const void* const ctx)
 {
-    static bool sCtxLogged = false;
     if (!nredKernelPtrOk(ctx)) {
-        if (!sCtxLogged) { sCtxLogged = true; fw::fwTrace("[st1] c=0 null=1 lvl=0"); }
-        return;
-    }
-    static const UInt8 kIds[7] = {2, 5, 6, 7, 8, 9, 14};
-    static UInt8 sSeen[16] = {};
-    for (unsigned k = 0; k < 7; ++k) {
-        const UInt32 i = kIds[k];
-        if (i >= 16 || sSeen[i] != 0) { continue; }
-        sSeen[i] = 1;
-        const void* const p = *reinterpret_cast<void* const*>(static_cast<const UInt8*>(ctx) + 8 + i * 8u);
-        UInt32 lvl = 0;
-        UInt32 nul = (p == nullptr) ? 1u : 0u;
-        if (nul == 0) {
-            lvl = nredKernelPtrOk(p) ? 1u : 0u;
-            nul = (lvl == 0) ? 1u : 0u;
+        gSt1Mask = 0;
+        gSt1CtxOk = 0;
+    } else {
+        gSt1CtxOk = 1;
+        gSt1Mask = 0;
+        static const UInt8 kIds[7] = {2, 5, 6, 7, 8, 9, 14};
+        for (unsigned k = 0; k < 7; ++k) {
+            const UInt32 i = kIds[k];
+            const void* const p = *reinterpret_cast<void* const*>(static_cast<const UInt8*>(ctx) + 8 + i * 8u);
+            if (p != nullptr && nredKernelPtrOk(p)) { gSt1Mask |= (1U << i); }
         }
-        fw::fwTrace("[st1] c=%u null=%u lvl=%u", static_cast<unsigned>(i), nul, lvl);
     }
+    if (gSt1N < 255) { ++gSt1N; }
 }
 
 
