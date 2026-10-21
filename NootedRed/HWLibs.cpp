@@ -2629,7 +2629,8 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
             bad = 1;
         }
         void* buf = nullptr;
-        if (nredKernelPtrOk(out) && nredKernelPtrOk(*out)) { buf = *out; }
+        // `buf` 仅在成功时有效（文档：成功时 *out = resp[0]+16）；失败时保持 0。
+        if (ret == 0 && nredKernelPtrOk(out) && nredKernelPtrOk(*out)) { buf = *out; }
         NRED_TRACE("[bgmcmd] sel=%u size=%u buf=%llx provB=%llx target=%llx method=%llx ret=%d bad=%u",
                    selU, sizeU, static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)),
                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(provB)),
