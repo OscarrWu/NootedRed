@@ -195,6 +195,7 @@ static UInt64 gSt1M790 = 0;   // ⑤ *(MES+0x790)
 // 246（`-NRedSt1W`，默认关）：client 7 只读探针（不放行、不调原件）；值由探针读出，头戳零解引用。
 static bool   gSt1W    = false;
 static UInt64 gSt1P7   = 0;   // *(ctx+0x40)
+static UInt64 gSt1P3   = 0;   // 255：*(ctx+0x20)（client 7 stage1 唯一硬 fault 依赖）
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -611,14 +612,14 @@ static void nredSt1rStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
-// 245：`[st1v]` 头部行（MES 三值；独立 noinline 帧，零解引用）。
+// 255：`[st1v]` 头部行——按 client 7 放行规格 §3 复用为 `p7/p3`（client 14 暂不生效；
+//  将来恢复时另起 `[st1v14]`，不改本行格式）。独立 noinline 帧、零解引用。
 __attribute__((noinline))
 static void nredSt1vStamp(char* const body, size_t& off, const size_t cap)
 {
-    const int n = snprintf(body + off, cap, "[st1v] mes=%llx m8=%llx m790=%llx\n",
-                           static_cast<unsigned long long>(gSt1Mes),
-                           static_cast<unsigned long long>(gSt1M8),
-                           static_cast<unsigned long long>(gSt1M790));
+    const int n = snprintf(body + off, cap, "[st1v] p7=%llx p3=%llx\n",
+                           static_cast<unsigned long long>(gSt1P7),
+                           static_cast<unsigned long long>(gSt1P3));
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
@@ -5095,15 +5096,31 @@ static void nredStage1Precheck(const void* const ctx)
     if (gSt1N < 255) { ++gSt1N; }
 }
 
-// ─── 244/245：stage1 放行前置检查（`-NRedStage1`，批 1 只实现 client 14／MES）──────────
-//  规格（修订版）`tmp/tech-manager/R-stage1放行规格-批1-修订版-2026-10-21.md` §1，5 条顺序执行：
-//   ① P14＝*(ctx+0x78)≠0  ② *(P14+0x18)≠0  ③ MES＝*(P14+0x28)≠0
-//   ④ G4：*(MES+0x08)≠0  ⑤ G5：*(MES+0x790)≠0。
+// ─── 244/245/255：stage1 放行前置检查（`-NRedStage1`；白名单 {7,14}）─────────────────────
+//  client 7（255，规格 `kb/技术草案/R-stage1放行规格-client7-2026-10-21.md` §1，5 跳顺序执行）：
+//   ① ctx 过 KPtr ② P7=*(ctx+0x40) 非空且过 KPtr ③ *(P7+0x18)≠0 ④ *(P7+0x28)≠0
+//   ⑤ P3=*(ctx+0x20) 非空且过 KPtr（唯一硬 fault 依赖：0x97665 读 P3+0x50）。
+//  client 14（244/245 批 1 修订版）：① P14=*(ctx+0x78) ② *(P14+0x18) ③ MES=*(P14+0x28)
+//   ④ *(MES+0x08) ⑤ *(MES+0x790)；代码保留（当前默认路径下 G5 恒 0 ⇒ 不生效）。
 //  每条都先 `nredKernelPtrOk` 校验上一级指针再读固定偏移；不跟随函数指针、不调用任何东西。
-//  读出值存入 BSS（`[st1v]` 头部行零解引用）；`mes` 无效时 m8/m790 保持 0（§3 约定）。
-//  返回 false ⇒ 调用方按苹果极性 `return 0`（并置 `gSt1Ret0` 位）。
+//  读出值存入 BSS（头部行零解引用）；返回 false ⇒ 调用方按苹果极性 `return 0`。
 static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 {
+    if (client == 7) {
+        gSt1P7 = 0;
+        gSt1P3 = 0;
+        if (!nredKernelPtrOk(ctx)) { return false; }
+        const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x40);
+        if (!nredKernelPtrOk(p7)) { return false; }
+        gSt1P7 = reinterpret_cast<UInt64>(p7);
+        if (*reinterpret_cast<const UInt64*>(p7 + 0x18) == 0) { return false; }
+        if (*reinterpret_cast<const UInt64*>(p7 + 0x28) == 0) { return false; }
+        const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
+        gSt1P3 = reinterpret_cast<UInt64>(p3);
+        if (!nredKernelPtrOk(p3)) { return false; }
+        gSt1Try |= (1U << 7);
+        return true;
+    }
     if (client != 14) { return false; }
     gSt1Mes = 0;
     gSt1M8 = 0;
