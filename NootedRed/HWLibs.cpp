@@ -202,6 +202,9 @@ static UInt64 gSt1G2P = 0, gSt1G2Key = 0;
 static UInt64 gSt1G5P = 0, gSt1G5Key = 0;
 static UInt64 gSt1G6P = 0, gSt1G6Key = 0;
 static UInt64 gSt1G9P = 0, gSt1G9Key = 0;
+// 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
+static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
+static UInt32 gSt1GfStep = 0;
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -857,6 +860,16 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
 }
 
+// 260：`[st1gf]` 守卫首个失败步号（无失败时输出 c=65535 step=0；noinline、零解引用）。
+__attribute__((noinline))
+static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
+{
+    const unsigned c = (gSt1GfClient == 0xFFFFFFFFU) ? 0xFFFFU : static_cast<unsigned>(gSt1GfClient);
+    const int n = snprintf(body + off, cap, "[st1gf] c=%u step=%u\n",
+                           c, static_cast<unsigned>(gSt1GfStep));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -989,6 +1002,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1B3Stamp(body, off, sizeof(body) - off); }
     // 259：`[st1g2/5/6/7/9]` 各 client 的 P/关键指针（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
+    // 260：`[st1gf]` 守卫首个失败步号（仅 -NRedStage1）。
+    if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
     if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // 248：槽值行独立开关（-NRedSt1W2）；W 开而 W2 关 ⇒ 不 deref svc、不输出这两行。
@@ -5219,27 +5234,36 @@ static void nredStage1Precheck(const void* const ctx)
 //   ⑥ Y=*(X) KPtr ⑦ Z=*(Y) KPtr ⑧ provider=*(Z+0x28) KPtr ⑨ *(P3+0x30) ⑩ *(P3+0x40)
 //   ⑪ *(provider+0x268)。每级先校验上一级指针再读固定偏移；不跟随函数指针、不调用苹果方法。
 //   独立 noinline 帧，保持 `nredStage1Guard` 分派帧不变。
+// 260：记录“首个失败步号”（noinline；只写 BSS，不改返回值/白名单）。
+__attribute__((noinline))
+static void nredStage1GfMark(const UInt32 client, const UInt32 step)
+{
+    if (gSt1GfClient != 0xFFFFFFFFU) { return; }
+    gSt1GfClient = client;
+    gSt1GfStep = step;
+}
+
 __attribute__((noinline))
 static bool nredStage1Guard3(const void* const ctx)
 {
     gSt1B3P3 = 0;
-    if (!nredKernelPtrOk(ctx)) { return false; }
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(3, 1); return false; }
     const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
-    if (!nredKernelPtrOk(p3)) { return false; }
+    if (!nredKernelPtrOk(p3)) { nredStage1GfMark(3, 2); return false; }
     gSt1B3P3 = reinterpret_cast<UInt64>(p3);
-    if (*reinterpret_cast<const UInt64*>(p3 + 0x18) == 0) { return false; }
-    if (*reinterpret_cast<const UInt64*>(p3 + 0x28) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x18) == 0) { nredStage1GfMark(3, 3); return false; }
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x28) == 0) { nredStage1GfMark(3, 4); return false; }
     const UInt8* const x = *reinterpret_cast<const UInt8* const*>(p3);
-    if (!nredKernelPtrOk(x)) { return false; }
+    if (!nredKernelPtrOk(x)) { nredStage1GfMark(3, 5); return false; }
     const UInt8* const y = *reinterpret_cast<const UInt8* const*>(x);
-    if (!nredKernelPtrOk(y)) { return false; }
+    if (!nredKernelPtrOk(y)) { nredStage1GfMark(3, 6); return false; }
     const UInt8* const z = *reinterpret_cast<const UInt8* const*>(y);
-    if (!nredKernelPtrOk(z)) { return false; }
+    if (!nredKernelPtrOk(z)) { nredStage1GfMark(3, 7); return false; }
     const UInt8* const prov = *reinterpret_cast<const UInt8* const*>(z + 0x28);
-    if (!nredKernelPtrOk(prov)) { return false; }
-    if (*reinterpret_cast<const UInt64*>(p3 + 0x30) == 0) { return false; }
-    if (*reinterpret_cast<const UInt64*>(p3 + 0x40) == 0) { return false; }
-    if (*reinterpret_cast<const UInt64*>(prov + 0x268) == 0) { return false; }
+    if (!nredKernelPtrOk(prov)) { nredStage1GfMark(3, 8); return false; }
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x30) == 0) { nredStage1GfMark(3, 9); return false; }
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x40) == 0) { nredStage1GfMark(3, 10); return false; }
+    if (*reinterpret_cast<const UInt64*>(prov + 0x268) == 0) { nredStage1GfMark(3, 11); return false; }
     return true;
 }
 
@@ -5259,20 +5283,20 @@ __attribute__((noinline))
 static bool nredStage1Guard2(const void* const ctx)
 {
     gSt1G2P = 0; gSt1G2Key = 0;
-    if (!nredKernelPtrOk(ctx)) { return false; }
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(2, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x18);
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(2, 2); return false; }
     gSt1G2P = reinterpret_cast<UInt64>(q);
     q = *reinterpret_cast<const UInt8* const*>(q);                 // dev=*(P2)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(2, 3); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // *(dev)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(2, 4); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // slot1
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(2, 5); return false; }
     gSt1G2Key = reinterpret_cast<UInt64>(q);
-    if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { nredStage1GfMark(2, 6); return false; }
     const UInt8* const p2 = reinterpret_cast<const UInt8*>(gSt1G2P);
-    if (*reinterpret_cast<const UInt64*>(p2 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p2 + 0x18) == 0) { nredStage1GfMark(2, 7); return false; }
     return true;
 }
 
@@ -5280,38 +5304,38 @@ __attribute__((noinline))
 static bool nredStage1Guard5(const void* const ctx)
 {
     gSt1G5P = 0; gSt1G5Key = 0;
-    if (!nredKernelPtrOk(ctx)) { return false; }
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(5, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 2); return false; }
     gSt1G5P = reinterpret_cast<UInt64>(q);
-    if (*reinterpret_cast<const UInt64*>(q) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q) == 0) { nredStage1GfMark(5, 3); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // *(P5)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 4); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // *(*(P5)) = 0x8b4bf 实参
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 5); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // 0x8b4bf 内部：*(实参)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 6); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // slot1 = *(helper 结果 +0x28)
-    if (!nredKernelPtrOk(q)) { return false; }
-    if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 7); return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { nredStage1GfMark(5, 8); return false; }
     const UInt8* p5 = reinterpret_cast<const UInt8*>(gSt1G5P);
-    if (*reinterpret_cast<const UInt64*>(p5 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p5 + 0x18) == 0) { nredStage1GfMark(5, 9); return false; }
     q = *reinterpret_cast<const UInt8* const*>(p5 + 0x28);         // S
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 10); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0xE48);         // *(S+0xE48)
-    if (!nredKernelPtrOk(q)) { return false; }
-    if (*reinterpret_cast<const UInt64*>(q + 0x90) == 0) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 11); return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x90) == 0) { nredStage1GfMark(5, 12); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0x08);          // *(..+0x08)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 13); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0x58);          // slot3（209 链 base）
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 14); return false; }
     gSt1G5Key = reinterpret_cast<UInt64>(q);
     q = *reinterpret_cast<const UInt8* const*>(q + 0xE8);          // hop0: *(slot3+0xE8)
-    if (!nredKernelPtrOk(q)) { return false; }
-    if (*reinterpret_cast<const UInt64*>(q + 0x40) == 0) { return false; }   // hop1
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 15); return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x40) == 0) { nredStage1GfMark(5, 16); return false; }   // hop1
     q = *reinterpret_cast<const UInt8* const*>(q + 0x40);          // hop2 base
-    if (!nredKernelPtrOk(q)) { return false; }
-    if (*reinterpret_cast<const UInt64*>(q + 0x08) == 0) { return false; }   // hop2
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 17); return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x08) == 0) { nredStage1GfMark(5, 18); return false; }   // hop2
     return true;
 }
 
@@ -5319,23 +5343,23 @@ __attribute__((noinline))
 static bool nredStage1Guard6(const void* const ctx)
 {
     gSt1G6P = 0; gSt1G6Key = 0;
-    if (!nredKernelPtrOk(ctx)) { return false; }
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(6, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x38);
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(6, 2); return false; }
     gSt1G6P = reinterpret_cast<UInt64>(q);
-    if (*reinterpret_cast<const UInt64*>(q) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q) == 0) { nredStage1GfMark(6, 3); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // dev=*(P6)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(6, 4); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // 0x8b4bf 实参 = *(dev)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(6, 5); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // 0x8b4bf 内部：*(实参)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(6, 6); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // prov（苹果不判，缺失必 trap）
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(6, 7); return false; }
     gSt1G6Key = reinterpret_cast<UInt64>(q);
     const UInt8* const p6 = reinterpret_cast<const UInt8*>(gSt1G6P);
-    if (*reinterpret_cast<const UInt64*>(p6 + 0x18) == 0) { return false; }
-    if (*reinterpret_cast<const UInt64*>(p6 + 0x40) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p6 + 0x18) == 0) { nredStage1GfMark(6, 8); return false; }
+    if (*reinterpret_cast<const UInt64*>(p6 + 0x40) == 0) { nredStage1GfMark(6, 9); return false; }
     return true;
 }
 
@@ -5344,15 +5368,15 @@ static bool nredStage1Guard7(const void* const ctx)
 {
     gSt1P7 = 0;
     gSt1P3 = 0;
-    if (!nredKernelPtrOk(ctx)) { return false; }
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(7, 1); return false; }
     const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x40);
-    if (!nredKernelPtrOk(p7)) { return false; }
+    if (!nredKernelPtrOk(p7)) { nredStage1GfMark(7, 2); return false; }
     gSt1P7 = reinterpret_cast<UInt64>(p7);
-    if (*reinterpret_cast<const UInt64*>(p7 + 0x18) == 0) { return false; }
-    if (*reinterpret_cast<const UInt64*>(p7 + 0x28) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p7 + 0x18) == 0) { nredStage1GfMark(7, 3); return false; }
+    if (*reinterpret_cast<const UInt64*>(p7 + 0x28) == 0) { nredStage1GfMark(7, 4); return false; }
     const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
     gSt1P3 = reinterpret_cast<UInt64>(p3);
-    if (!nredKernelPtrOk(p3)) { return false; }
+    if (!nredKernelPtrOk(p3)) { nredStage1GfMark(7, 5); return false; }
     return true;
 }
 
@@ -5360,18 +5384,18 @@ __attribute__((noinline))
 static bool nredStage1Guard9(const void* const ctx)
 {
     gSt1G9P = 0; gSt1G9Key = 0;
-    if (!nredKernelPtrOk(ctx)) { return false; }
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(9, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x50);
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(9, 2); return false; }
     gSt1G9P = reinterpret_cast<UInt64>(q);
     q = *reinterpret_cast<const UInt8* const*>(q);                 // *(P9)
-    if (!nredKernelPtrOk(q)) { return false; }
+    if (!nredKernelPtrOk(q)) { nredStage1GfMark(9, 3); return false; }
     gSt1G9Key = reinterpret_cast<UInt64>(q);
-    if (*reinterpret_cast<const UInt64*>(q + 0x20) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x20) == 0) { nredStage1GfMark(9, 4); return false; }
     const UInt8* const p9 = reinterpret_cast<const UInt8*>(gSt1G9P);
-    if (*reinterpret_cast<const UInt64*>(p9 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p9 + 0x18) == 0) { nredStage1GfMark(9, 5); return false; }
     if (*reinterpret_cast<const UInt64*>(p9 + 0x28) != 0 &&
-        *reinterpret_cast<const UInt64*>(p9 + 0x30) == 0) { return false; }
+        *reinterpret_cast<const UInt64*>(p9 + 0x30) == 0) { nredStage1GfMark(9, 6); return false; }
     return true;
 }
 
@@ -5404,17 +5428,17 @@ static bool nredStage1Guard14(const void* const ctx)
     gSt1Mes = 0;
     gSt1M8 = 0;
     gSt1M790 = 0;
-    if (!nredKernelPtrOk(ctx)) { return false; }
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(14, 1); return false; }
     const UInt8* const p14 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x78);
-    if (!nredKernelPtrOk(p14)) { return false; }
-    if (*reinterpret_cast<const UInt64*>(p14 + 0x18) == 0) { return false; }
+    if (!nredKernelPtrOk(p14)) { nredStage1GfMark(14, 2); return false; }
+    if (*reinterpret_cast<const UInt64*>(p14 + 0x18) == 0) { nredStage1GfMark(14, 3); return false; }
     const UInt8* const mes = *reinterpret_cast<const UInt8* const*>(p14 + 0x28);   // ③
-    if (!nredKernelPtrOk(mes)) { return false; }
+    if (!nredKernelPtrOk(mes)) { nredStage1GfMark(14, 4); return false; }
     gSt1Mes = reinterpret_cast<UInt64>(mes);
     gSt1M8 = *reinterpret_cast<const UInt64*>(mes + 0x08);      // ④ G4
     gSt1M790 = *reinterpret_cast<const UInt64*>(mes + 0x790);   // ⑤ G5
-    if (gSt1M8 == 0) { return false; }
-    if (gSt1M790 == 0) { return false; }
+    if (gSt1M8 == 0) { nredStage1GfMark(14, 5); return false; }
+    if (gSt1M790 == 0) { nredStage1GfMark(14, 6); return false; }
     return false;   // 259：本轮暂缓放行（即使 5 条全过）
 }
 
