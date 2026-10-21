@@ -68,6 +68,13 @@ static SInt32 gBringupLastError = 0;   // 末次 last_error
 static UInt32 gBringupLoadToc   = 0;   // 末次 loadToc_resp
 static UInt32 gBringupTmrLoad   = 0;   // 末次 tmrLoad_resp
 
+// 232：本头文件内的 NRED_TRACE 改走 fwTrace（单份 static 行缓冲 + nredTraceLine，零 SYSLOG 栈）；
+//  push/pop 限定作用域 ⇒ HWLibs.cpp 其余区域仍用全局 NRED_TRACE。
+#include "FwTraceLine.hpp"
+#pragma push_macro("NRED_TRACE")
+#undef NRED_TRACE
+#define NRED_TRACE(...) fwTrace(__VA_ARGS__)
+
 
 
 namespace fw {
@@ -97,6 +104,15 @@ struct NredSyslogMuteGuard {
     ~NredSyslogMuteGuard() { gNredTraceSyslogMuted = prev; }
 };
 
+// 232 栈修正：MMIO 回调集合与 RegSinkKernel 改 static（bringup 单线程 + 一次性守卫）。
+//  `RegSinkKernel` 无拷贝但可默认构造 + `setCallbacks()` ⇒ 不再在 hook 栈上构造（省 ~100 B）。
+static fw::SmnCallbacks gBringupCb;
+static fw::RegSinkKernel gBringupSink;
+
+// 232：实际 bringup 主体（从 hook 拆分，独立栈帧；hook 只留入口标记/守卫，帧 ≤512 B）。
+__attribute__((noinline))
+static void nredBringupBody();
+
 // ⚠️ β-1 重跑（本卡）：**本函数当前未被调用**（帧的 buf 已改填借用 MC 常量，见 prepTmrCmd）。
 //   B40 实证：本函数返回的 IOVA 在本机退化为恒等（== CPU PA）⇒ 未测到 GPU 可寻址域，故本轮绕开。
 //   **保留**理由：① 内含挂死护栏（IOMapper 过渡态自检），删除即失去该防御的可复用实现；
@@ -120,6 +136,7 @@ struct NredSyslogMuteGuard {
 // @param desc  已 prepare() 过的 TMR 缓冲（物理连续）
 // @param size  TMR 大小
 // @return GPU 可寻址地址（IOVA）；0 ⇒ 映射不可用，走降级路径
+__attribute__((noinline))
 static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t size)
 {
 
@@ -185,6 +202,7 @@ static inline uint64_t nredMapTmrForDma(IOBufferMemoryDescriptor* desc, uint64_t
     return seg.fIOVMAddr;
 }
 
+__attribute__((noinline))
 inline void nredFwBringupHook(void* const /*appleCtx*/)
 {
     // B39 三层入口标记 ②：`bringup: enter`（纯观测、零副作用、置于**所有 early-return 之前**）。
@@ -215,6 +233,13 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     if (bringupAttempted) { return; }
     bringupAttempted = true;
 
+    // 232：主体下沉到独立 noinline 帧（hook 自身只剩入口标记/守卫 ⇒ 帧 ≤512 B）。
+    nredBringupBody();
+}
+
+__attribute__((noinline))
+static void nredBringupBody()
+{
     // A-2：固件资产完整性校验（大小=编译期 sizeof；哈希=运行期 fnv1a64）。
     // 缺失/损坏 ⇒ trace 并跳过装载（可判失败，不静默通过）。
     if (!fw::fwAssetVerify(kFwTocAsset)) {
@@ -289,11 +314,15 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     uint8_t*  const fwPriVa = static_cast<uint8_t*>(fwPriDesc->getBytesNoCopy());
     bzero(fwPriVa, kFwPriBytes);
 
-    fw::RingState ring{};
+    // 232 栈修正：状态对象改 static（引导期单线程 + bringupAttempted 守卫）；每次进入显式清零。
+    static fw::RingState sRing;
+    sRing = fw::RingState{};
+    fw::RingState& ring = sRing;
     fw::ringInit(&ring, ringVa, cmdVa, fenceVa);
 
-    // ① SmnCallbacks（内核接线 + IODelay 注入；锁留空——引导期单 CPU、无并发写）。
-    fw::SmnCallbacks cb{};
+    // ① SmnCallbacks / ② RegSinkKernel：static 实例（232 栈修正；每次进入重置回调后重设）。
+    fw::SmnCallbacks& cb = gBringupCb;
+    cb = fw::SmnCallbacks{};
     cb.readReg    = &hookReadReg;
     cb.writeReg   = &hookWriteReg;
     cb.delayUs    = &hookDelayUs;
@@ -301,12 +330,14 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
     cb.unlock     = nullptr;
     cb.ctx        = nullptr;
     cb.maxRetries = 3;
-
-    // ② RegSinkKernel（SEG1 基准、PCIE 间接通道、不清断 SEG0 —— I13/I14）。
-    fw::RegSinkKernel sink(cb);
+    // RegSinkKernel（SEG1 基准、PCIE 间接通道、不清断 SEG0 —— I13/I14）。
+    fw::RegSinkKernel& sink = gBringupSink;
+    sink.setCallbacks(cb);
 
     // ③ BringupCtx：真实固件（toc_data/toc_size/fw_pri_buf 真值）。
-    fw::BringupCtx ctx{};
+    static fw::BringupCtx sCtx;
+    sCtx = fw::BringupCtx{};
+    fw::BringupCtx& ctx = sCtx;
     ctx.sink       = &sink;
     ctx.ring       = &ring;
     ctx.fw_pri_buf = fwPriVa;
@@ -503,7 +534,9 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
             NRED_TRACE("fw: load-asd asset-invalid, skipped");
         } else {
             // ① 解析 TA 头，取 ASD（desc[0]）切片偏移/大小
-            fw::TaBinDesc asd{};
+            static fw::TaBinDesc sAsd;
+            sAsd = fw::TaBinDesc{};
+            fw::TaBinDesc& asd = sAsd;
             const int parseRet = fw::parseTaAsd(kFwTaAsset.data, kFwTaAsset.size, &asd);
             if (parseRet != 0) {
                 NRED_TRACE("fw: load-asd parse fail ret=%d", parseRet);
@@ -553,3 +586,5 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
 }
 
 }  // namespace fw
+
+#pragma pop_macro("NRED_TRACE")

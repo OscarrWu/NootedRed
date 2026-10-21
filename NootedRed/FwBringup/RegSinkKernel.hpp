@@ -220,6 +220,11 @@ public:
                       "Phoenix SMN addresses must fit in 32 bits");
     }
 
+    // 232：供 static 实例使用（不再在 bringup 栈上构造）。调用方必须在首次 read/write 前
+    //  `setCallbacks()`；未设置时回调为空指针（read/write 会解引用空指针 ⇒ 调用方责任）。
+    RegSinkKernel() = default;
+    void setCallbacks(const SmnCallbacks& cb) { cb_ = cb; }
+
     // 设置段基址（dword 单位，如 kMpSeg0Base / kMpSeg1Base）。
     // 仅在构造后、首次 read/write 前调用；运行期不可重入。
     void setSegmentBase(uint32_t segBase) { segBase_ = segBase; }

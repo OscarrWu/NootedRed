@@ -40,8 +40,17 @@
 // 测试环境：NRED_TRACE 空实现（离线不落盘；kext 构建由 HWLibs.hpp 提供真宏）
 #define NRED_TRACE(fmt, ...) ((void)0)
 #endif
+// 232：本头文件内的 NRED_TRACE 改走 fwTrace（单份 static 行缓冲 + nredTraceLine，零 SYSLOG 栈）。
+//  用 push/pop 限定作用域 ⇒ 不影响包含者（HWLibs.cpp）在其后区域使用的全局 NRED_TRACE。
+#include "FwTraceLine.hpp"
+#pragma push_macro("NRED_TRACE")
+#undef NRED_TRACE
+#define NRED_TRACE(...) fwTrace(__VA_ARGS__)
 namespace fw {
 // =============================================================================
+// 232 栈修正：命令/响应缓冲（kCmdBufSize=1KB）合并为单个 static。
+//  前提：bringup 由调用方的一次性守卫保证单线程、每 boot 至多一次；各 execute* 用后即弃。
+static GfxCmdResp gCmdScratch;
 
 enum class BringupStep : uint32_t {
     None               = 0,
@@ -359,6 +368,7 @@ inline int tocPayloadSlice(const uint8_t* toc_data, uint32_t toc_size,
 ///   5. submit 到环
 ///   6. wait fence
 ///   7. 从 resp.tmr_size 读出 tmr_size
+__attribute__((noinline))
 inline int loadToc(display::RegSink& sink,
                    RingState* ring,
                    uint8_t* fw_pri_buf,
@@ -380,7 +390,7 @@ inline int loadToc(display::RegSink& sink,
     if (ret != 0) return ret;
 
     // 准备命令帧（toc_size = payload 长）
-    GfxCmdResp cmd;
+    GfxCmdResp& cmd = gCmdScratch;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
@@ -503,6 +513,7 @@ inline void prepTmrCmd(GfxCmdResp* cmd,
     cmd->cmd_payload[5]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
 }
 
+__attribute__((noinline))
 inline int tmrLoad(display::RegSink& sink,
                    RingState* ring,
                    uint64_t tmr_mc_addr,
@@ -510,7 +521,7 @@ inline int tmrLoad(display::RegSink& sink,
                    uint64_t cmd_buf_mc_addr,
                    uint64_t fence_mc_addr,
                    uint32_t* out_resp_status = nullptr) {
-    GfxCmdResp cmd;
+    GfxCmdResp& cmd = gCmdScratch;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
@@ -560,6 +571,7 @@ inline void prepLoadIpFwCmd(GfxCmdResp* cmd,
 /// M2 阶段可暂不调用，M4 必需。
 ///
 /// @return 0 成功；-1 超时/环错误；>0 TEE 错误码（解码后的响应状态）
+__attribute__((noinline))
 inline int executeLoadIpFw(display::RegSink& sink,
                            RingState* ring,
                            uint64_t fw_mc_addr,
@@ -567,7 +579,7 @@ inline int executeLoadIpFw(display::RegSink& sink,
                            uint32_t fw_type,
                            uint64_t cmd_buf_mc_addr,
                            uint64_t fence_mc_addr) {
-    GfxCmdResp cmd;
+    GfxCmdResp& cmd = gCmdScratch;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
@@ -686,6 +698,7 @@ inline void prepLoadAsdCmd(GfxCmdResp* cmd,
 /// 门控（asdLoadRequired）由调用方在 M4 决定；本原语默认可用。
 ///
 /// @return 0 成功；-1 超时/环错误；>0 TEE 错误码
+__attribute__((noinline))
 inline int executeLoadAsd(display::RegSink& sink,
                           RingState* ring,
                           const TaBinDesc& asd,
@@ -694,7 +707,7 @@ inline int executeLoadAsd(display::RegSink& sink,
                           uint64_t fence_mc_addr) {
     if (!asd.found) return -1;
 
-    GfxCmdResp cmd;
+    GfxCmdResp& cmd = gCmdScratch;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
@@ -736,7 +749,7 @@ inline int rlcAutoloadStart(display::RegSink& sink,
                             RingState* ring,
                             uint64_t cmd_buf_mc_addr,
                             uint64_t fence_mc_addr) {
-    GfxCmdResp cmd;
+    GfxCmdResp& cmd = gCmdScratch;
     for (uint32_t i = 0; i < kCmdBufSize / sizeof(uint32_t); ++i) {
         reinterpret_cast<uint32_t*>(&cmd)[i] = 0;
     }
@@ -796,6 +809,7 @@ inline int waitRlcAutoloadComplete(display::RegSink& sink,
 
 /// Phase 1: 运行到 TmrInit 完成（含），计算 tmr_size
 /// @return 0 成功，ctx->tmr_size 已填充；否则失败
+__attribute__((noinline))
 inline int bringupRunToTmrInit(BringupCtx* ctx,
                                bool boot_time_tmr,
                                bool autoload_supported,
@@ -887,6 +901,7 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
 /// Phase 2: 运行 TmrLoad (SETUP_TMR)，需 ctx->tmr_buf 已分配
 /// @param tmr_mc_addr TMR 物理地址（由调用方分配后填入）
 /// @return 0 成功，否则失败
+__attribute__((noinline))
 inline int bringupRunTmrLoad(BringupCtx* ctx,
                              bool boot_time_tmr,
                              bool autoload_supported,
@@ -963,5 +978,6 @@ inline int bringupRun(BringupCtx* ctx,
     return bringupRunTmrLoad(ctx, boot_time_tmr, autoload_supported,
                              tmr_mc, cmd_buf_mc_addr, fence_mc_addr);
 }
-
 } // namespace fw
+
+#pragma pop_macro("NRED_TRACE")

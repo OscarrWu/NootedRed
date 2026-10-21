@@ -48,6 +48,7 @@ struct TmrAddrReadout {
 // @param win_base  既有内存字段 fbLocationBase（0 ⇒ 尚未捕获）
 // @param win_size  既有内存字段 fbLocationSize（0 ⇒ 尚未捕获）
 // @param tmr_mc    用于对齐余数计算的地址（通常与 buf_phy 同）
+__attribute__((noinline))
 inline TmrAddrReadout runTmrAddrReadout(const uint64_t buf_phy, const uint64_t sys_phy,
                                         const uint32_t tmr_size, const uint64_t win_base,
                                         const uint64_t win_size, const uint64_t tmr_mc)

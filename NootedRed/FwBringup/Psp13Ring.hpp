@@ -220,6 +220,7 @@ inline const GfxCmdResp* cmdBufGet(const RingState* rs) {
 /// psp_cmd_submit_buf 前半部分 (amdgpu_psp.c:720-802)。
 ///
 /// @return 0 成功，-1 失败（帧位置越界）
+__attribute__((noinline))
 inline int ringSubmitFrame(RingState* rs,
                            display::RegSink& sink,
                            uint64_t cmd_buf_mc_addr,
@@ -273,6 +274,7 @@ inline int ringSubmitFrame(RingState* rs,
 ///    内存（fence 缓冲），本项目无 RegSink 级 HDP 原语（T5 报告 §3.5），
 ///    读侧一致性由调用方保证。
 /// @return 0 成功，-1 超时
+__attribute__((noinline))
 inline int ringWaitForFence(const RingState* rs,
                             display::RegSink& sink,
                             uint32_t index) {
