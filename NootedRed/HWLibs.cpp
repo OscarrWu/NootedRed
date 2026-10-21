@@ -267,6 +267,13 @@ static UInt32 gMesCode = 0xFFFFFFU;              // 0x48632(obj+0x6c) 现场读�
 static UInt64 gMesP790 = 0;                      // 0x441ad 之后的 *(u64*)(obj+0x790)
 static UInt64 gMesP7B0 = 0;                      // 0x441ad 之后的 *(u64*)(obj+0x7b0)
 static UInt32 gMesRet  = 0xFFFFFFFFU;            // 0x441ad 返回值（未调用＝哨兵）
+// 254（`-NRedMesB`，默认关）：b 系列最小真实描述符（4 pipe × 0x28B；+0x10＝固件头 uc_start_addr_lo）。
+static bool   gMesB = false;
+static UInt8  sMesBDesc[4][0x28];
+static bool   sMesBInit = false;
+static UInt32 gMesBCode = 0xFFFFFFU;
+static UInt64 gMesBP790 = 0;
+static UInt64 gMesBV10  = 0;
 // R175：模块 9（VCN）实实现的观测载体（BSS 标量；`0xFF…FF`＝"未读到"哨兵）。
 //  产出条件＝`gVcnN != 0`；成功时 st=00。
 static UInt32 gVcnN    = 0;                       // 本实现被调次数（`[swvcn] n=`）
@@ -751,6 +758,17 @@ static void nredMesStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 254：`[mesb]` b 系列提供者观测行（noinline、零解引用）。
+__attribute__((noinline))
+static void nredMesBStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[mesb] code=%x p790=%llx v10=%llx\n",
+                           static_cast<unsigned>(gMesBCode),
+                           static_cast<unsigned long long>(gMesBP790),
+                           static_cast<unsigned long long>(gMesBV10));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -866,6 +884,8 @@ int nredTraceFlush(int secTag)
     if (gSt1B && off < sizeof(body)) { nredSt1BStamp(body, off, sizeof(body) - off); }
     // 253：`[mes]` MES stage0 真实路径观测（仅 -NRedMesReal；关态一字不变）。
     if (gMesReal && off < sizeof(body)) { nredMesStamp(body, off, sizeof(body) - off); }
+    // 254：`[mesb]` b 系列提供者观测（仅 -NRedMesB；关态一字不变）。
+    if (gMesB && off < sizeof(body)) { nredMesBStamp(body, off, sizeof(body) - off); }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
     //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
@@ -4927,7 +4947,35 @@ static int nredMesSwInit(void* const p1, void* const p2)
     //  ⚠ 两个 code 实参**必须按原件取 8 字节**：`42fbe movq 108(%rdi),%rsi` / `42fc2 movq 116(%rdi),%rdx`
     //    （0x48632 按 `p[0]<<16 | p[1]<<8 | p[2]` 取三个相邻 u32；只传两个 u32 会丢 `obj+0x70` 那一位）。
     *reinterpret_cast<UInt32*>(P2 + 8) = 0;                                    // W2（两路径共用）
-    if (gMesReal) {
+    if (gMesB) {
+        // 254（`-NRedMesB`）：b 系列提供者。仅当 code 属 b 系列（(code>>16)==0x0b）才提供；
+        //  否则 fail-closed（不伪造成 a 系列描述符）。不调用 0x441ad、不写 MMIO。
+        const UInt32 codeBclass = fnCode(reinterpret_cast<const void*>(obj + 0x6C));
+        gMesBCode = codeBclass;
+        if ((codeBclass >> 16) != 0x0BU) {
+            gGvmBook.failMask |= (1U << 12); gM14Step = 0x05; return kSwResStepFail;   // 6
+        }
+        if (!sMesBInit) {
+            for (unsigned i = 0; i < 4; ++i) {
+                *reinterpret_cast<UInt32*>(sMesBDesc[i] + 0x10) = 0xF0005000U;   // uc_start_addr_lo
+            }
+            sMesBInit = true;
+        }
+        for (unsigned i = 0; i < 4; ++i) {
+            *reinterpret_cast<UInt64*>(obj + 0x790 + i * 8) =
+                reinterpret_cast<UInt64>(sMesBDesc[i]);
+        }
+        *reinterpret_cast<UInt64*>(obj + 0x7B0) = 0;   // b 系列无 0x43d4f 子对象
+        gMesBP790 = *reinterpret_cast<const UInt64*>(obj + 0x790);
+        gMesBV10 = (gMesBP790 != 0)
+            ? *reinterpret_cast<const UInt32*>(reinterpret_cast<const UInt8*>(gMesBP790) + 0x10) : 0;
+        for (unsigned i = 0; i < 4; ++i) {
+            if (*reinterpret_cast<const UInt64*>(obj + 0x790 + i * 8) == 0) {
+                gGvmBook.failMask |= (1U << 12); gM14Step = 0x05; return kSwResStepFail;   // 6
+            }
+        }
+    }
+    else if (gMesReal) {
         using NRedMes441ad = int (*)(void*, UInt64, UInt64, void*);
         const NRedMes441ad fn441ad = reinterpret_cast<NRedMes441ad>(gHwlibsSlide + 0x441AD);
         const UInt64 codeA = *reinterpret_cast<const UInt64*>(obj + 0x6C);
@@ -5657,6 +5705,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1B = checkKernelArgument("-NRedSt1B");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
     gMesReal = checkKernelArgument("-NRedMesReal");
+    // 254：MES b 系列提供者（默认关）。仅构造静态描述符并挂到 +0x790；不调 0x441ad、不写 MMIO。
+    gMesB = checkKernelArgument("-NRedMesB");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
