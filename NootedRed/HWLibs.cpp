@@ -4866,10 +4866,10 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 //  规格 `tmp/tech-manager/R-client7只读探针规格-2026-10-21.md` §1/§2。
 //  链：ctx → P7=*(ctx+0x40) → handle=*(P7+0x28) → svc=*(handle+8)；每级先 `nredKernelPtrOk`，
 //  失败即记 0 并停止（不再解引用）。本函数不写非 BSS 内存、不跟随函数指针、无等待/轮询。
-//  247：同页边界保护——`nredKernelPtrOk` 只校验高半区，不保证映射/长度；故每个槽仅在
-//    `pageOff + off + 8 <= 0x1000` 时读，否则记 0（任何槽都不跨出 svc 所在页）。
-//    `pageOff > 0xED8`（9 槽整段会越页）⇒ 置 `gSt1SkipHigh=1`，高位槽按上式自然记 0。
-//  槽读取独立成 noinline 帧，保持探针本体栈帧不变（247 页面边界判断）。
+//  247：同页边界保护——`nredKernelPtrOk` 只校验高半区，不保证映射/长度。
+//    ① `pageOff > 0xED8`（9 槽整段会越页）⇒ 置 `gSt1SkipHigh=1`，**高位槽整段记 0**；
+//    ② 其余槽仍逐个按 `pageOff + off + 8 <= 0x1000` 判断（`pageOff>0xFB8` 时低槽也会越页）。
+//  槽读取独立成 noinline 帧，保持探针本体栈帧不变。
 __attribute__((noinline))
 static void nredStage1WSlots(const UInt8* const svc)
 {
@@ -4877,6 +4877,7 @@ static void nredStage1WSlots(const UInt8* const svc)
     if (pageOff > 0xED8ULL) { gSt1SkipHigh = 1; }
     static const UInt32 kOff[9] = {0x10, 0x18, 0x20, 0x38, 0x40, 0x90, 0x100, 0x118, 0x120};
     for (unsigned k = 0; k < 9; ++k) {
+        if (gSt1SkipHigh != 0 && k >= 5) { continue; }   // 规格：高位槽整段跳过
         if (pageOff + kOff[k] + 8ULL <= 0x1000ULL) {
             gSt1S[k] = *reinterpret_cast<const UInt64*>(svc + kOff[k]);
         }
