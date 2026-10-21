@@ -2654,7 +2654,7 @@ static void nredBgmCmdLine(const void* const self, void* const* const out, const
     void* method = nullptr;
     unsigned bad = 0;
     if (nredKernelPtrOk(self)) {
-        provB = *reinterpret_cast<void**>(const_cast<void*>(self) + 0x148);
+        provB = *reinterpret_cast<void* const*>(static_cast<const UInt8*>(self) + 0x148);
         if (nredKernelPtrOk(provB)) {
             target = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 8);
             method = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 0x10);
