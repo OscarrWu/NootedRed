@@ -2693,6 +2693,28 @@ static void nredBgmTabHex(const UInt8* const p, const UInt32 len, const unsigned
     }
 }
 
+// 236：表头解析 + 首行输出独立成帧（降低 wrapBgmTabRead 帧到 ≤128 B）。
+__attribute__((noinline))
+static void nredBgmTabReport(const UInt8* const p, const UInt32 len, const unsigned selU,
+                             const char* const pre, const UInt32 ret)
+{
+    auto rd32 = [p, len](const UInt32 off) -> UInt32 {
+        if (static_cast<UInt64>(off) + 4 > len) { return 0; }
+        return *reinterpret_cast<const UInt32*>(p + off);
+    };
+    const UInt32 hdr = rd32(0x00);
+    const UInt32 ver = (len >= 6) ? static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x04)) : 0;
+    const UInt32 ipds = rd32(rd32(0x0C));      // p+ipds_off 处魔数（越界 ⇒ 0）
+    const UInt32 harv = rd32(rd32(0x1C));      // p+harv_off 处魔数
+    UInt32 sum = 0;
+    for (UInt32 i = 0; i < len; ++i) { sum += p[i]; }
+    fw::fwTrace("[bgmtab] %s hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0", pre,
+                static_cast<unsigned>(hdr), static_cast<unsigned>(ver), static_cast<unsigned>(ipds),
+                static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
+                static_cast<int>(ret));
+    nredBgmTabHex(p, len, selU);
+}
+
 // ─── 230：BGM 表区转储（`-NRedBgmTab`，默认关）───────────────────────────────────
 //  挂点 0x29b4e2（服务读方法，无符号，pattern 路由）。原型（反汇编 29b4e2–29b56d）：
 //    `UInt32 f(void* self, UInt32 sel, UInt64 size, void** out)`；
@@ -2742,24 +2764,7 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
         gBgm64Once1 = true;
         nredBgm64Dump(1, p, len);
     }
-    auto rd32 = [p, len](const UInt32 off) -> UInt32 {
-        if (static_cast<UInt64>(off) + 4 > len) { return 0; }
-        return *reinterpret_cast<const UInt32*>(p + off);
-    };
-    const UInt32 hdr = rd32(0x00);
-    const UInt32 ver = (len >= 6) ? static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x04)) : 0;
-    const UInt32 ipds = rd32(rd32(0x0C));      // p+ipds_off 处魔数（越界 ⇒ 0）
-    const UInt32 harv = rd32(rd32(0x1C));      // p+harv_off 处魔数
-    UInt32 sum = 0;
-    for (UInt32 i = 0; i < len; ++i) { sum += p[i]; }
-
-    fw::fwTrace("[bgmtab] %s hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0", pre,
-               static_cast<unsigned>(hdr), static_cast<unsigned>(ver), static_cast<unsigned>(ipds),
-               static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
-               static_cast<int>(ret));
-
-    // 前 256B 分块（独立 noinline 帧，见 nredBgmTabHex）。
-    nredBgmTabHex(p, len, selU);
+    nredBgmTabReport(p, len, selU, pre, ret);
     return ret;
 }
 
