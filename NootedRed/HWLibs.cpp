@@ -653,13 +653,19 @@ static void nredSt1OStamp(char* const body, size_t& off, const size_t cap)
 }
 
 // 250：`[st1g]` 开关状态行——**本轮诊断常开**（定位后应改回“仅 gSt1O 时输出”）。
+//  固定 23 字节模板直接落缓冲（不用 snprintf：避免 4 个变参的溢出槽，函数帧 ≤64 B）。
 __attribute__((noinline))
 static void nredSt1GStamp(char* const body, size_t& off, const size_t cap)
 {
-    const int n = snprintf(body + off, cap, "[st1g] p=%u w=%u o=%u s=%u\n",
-                           gSt1Pre ? 1u : 0u, (gSt1W || gSt1W2) ? 1u : 0u,
-                           gSt1O ? 1u : 0u, gStage1 ? 1u : 0u);
-    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+    static const char kTpl[] = "[st1g] p=0 w=0 o=0 s=0\n";
+    static_assert(sizeof(kTpl) == 24, "st1g line length");
+    if (cap < sizeof(kTpl) - 1) { return; }
+    __builtin_memcpy(body + off, kTpl, sizeof(kTpl) - 1);
+    body[off + 9]  = static_cast<char>('0' + (gSt1Pre ? 1 : 0));
+    body[off + 13] = static_cast<char>('0' + ((gSt1W || gSt1W2) ? 1 : 0));
+    body[off + 17] = static_cast<char>('0' + (gSt1O ? 1 : 0));
+    body[off + 21] = static_cast<char>('0' + (gStage1 ? 1 : 0));
+    off += sizeof(kTpl) - 1;
 }
 
 int nredTraceFlush(int secTag)
