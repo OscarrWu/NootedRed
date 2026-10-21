@@ -148,6 +148,18 @@ static bool   gBgm64Once1 = false;       // P1 只采一次（64KB 初次读）
 static bool   gBgm64Once2 = false;       // P2 只采一次（64KB memcpy）
 static bool   gBgm64Once4 = false;       // P4 只采一次（唯一调用点）
 static UInt32 gBgm64LoopN = 0;           // P3 调用计数（热路径限流）
+// 238（`-NRedBgmReal`，默认关）：用本机真实 Phoenix 容器接管 `0x29b4e2` 的 64KB 读。
+// 数据来源：b21 转储（md5 7100b6b18a9b99c8ccb219f3a90ae56a）经 `--fix-mode drop` 修正：
+//   仅删除 4 条 nbase 越界条目（num_ips 39→35），其余逐字节来自本机；
+//   成品 md5 = 10b766afba00fde16c3b263e423ddc7c，长度 65536 B。
+// ⚠ 必须放**可写**段（非 const）：防苹果侧任何写入落到只读段引发 fault。
+static UInt8 gBgmRealContainer[65536] = {
+#embed "Firmware/bgm_phoenix_fixed.bin"
+};
+static_assert(sizeof(gBgmRealContainer) == 65536, "BGM real container size must be 65536");
+static const UInt64 kBgmRealFnv1a64 = 0x2A8B614310F42766ULL;   // FNV-1a64（离线对成品文件计算）
+static bool   gBgmReal = false;
+static SInt32 gBgmRealCheck = -1;        // -1 未校验、0 fail、1 ok
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -2704,8 +2716,9 @@ static void nredBgmTabReport(const UInt8* const p, const UInt32 len, const unsig
     };
     const UInt32 hdr = rd32(0x00);
     const UInt32 ver = (len >= 6) ? static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x04)) : 0;
-    const UInt32 ipds = rd32(rd32(0x0C));      // p+ipds_off 处魔数（越界 ⇒ 0）
-    const UInt32 harv = rd32(rd32(0x1C));      // p+harv_off 处魔数
+    // 238 修正：ipds/harv 偏移字段是 **u16**（0x2ab00e 用 movzwl 12/28 读取；此前按 u32 读是错的）。
+    const UInt32 ipds = rd32(static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x0C)));
+    const UInt32 harv = rd32(static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x1C)));
     UInt32 sum = 0;
     for (UInt32 i = 0; i < len; ++i) { sum += p[i]; }
     fw::fwTrace("[bgmtab] %s hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0", pre,
@@ -2713,6 +2726,40 @@ static void nredBgmTabReport(const UInt8* const p, const UInt32 len, const unsig
                 static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
                 static_cast<int>(ret));
     nredBgmTabHex(p, len, selU);
+}
+
+// 238：真实容器自检与接管日志（noinline，避免把 wrapBgmTabRead 帧推过 128 B）。
+__attribute__((noinline))
+static UInt64 nredBgmRealFnv1a64(const UInt8* const p, const UInt32 n)
+{
+    UInt64 h = 0xCBF29CE484222325ULL;
+    for (UInt32 i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 0x100000001B3ULL;
+    }
+    return h;
+}
+
+// 输出 `[bgm] src=real … selfcheck=ok`；字段按实施文档 §4（sig/ver/ipds/harv/sum）。
+// sum＝前 65536 字节的 32 位字节和（文档允许“32 位简单和”）。
+__attribute__((noinline))
+static void nredBgmRealLog(const UInt8* const p)
+{
+    auto rd32 = [p](const UInt32 off) -> UInt32 {
+        return *reinterpret_cast<const UInt32*>(p + off);
+    };
+    // 注意：ipds/harv 偏移是 **u16**（校验器 0x2ab00e 用 movzwl 12/28 读取）。
+    const UInt32 ipdsOff = static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x0C));
+    const UInt32 harvOff = static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x1C));
+    const UInt32 sig = rd32(0x00);
+    const UInt32 ver = static_cast<UInt32>(*reinterpret_cast<const UInt16*>(p + 0x04));
+    const UInt32 ipds = rd32(ipdsOff);
+    const UInt32 harv = rd32(harvOff);
+    UInt32 sum = 0;
+    for (UInt32 i = 0; i < 65536u; ++i) { sum += p[i]; }
+    fw::fwTrace("[bgm] src=real len=65536 sig=%08X ver=%u ipds=%08X harv=%08X sum=%08X selfcheck=ok",
+                static_cast<unsigned>(sig), static_cast<unsigned>(ver), static_cast<unsigned>(ipds),
+                static_cast<unsigned>(harv), static_cast<unsigned>(sum));
 }
 
 // ─── 230：BGM 表区转储（`-NRedBgmTab`，默认关）───────────────────────────────────
@@ -2726,6 +2773,21 @@ static void nredBgmTabReport(const UInt8* const p, const UInt32 len, const unsig
 //    不建 64KB 栈缓冲；前 256B 按 32B/行分 8 行输出，单行 ≤ 128B 缓冲。
 UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UInt64 size, void** const out)
 {
+    // ── 238：真实 Phoenix 容器接管（先于原件）──────────────────────────────────────────────
+    //  匹配条件与 0x2aad49 的 64KB 读完全一致（sel=0/size=0x10000）；其它请求逐字透传。
+    //  自检：首次调用时对数组算 FNV-1a64，与编译期常量比对（不符则不接管，回退原件）。
+    if (gBgmReal && sel == 0 && size == 0x10000ULL && out != nullptr && nredKernelPtrOk(out)) {
+        if (gBgmRealCheck < 0) {
+            gBgmRealCheck = (nredBgmRealFnv1a64(gBgmRealContainer, 65536u) == kBgmRealFnv1a64) ? 1 : 0;
+        }
+        if (gBgmRealCheck == 1) {
+            *out = gBgmRealContainer;
+            nredBgmRealLog(gBgmRealContainer);
+            return 0;   // 与原件语义一致：0=成功
+        }
+        fw::fwTrace("[bgm] src=real len=65536 selfcheck=fail");
+        // 自检失败 ⇒ 不接管，继续走原件（保持关态/异常态行为可预测）。
+    }
     const UInt32 ret = FunctionCast(wrapBgmTabRead, singleton().orgBgmTabRead)(self, sel, size, out);
     if (!gBgmTab) { return ret; }   // 理论不可达（门控关不安装）；双保险
     // 233：调用点归因。pattern 路由后调用者仍是 `call 0x29b4e2` ⇒ `__builtin_return_address(0)`
@@ -2822,6 +2884,8 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         nredBgm64Dump(4, b, 0x10000);
     }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
+    // 238：验证器返回值（与“表被接受”分开记录；仅真实容器开关时输出，走 trace-only 通道）。
+    if (gBgmReal) { fw::fwTrace("[bgm] verifier_ret=%d", static_cast<int>(ret)); }
     // 只读观测：`0x2ab00e` 的第 2 形参是一个 64 KiB 缓冲，函数内部按其构造的 **IP 发现表**做校验
     // （`"IPDS"`/`"HARV"` 魔数 + 三段校验和 + 每块 `num_base_address ∈ {1..6}`）。
     // ⚠️ **每次调用只输出这一行、且放在调用之后**：① 多行会被 L2 环形缓冲吞掉（第 8/9 轮实测）；
@@ -5060,6 +5124,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gBgmTab = checkKernelArgument("-NRedBgmTab");
     // 235：BGM 64K 捕获取样（默认关）。P3/P4 复用既有 wrapper，仅此开关控制取样。
     gBgm64 = checkKernelArgument("-NRedBgm64");
+    // 238：真实容器接管（默认关）。仅当此开关或 -NRedBgmTab 开时需要安装 0x29b4e2 路由。
+    gBgmReal = checkKernelArgument("-NRedBgmReal");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
@@ -5399,7 +5465,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         {
             bool ok = false;
             mach_vm_address_t addr = 0;
-            if (gBgmTab) {
+            if (gBgmTab || gBgmReal) {
                 if (const auto from = resolveProbe("bgm-tab", kBgmTabReadPattern, nullptr,
                                                    arrsize(kBgmTabReadPattern), 0x29B4E2)) {
                     ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmTabRead, this->orgBgmTabRead},
