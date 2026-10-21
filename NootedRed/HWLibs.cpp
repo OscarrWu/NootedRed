@@ -182,6 +182,11 @@ static bool gSt1Pre = false;
 static UInt32 gSt1Mask  = 0;   // bit i = client i 一级对象存在且指针合法（i∈{2,5,6,7,8,9,14}）
 static UInt32 gSt1N     = 0;   // 预检调用次数（饱和 255）
 static UInt32 gSt1CtxOk = 0;   // ctx 合法 = 1
+// 244（`-NRedStage1`，默认关）：stage1 首批放行（仅 client 14）及观测标量。
+static bool   gStage1   = false;
+static UInt32 gSt1Try   = 0;   // 放行尝试过的 client 位图
+static UInt32 gSt1Ret0  = 0;   // 返回 0 的 client 位图（前置失败或叶返回 0）
+static UInt32 gSt1RunN  = 0;   // 放行尝试次数（饱和 255）
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -550,6 +555,16 @@ static void nredSt1mStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 244：`[st1r]` 头部行（放行观测；独立 noinline 帧，零解引用）。
+__attribute__((noinline))
+static void nredSt1rStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[st1r] mask=%04x ret0=%04x n=%u\n",
+                           static_cast<unsigned>(gSt1Try), static_cast<unsigned>(gSt1Ret0),
+                           static_cast<unsigned>(gSt1RunN));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -647,6 +662,8 @@ int nredTraceFlush(int secTag)
     // 243：`[st1m]` 头部戳记（stage1 预检结果；仅 -NRedSt1Pre 时输出，关态一字不变）。
     //  **零解引用**：只读 gSt1Mask/gSt1CtxOk/gSt1N 三个 BSS 标量；单行约 32 字符。
     if (gSt1Pre && off < sizeof(body)) { nredSt1mStamp(body, off, sizeof(body) - off); }
+    // 244：`[st1r]` 放行观测（仅 -NRedStage1；关态一字不变）。
+    if (gStage1 && off < sizeof(body)) { nredSt1rStamp(body, off, sizeof(body) - off); }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
     //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
@@ -4767,6 +4784,21 @@ static void nredStage1Precheck(const void* const ctx)
     if (gSt1N < 255) { ++gSt1N; }
 }
 
+// ─── 244：stage1 放行前置检查（`-NRedStage1`，批 1 只实现 client 14／MES）──────────────
+//  规格 `tmp/tech-manager/R-stage1放行规格-批1-2026-10-21.md` §1/§2：
+//   ① P14＝*(ctx+0x78)≠0  ② *(P14+0x18)≠0  ③ *(P14+0x28)≠0。
+//  每条都先 `nredKernelPtrOk` 再读固定偏移；不跟随函数指针、不调用任何东西 ⇒ 检查自身不 trap。
+//  返回 false ⇒ 调用方按苹果极性 `return 0`（并置 `gSt1Ret0` 位）。
+static bool nredStage1Guard(const void* const ctx, const UInt32 client)
+{
+    if (client != 14 || !nredKernelPtrOk(ctx)) { return false; }
+    const UInt8* const p14 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x78);
+    if (!nredKernelPtrOk(p14)) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p14 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p14 + 0x28) == 0) { return false; }
+    return true;
+}
+
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
@@ -4791,6 +4823,21 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //     （`92a78 testb`／`92a7a je 0x92a97` → `0x92e71 logSwipFailure` → 置 `obj+0xa0` 失败位）。
     //     **此处 0 表示失败**（与 `kSwRes*` 的"0=成功"相反）。护栏在本 wrapper 内直接返回、不进入
     //     `NRedSwInitDispatch` ⇒ 不会把 0 记进 `gSwResById`（保持原值，通常 0xFF）；命中记 `gGrdLastHit=1`。
+    // ── 244：stage1 首批放行（`-NRedStage1`，默认关；批 1 仅 client 14）────────────────────
+    //  关 ⇒ 本块不成立，行为与逐字不变的 `c>=1` fail-closed 护栏一致。
+    //  开且 c==1 ⇒ 先跑前置检查；通过才调用原件并**原样返回其返回值**（真实执行 stage1）。
+    //  其余 client（2/5/6/7/8/9/…）guard 恒 false ⇒ 仍落到下面的守卫 `return 0`。
+    if (gStage1 && c == 1) {
+        if (!nredStage1Guard(a, b)) {
+            gSt1Ret0 |= (1U << b);
+            return 0;   // 苹果极性：0＝失败
+        }
+        gSt1Try |= (1U << b);
+        if (gSt1RunN < 255) { ++gSt1RunN; }
+        const UInt32 retSt1 = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
+        if (retSt1 == 0) { gSt1Ret0 |= (1U << b); }   // 叶返回失败也计入 ret0
+        return retSt1;
+    }
     if ((b == 10 && c == 0) || (c >= 1) ||
         (b == 15 && c == 0 && !(gSwInstalled[15].installed && (gSwInitIdsMask & (1U << 15)) != 0))) {
         gGrdLastHit = 1;
@@ -5235,6 +5282,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gBgmHw = checkKernelArgument("-NRedBgmHw");
     // 242：stage1 预检（默认关）。只影响护栏分支内的只读观测。
     gSt1Pre = checkKernelArgument("-NRedSt1Pre");
+    // 244：stage1 首批放行（默认关；仅 client 14 通过前置检查后调用原件）。
+    gStage1 = checkKernelArgument("-NRedStage1");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
