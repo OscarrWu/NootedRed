@@ -2044,14 +2044,15 @@ bool X5000HWLibs::wrapGc7Install(void* const ctx, const UInt32 sel, void* const 
     return ret;
 }
 
-void X5000HWLibs::wrapGc7SetSlot(void* const obj, const UInt32 id, const UInt64 val)
+UInt32 X5000HWLibs::wrapGc7SetSlot(void* const obj, const UInt32 id, const UInt64 val)
 {
-    FunctionCast(wrapGc7SetSlot, singleton().orgGc7SetSlot)(obj, id, val);
+    const UInt32 ret = FunctionCast(wrapGc7SetSlot, singleton().orgGc7SetSlot)(obj, id, val);
     if (gGc7 && val == 0 && id == 7 && gGc7xSeen == 0) {
         gGc7xSlot = id;
         gGc7xVal = val;
         gGc7xSeen = 1;
     }
+    return ret;   // 原件 eax=id；原样透传，避免改变调用方可见的返回值
 }
 
 // B81 观测点 A：拦截 Apple 就绪门谓词 0x6839e（读 C2PMSG_90(0x29A)→setne→ret al）。
