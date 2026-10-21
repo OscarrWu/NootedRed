@@ -108,6 +108,11 @@ struct NredSyslogMuteGuard {
 //  `RegSinkKernel` 无拷贝但可默认构造 + `setCallbacks()` ⇒ 不再在 hook 栈上构造（省 ~100 B）。
 static fw::SmnCallbacks gBringupCb;
 static fw::RegSinkKernel gBringupSink;
+// ⚠ 必须是**命名空间作用域**而不是函数内 static：带 NSDMI 的类型（BringupCtx）在函数内
+//   会要求 guard variable（内核不支持，CI run456 已证）⇒ 一律放在这里；进入时显式重置。
+static fw::RingState   gBringupRing;
+static fw::BringupCtx  gBringupCtx;
+static fw::TaBinDesc   gBringupAsd;
 
 // 232：实际 bringup 主体（从 hook 拆分，独立栈帧；hook 只留入口标记/守卫，帧 ≤512 B）。
 __attribute__((noinline))
@@ -315,9 +320,8 @@ static void nredBringupBody()
     bzero(fwPriVa, kFwPriBytes);
 
     // 232 栈修正：状态对象改 static（引导期单线程 + bringupAttempted 守卫）；每次进入显式清零。
-    static fw::RingState sRing;
-    sRing = fw::RingState{};
-    fw::RingState& ring = sRing;
+    gBringupRing = fw::RingState{};
+    fw::RingState& ring = gBringupRing;
     fw::ringInit(&ring, ringVa, cmdVa, fenceVa);
 
     // ① SmnCallbacks / ② RegSinkKernel：static 实例（232 栈修正；每次进入重置回调后重设）。
@@ -335,9 +339,8 @@ static void nredBringupBody()
     sink.setCallbacks(cb);
 
     // ③ BringupCtx：真实固件（toc_data/toc_size/fw_pri_buf 真值）。
-    static fw::BringupCtx sCtx;
-    sCtx = fw::BringupCtx{};
-    fw::BringupCtx& ctx = sCtx;
+    gBringupCtx = fw::BringupCtx{};
+    fw::BringupCtx& ctx = gBringupCtx;
     ctx.sink       = &sink;
     ctx.ring       = &ring;
     ctx.fw_pri_buf = fwPriVa;
@@ -534,9 +537,8 @@ static void nredBringupBody()
             NRED_TRACE("fw: load-asd asset-invalid, skipped");
         } else {
             // ① 解析 TA 头，取 ASD（desc[0]）切片偏移/大小
-            static fw::TaBinDesc sAsd;
-            sAsd = fw::TaBinDesc{};
-            fw::TaBinDesc& asd = sAsd;
+            gBringupAsd = fw::TaBinDesc{};
+            fw::TaBinDesc& asd = gBringupAsd;
             const int parseRet = fw::parseTaAsd(kFwTaAsset.data, kFwTaAsset.size, &asd);
             if (parseRet != 0) {
                 NRED_TRACE("fw: load-asd parse fail ret=%d", parseRet);
