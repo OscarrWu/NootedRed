@@ -196,6 +196,7 @@ static UInt64 gSt1M790 = 0;   // ⑤ *(MES+0x790)
 static bool   gSt1W    = false;
 static UInt64 gSt1P7   = 0;   // *(ctx+0x40)
 static UInt64 gSt1P3   = 0;   // 255：*(ctx+0x20)（client 7 stage1 唯一硬 fault 依赖）
+static UInt64 gSt1B3P3  = 0;  // 258：client 3 分支读到的 P3（供 `[st1b3]` 头部行）
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -816,6 +817,15 @@ static void nredSt1PStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 258：`[st1b3]` client 3 分支读到的 P3（noinline、零解引用）。
+__attribute__((noinline))
+static void nredSt1B3Stamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[st1b3] p3=%llx\n",
+                           static_cast<unsigned long long>(gSt1B3P3));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -944,6 +954,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1rStamp(body, off, sizeof(body) - off); }
     // 245：`[st1v]` 补充观测（仅 -NRedStage1；值来自 guard 内读数，头部零解引用）。
     if (gStage1 && off < sizeof(body)) { nredSt1vStamp(body, off, sizeof(body) - off); }
+    // 258：`[st1b3]` client 3 的 P3（仅 -NRedStage1）。
+    if (gStage1 && off < sizeof(body)) { nredSt1B3Stamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
     if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // 248：槽值行独立开关（-NRedSt1W2）；W 开而 W2 关 ⇒ 不 deref svc、不输出这两行。
@@ -5169,7 +5181,36 @@ static void nredStage1Precheck(const void* const ctx)
     if (gSt1N < 255) { ++gSt1N; }
 }
 
-// ─── 244/245/255：stage1 放行前置检查（`-NRedStage1`；白名单 {7,14}）─────────────────────
+// ─── 258：client 3（BGM）stage1 前置检查（11 条；规格 `tmp/tech/R-client3-stage1叶-2026-10-22.md` §4）
+//   ① ctx KPtr ② P3=*(ctx+0x20) KPtr ③ *(P3+0x18) ④ *(P3+0x28) ⑤ X=*(P3) KPtr
+//   ⑥ Y=*(X) KPtr ⑦ Z=*(Y) KPtr ⑧ provider=*(Z+0x28) KPtr ⑨ *(P3+0x30) ⑩ *(P3+0x40)
+//   ⑪ *(provider+0x268)。每级先校验上一级指针再读固定偏移；不跟随函数指针、不调用苹果方法。
+//   独立 noinline 帧，保持 `nredStage1Guard` 分派帧不变。
+__attribute__((noinline))
+static bool nredStage1Guard3(const void* const ctx)
+{
+    gSt1B3P3 = 0;
+    if (!nredKernelPtrOk(ctx)) { return false; }
+    const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
+    if (!nredKernelPtrOk(p3)) { return false; }
+    gSt1B3P3 = reinterpret_cast<UInt64>(p3);
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x28) == 0) { return false; }
+    const UInt8* const x = *reinterpret_cast<const UInt8* const*>(p3);
+    if (!nredKernelPtrOk(x)) { return false; }
+    const UInt8* const y = *reinterpret_cast<const UInt8* const*>(x);
+    if (!nredKernelPtrOk(y)) { return false; }
+    const UInt8* const z = *reinterpret_cast<const UInt8* const*>(y);
+    if (!nredKernelPtrOk(z)) { return false; }
+    const UInt8* const prov = *reinterpret_cast<const UInt8* const*>(z + 0x28);
+    if (!nredKernelPtrOk(prov)) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x30) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p3 + 0x40) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(prov + 0x268) == 0) { return false; }
+    return true;
+}
+
+// ─── 244/245/255/258：stage1 放行前置检查（`-NRedStage1`；白名单 {3,7,14}）────────────────
 //  client 7（255，规格 `kb/技术草案/R-stage1放行规格-client7-2026-10-21.md` §1，5 跳顺序执行）：
 //   ① ctx 过 KPtr ② P7=*(ctx+0x40) 非空且过 KPtr ③ *(P7+0x18)≠0 ④ *(P7+0x28)≠0
 //   ⑤ P3=*(ctx+0x20) 非空且过 KPtr（唯一硬 fault 依赖：0x97665 读 P3+0x50）。
@@ -5177,8 +5218,14 @@ static void nredStage1Precheck(const void* const ctx)
 //   ④ *(MES+0x08) ⑤ *(MES+0x790)；代码保留（当前默认路径下 G5 恒 0 ⇒ 不生效）。
 //  每条都先 `nredKernelPtrOk` 校验上一级指针再读固定偏移；不跟随函数指针、不调用任何东西。
 //  读出值存入 BSS（头部行零解引用）；返回 false ⇒ 调用方按苹果极性 `return 0`。
+
 static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 {
+    if (client == 3) {   // 258：11 条前置（见 nredStage1Guard3）
+        if (!nredStage1Guard3(ctx)) { return false; }
+        gSt1Try |= (1U << 3);
+        return true;
+    }
     if (client == 7) {
         gSt1P7 = 0;
         gSt1P3 = 0;
