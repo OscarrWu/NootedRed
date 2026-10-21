@@ -200,6 +200,11 @@ static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
 static UInt32 gSt1SkipHigh = 0;   // 247：pageOff>0xED8 ⇒ 1（高位槽因越页被跳过）
 static bool   gSt1W2   = false;  // 248：槽值探针（deref svc；默认关，与 gSt1W 独立）
+// 249（`-NRedSt1O`，默认关）：对齐观测——每 client「首次」与「p 变化」各一条，总 ≤14 条。
+struct NRedSt1ORec { UInt64 ctx; UInt64 p; UInt32 seq; UInt32 used; };
+static bool        gSt1O = false;
+static NRedSt1ORec gSt1ORec[7][2];   // 7 个 client × 至多 2 条
+static UInt8       gSt1OSeq[7];      // 逐 client 调用序号（饱和 255）
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -618,6 +623,28 @@ static void nredSt1W2Stamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
 }
 
+// 249：`[st1o]` 头部行（最多 14 条；noinline、零解引用）。
+__attribute__((noinline))
+static void nredSt1OStamp(char* const body, size_t& off, const size_t cap)
+{
+    static const UInt8 kIds[7] = {2, 5, 6, 7, 8, 9, 14};
+    size_t room = cap;
+    for (unsigned i = 0; i < 7; ++i) {
+        for (unsigned s = 0; s < 2; ++s) {
+            const NRedSt1ORec& r = gSt1ORec[i][s];
+            if (r.used == 0 || room == 0) { continue; }
+            const unsigned aok = nredKernelPtrOk(reinterpret_cast<const void*>(r.ctx)) ? 1u : 0u;
+            const int n = snprintf(body + off, room, "[st1o] c=%u aok=%u ctx=%llx p=%llx seq=%u\n",
+                                   static_cast<unsigned>(kIds[i]), aok,
+                                   static_cast<unsigned long long>(r.ctx),
+                                   static_cast<unsigned long long>(r.p),
+                                   static_cast<unsigned>(r.seq));
+            if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                         off += d; room -= d; }
+        }
+    }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -715,6 +742,8 @@ int nredTraceFlush(int secTag)
     // 243：`[st1m]` 头部戳记（stage1 预检结果；仅 -NRedSt1Pre 时输出，关态一字不变）。
     //  **零解引用**：只读 gSt1Mask/gSt1CtxOk/gSt1N 三个 BSS 标量；单行约 32 字符。
     if (gSt1Pre && off < sizeof(body)) { nredSt1mStamp(body, off, sizeof(body) - off); }
+    // 249：`[st1o]` 对齐观测（仅 -NRedSt1O；关态一字不变）。
+    if (gSt1O && off < sizeof(body)) { nredSt1OStamp(body, off, sizeof(body) - off); }
     // 244：`[st1r]` 放行观测（仅 -NRedStage1；关态一字不变）。
     if (gStage1 && off < sizeof(body)) { nredSt1rStamp(body, off, sizeof(body) - off); }
     // 245：`[st1v]` 补充观测（仅 -NRedStage1；值来自 guard 内读数，头部零解引用）。
@@ -4911,9 +4940,35 @@ static void nredStage1WProbe(const void* const ctx)
     gSt1Svc = reinterpret_cast<UInt64>(svc);
     if (gSt1W2) { nredStage1WSlots(svc); }   // 248：仅 W2 才 deref svc
 }
+// ─── 249：client 一级对象对齐观测（`-NRedSt1O`，默认关；仅 c==1）───────────────────────
+//  位置：wrapMode9440f 入口、护栏之前。`a` 通过 KPtr 后读**一次** `*(a+8+8i)`（原样保存，
+//  不做 KPtr 过滤），不 deref `p` 本身；每 client「首次」+「p 变化」各一条（≤2 条），seq 饱和 255。
+static void nredStage1ORecord(const void* const a, const UInt32 client)
+{
+    static const UInt8 kIds[7] = {2, 5, 6, 7, 8, 9, 14};
+    unsigned idx = 7;
+    for (unsigned k = 0; k < 7; ++k) { if (kIds[k] == client) { idx = k; break; } }
+    if (idx == 7) { return; }
+    if (gSt1OSeq[idx] < 255) { ++gSt1OSeq[idx]; }
+    const bool aok = nredKernelPtrOk(a);
+    const UInt64 p = aok
+        ? reinterpret_cast<UInt64>(*reinterpret_cast<void* const*>(static_cast<const UInt8*>(a) + 8 + client * 8u))
+        : 0;
+    NRedSt1ORec& r0 = gSt1ORec[idx][0];
+    if (r0.used == 0) {
+        r0.ctx = reinterpret_cast<UInt64>(a); r0.p = p; r0.seq = gSt1OSeq[idx]; r0.used = 1;
+        return;
+    }
+    if (r0.p == p) { return; }
+    NRedSt1ORec& r1 = gSt1ORec[idx][1];
+    if (r1.used != 0) { return; }   // 最多 2 条：后续变化不再记录
+    r1.ctx = reinterpret_cast<UInt64>(a); r1.p = p; r1.seq = gSt1OSeq[idx]; r1.used = 1;
+}
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 249：对齐观测（默认关）——入口、护栏之前；仅 c==1；只写 BSS，不改返回值。
+    if (gSt1O && c == 1) { nredStage1ORecord(a, b); }
     // ── 软件初始化替换：安装动作（R60 §1.1）——**在入口执行**（入参即带模块号 `b`，1-based）──────
     //  门控关（默认）⇒ 本行不成立＝零行为；哪些模块安装由 `-NRedSwInitIds` 决定（默认只模块 5）。
     //  ⚠ 必须在 org（`0x9440f`）执行**之前**——否则苹果已在 handler 内读过 `*(subobj+8)`（R60 §1.1）。
@@ -5404,6 +5459,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1W = checkKernelArgument("-NRedSt1W");
     // 248：client 7 槽值探针（默认关）。与 -NRedSt1W 独立；开此开关才会 deref svc。
     gSt1W2 = checkKernelArgument("-NRedSt1W2");
+    // 249：client 一级对象对齐观测（默认关）。入口记录，头部区输出。
+    gSt1O = checkKernelArgument("-NRedSt1O");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
