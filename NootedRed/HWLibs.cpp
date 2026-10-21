@@ -2544,24 +2544,32 @@ UInt32 X5000HWLibs::wrapBgmInit(void* const a, void* const b, void* const c, voi
                     reinterpret_cast<UInt64>(c), ret);
     return ret;
 }
+// 236：step1 观测独立成 noinline 帧（降低 wrapBgmStep1 帧；通道已为 fwTrace）。
+__attribute__((noinline))
+static void nredBgmStep1Log(const void* const a, const void* const b, const void* const c, const void* const d,
+                            const UInt32 ret)
+{
+    if (!checkKernelArgument("-NRedAccelLog")) { return; }
+    // `d` = 输出结构（`0x2aacbb` 的判据 ② 读它的 +4，要求为 1；判据 ① 读 +0）
+    UInt64 o0 = 0, o8 = 0;
+    if (nredKernelPtrOk(d)) {
+        o0 = reinterpret_cast<const UInt64*>(d)[0];
+        o8 = reinterpret_cast<const UInt64*>(d)[1];
+    }
+    fw::fwTrace("bgm-step1: a1=%llx a2=%llx a3=%llx out=%llx o0=%llx o8=%llx ret=%u",
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(c)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(d)),
+                static_cast<unsigned long long>(o0), static_cast<unsigned long long>(o8),
+                static_cast<unsigned>(ret));
+}
+
 
 UInt32 X5000HWLibs::wrapBgmStep1(void* const a, void* const b, void* const c, void* const d)
 {
     const UInt32 ret = FunctionCast(wrapBgmStep1, singleton().orgBgmStep1)(a, b, c, d);
-    if (checkKernelArgument("-NRedAccelLog")) {
-        // `d` = 输出结构（`0x2aacbb` 的判据 ② 读它的 +4，要求为 1；判据 ① 读 +0）
-        UInt64 o0 = 0, o8 = 0;
-        if (nredKernelPtrOk(d)) {
-            o0 = reinterpret_cast<UInt64*>(d)[0];
-            o8 = reinterpret_cast<UInt64*>(d)[1];
-        }
-        fw::fwTrace("bgm-step1: a1=%llx a2=%llx a3=%llx out=%llx o0=%llx o8=%llx ret=%u",
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(a)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(b)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(c)),
-               static_cast<unsigned long long>(reinterpret_cast<UInt64>(d)), static_cast<unsigned long long>(o0),
-               static_cast<unsigned long long>(o8), static_cast<unsigned>(ret));
-    }
+    nredBgmStep1Log(a, b, c, d, ret);
     return ret;
 }
 
@@ -2596,6 +2604,25 @@ UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
 // ─── 235：BGM 64K 捕获的通用小块转储（只读，≤64 B）────────────────────────────────────
 //  pt：1＝provider B 初读缓冲；2＝memcpy 后 dst；3＝SMU 循环体 rdx 目标（16 B）；4＝校验入口 rsi。
 //  安全：先做内核指针校验再解引用；len 上限 64；行缓冲 128B；不新增等待。
+// 236：hex 分块独立成 noinline 帧（避免其 snprintf/参数溢出把 nredBgm64Dump 帧推高）。
+__attribute__((noinline))
+static void nredBgm64Hex(const UInt32 pt, const UInt8* const b, const UInt32 cap)
+{
+    static char line[128];
+    for (UInt32 r = 0; r < 2; ++r) {
+        const UInt32 off = r * 32;
+        if (off >= cap) { break; }
+        int k = snprintf(line, sizeof(line), "[bgm64-b] pt=%u off=0x%02X ", static_cast<unsigned>(pt),
+                         static_cast<unsigned>(off));
+        for (UInt32 i = 0; i < 32 && off + i < cap && k > 0 &&
+                          static_cast<size_t>(k) + 2 < sizeof(line); ++i) {
+            k += snprintf(line + k, sizeof(line) - static_cast<size_t>(k), "%02X",
+                          static_cast<unsigned>(b[off + i]));
+        }
+        if (k > 0) { fw::fwTrace("%s", line); }
+    }
+}
+
 static void nredBgm64Dump(const UInt32 pt, const void* const p, const UInt32 len)
 {
     const UInt32 cap = (len < 64) ? len : 64;
@@ -2614,19 +2641,55 @@ static void nredBgm64Dump(const UInt32 pt, const void* const p, const UInt32 len
                static_cast<unsigned>(w[0]), static_cast<unsigned>(w[1]),
                static_cast<unsigned>(w[2]), static_cast<unsigned>(w[3]), ok ? 0u : 1u);
     if (!ok) { return; }
-    const UInt8* const b = static_cast<const UInt8*>(p);
-    static char line[128];   // 236：static（不再占栈；236 崩溃根因之一是深栈 + SYSLOG 1KB）
-    for (UInt32 r = 0; r < 2; ++r) {
-        const UInt32 off = r * 32;
-        if (off >= cap) { break; }
-        int k = snprintf(line, sizeof(line), "[bgm64-b] pt=%u off=0x%02X ", static_cast<unsigned>(pt),
-                         static_cast<unsigned>(off));
-        for (UInt32 i = 0; i < 32 && off + i < cap && k > 0 &&
-                          static_cast<size_t>(k) + 2 < sizeof(line); ++i) {
-            k += snprintf(line + k, sizeof(line) - static_cast<size_t>(k), "%02X",
-                          static_cast<unsigned>(b[off + i]));
+    nredBgm64Hex(pt, static_cast<const UInt8*>(p), cap);
+}
+
+// 236：`[bgmcmd]` 归因与 `[bgmtab-b]` hex 各自独立成 noinline 帧（降低 wrapBgmTabRead 帧）。
+__attribute__((noinline))
+static void nredBgmCmdLine(const void* const self, void* const* const out, const UInt32 ret,
+                           const unsigned selU, const unsigned sizeU)
+{
+    void* provB = nullptr;
+    void* target = nullptr;
+    void* method = nullptr;
+    unsigned bad = 0;
+    if (nredKernelPtrOk(self)) {
+        provB = *reinterpret_cast<void**>(const_cast<void*>(self) + 0x148);
+        if (nredKernelPtrOk(provB)) {
+            target = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 8);
+            method = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 0x10);
+        } else {
+            bad = 1;
         }
-        if (k > 0) { fw::fwTrace("%s", line); }
+    } else {
+        bad = 1;
+    }
+    void* buf = nullptr;
+    // `buf` 仅在成功时有效（成功时 *out = resp[0]+16）；失败时保持 0。
+    if (ret == 0 && nredKernelPtrOk(out) && nredKernelPtrOk(*out)) { buf = *out; }
+    fw::fwTrace("[bgmcmd] sel=%u size=%u buf=%llx provB=%llx target=%llx method=%llx ret=%d bad=%u",
+                selU, sizeU, static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(provB)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(target)),
+                static_cast<unsigned long long>(reinterpret_cast<UInt64>(method)),
+                static_cast<int>(ret), bad);
+}
+
+__attribute__((noinline))
+static void nredBgmTabHex(const UInt8* const p, const UInt32 len, const unsigned selU)
+{
+    static char line[128];
+    for (UInt32 r = 0; r < 8; ++r) {
+        const UInt32 off = r * 32;
+        if (off >= len) { break; }
+        int n = snprintf(line, sizeof(line), "[bgmtab-b] sel=%u off=0x%03X ", selU,
+                         static_cast<unsigned>(off));
+        for (UInt32 k = 0; k < 32 && off + k < len && n > 0 &&
+                          static_cast<size_t>(n) + 2 < sizeof(line); ++k) {
+            n += snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%02X",
+                          static_cast<unsigned>(p[off + k]));
+        }
+        if (n > 0) { fw::fwTrace("%s", line); }
     }
 }
 
@@ -2660,35 +2723,8 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
                  static_cast<unsigned long long>(ra));
     }
 
-    // 234：provider B 归因（只读；不调用、不等待）。反汇编 29b50c/29b532/29b53c 已证：
-    //  `provB = *(self+0x148)`，`target = *(provB+8)`，`method = *(provB+0x10)`（该方法的实现地址）。
-    //  ⚠ 与任务卡缩写格式的差异：实施文档 §7.2 的格式含 `target`，本实现按文档输出。
-    {
-        void* provB = nullptr;
-        void* target = nullptr;
-        void* method = nullptr;
-        unsigned bad = 0;
-        if (nredKernelPtrOk(self)) {
-            provB = *reinterpret_cast<void**>(static_cast<UInt8*>(self) + 0x148);
-            if (nredKernelPtrOk(provB)) {
-                target = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 8);
-                method = *reinterpret_cast<void**>(static_cast<UInt8*>(provB) + 0x10);
-            } else {
-                bad = 1;
-            }
-        } else {
-            bad = 1;
-        }
-        void* buf = nullptr;
-        // `buf` 仅在成功时有效（文档：成功时 *out = resp[0]+16）；失败时保持 0。
-        if (ret == 0 && nredKernelPtrOk(out) && nredKernelPtrOk(*out)) { buf = *out; }
-        fw::fwTrace("[bgmcmd] sel=%u size=%u buf=%llx provB=%llx target=%llx method=%llx ret=%d bad=%u",
-                   selU, sizeU, static_cast<unsigned long long>(reinterpret_cast<UInt64>(buf)),
-                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(provB)),
-                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(target)),
-                   static_cast<unsigned long long>(reinterpret_cast<UInt64>(method)),
-                   static_cast<int>(ret), bad);
-    }
+    // 234：provider B 归因（独立 noinline 帧，见 nredBgmCmdLine）。
+    nredBgmCmdLine(self, out, ret, selU, sizeU);
     if (ret != 0) {
         fw::fwTrace("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=%d bad=0", pre,
                    static_cast<int>(ret));
@@ -2722,22 +2758,8 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
                static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
                static_cast<int>(ret));
 
-    // 前 256B 分块：每行 32B，最多 8 行（行数按 len 截断；每行带 sel）。
-    {
-        static char line[128];   // 236：static（同行缓冲复用；BGM 路径单线程诊断）
-        for (UInt32 r = 0; r < 8; ++r) {
-            const UInt32 off = r * 32;
-            if (off >= len) { break; }
-            int n = snprintf(line, sizeof(line), "[bgmtab-b] sel=%u off=0x%03X ", selU,
-                             static_cast<unsigned>(off));
-            for (UInt32 k = 0; k < 32 && off + k < len && n > 0 &&
-                              static_cast<size_t>(n) + 2 < sizeof(line); ++k) {
-                n += snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%02X",
-                              static_cast<unsigned>(p[off + k]));
-            }
-            if (n > 0) { fw::fwTrace("%s", line); }
-        }
-    }
+    // 前 256B 分块（独立 noinline 帧，见 nredBgmTabHex）。
+    nredBgmTabHex(p, len, selU);
     return ret;
 }
 
