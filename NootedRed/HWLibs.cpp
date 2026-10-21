@@ -2592,12 +2592,29 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
 {
     const UInt32 ret = FunctionCast(wrapBgmTabRead, singleton().orgBgmTabRead)(self, sel, size, out);
     if (!gBgmTab) { return ret; }   // 理论不可达（门控关不安装）；双保险
+    // 233：调用点归因。pattern 路由后调用者仍是 `call 0x29b4e2` ⇒ `__builtin_return_address(0)`
+    //  落在调用者函数内；`raoff = ra - gHwlibsSlide` 可直接对照 HWLibs_full.asm。
+    //  ⚠ slide==0 时只打 ra、不打 raoff（避免给出错误偏移，按实施文档 §3）。
+    const UInt64 ra = reinterpret_cast<UInt64>(__builtin_return_address(0));
+    const bool hasOff = (gHwlibsSlide != 0 && ra > gHwlibsSlide);
+    const UInt64 raOff = hasOff ? (ra - gHwlibsSlide) : 0;
+    const unsigned selU  = static_cast<unsigned>(sel);
+    const unsigned sizeU = (size > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : static_cast<unsigned>(size);
+    char pre[96];
+    if (hasOff) {
+        snprintf(pre, sizeof(pre), "sel=%u size=%u ra=%llx raoff=%llx", selU, sizeU,
+                 static_cast<unsigned long long>(ra), static_cast<unsigned long long>(raOff));
+    } else {
+        snprintf(pre, sizeof(pre), "sel=%u size=%u ra=%llx", selU, sizeU,
+                 static_cast<unsigned long long>(ra));
+    }
     if (ret != 0) {
-        NRED_TRACE("[bgmtab] hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=%d bad=0", static_cast<int>(ret));
+        NRED_TRACE("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=%d bad=0", pre,
+                   static_cast<int>(ret));
         return ret;
     }
     if (!nredKernelPtrOk(out) || !nredKernelPtrOk(*out)) {
-        NRED_TRACE("[bgmtab] hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=0 bad=1");
+        NRED_TRACE("[bgmtab] %s hdr=0 ver=0 ipds=0 harv=0 sum=0 len=0 ret=0 bad=1", pre);
         return ret;
     }
 
@@ -2614,18 +2631,19 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
     UInt32 sum = 0;
     for (UInt32 i = 0; i < len; ++i) { sum += p[i]; }
 
-    NRED_TRACE("[bgmtab] hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0",
+    NRED_TRACE("[bgmtab] %s hdr=%08X ver=%u ipds=%08X harv=%08X sum=%08X len=%u ret=%d bad=0", pre,
                static_cast<unsigned>(hdr), static_cast<unsigned>(ver), static_cast<unsigned>(ipds),
                static_cast<unsigned>(harv), static_cast<unsigned>(sum), static_cast<unsigned>(len),
                static_cast<int>(ret));
 
-    // 前 256B 分块：每行 32B，最多 8 行（行数按 len 截断；任务卡要求每次转储都输出）。
+    // 前 256B 分块：每行 32B，最多 8 行（行数按 len 截断；每行带 sel）。
     {
         char line[128];
         for (UInt32 r = 0; r < 8; ++r) {
             const UInt32 off = r * 32;
             if (off >= len) { break; }
-            int n = snprintf(line, sizeof(line), "[bgmtab-b] off=0x%03X ", static_cast<unsigned>(off));
+            int n = snprintf(line, sizeof(line), "[bgmtab-b] sel=%u off=0x%03X ", selU,
+                             static_cast<unsigned>(off));
             for (UInt32 k = 0; k < 32 && off + k < len && n > 0 &&
                               static_cast<size_t>(n) + 2 < sizeof(line); ++k) {
                 n += snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%02X",
