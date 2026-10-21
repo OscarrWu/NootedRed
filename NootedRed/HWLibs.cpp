@@ -5302,14 +5302,22 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         //   若用 static 且 processKext 被多次调用会跨调用累加 ⇒ 计数失真。
         unsigned nHooks = 0;
         const auto hookProbe = [&](const mach_vm_address_t from, KernelPatcher::RouteRequest&& req,
-                                   const char* tag)
+                                   const char* tag) -> bool
         {
             req.from = from;
             if (patcher.routeMultiple(id, &req, 1, slide, size)) {
                 DBGLOG("HWLibs", "%s: hooked", tag);
                 nHooks += 1;
+                return true;
             }
-            else { NRED_TRACE("%s: route failed", tag); }
+            NRED_TRACE("%s: route failed", tag);
+            return false;
+        };
+        // 235：`[bgm64-h]` 安装自证（仅 -NRedBgm64 时输出；state=1 已安装、0 未安装/未尝试）。
+        const auto bgm64H = [](const UInt32 pt, const bool ok, const mach_vm_address_t addr) {
+            if (!gBgm64) { return; }
+            NRED_TRACE("[bgm64-h] pt=%u state=%u addr=%llx", static_cast<unsigned>(pt),
+                       ok ? 1u : 0u, static_cast<unsigned long long>(addr));
         };
 
         if (const auto from = resolveProbe("ttl-coll", kTtlInitCollectPattern, nullptr,
@@ -5361,33 +5369,60 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmStep4, this->orgBgmStep4}, "bgm-step4");
         }
         // 230：BGM 表区转储（默认关）。⚠ 仅在门控开时注册 ⇒ 关态该 wrapper 完全不存在。
-        if (gBgmTab) {
-            if (const auto from = resolveProbe("bgm-tab", kBgmTabReadPattern, nullptr,
-                                               arrsize(kBgmTabReadPattern), 0x29B4E2)) {
-                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmTabRead, this->orgBgmTabRead},
-                          "bgm-tab");
+        {
+            bool ok = false;
+            mach_vm_address_t addr = 0;
+            if (gBgmTab) {
+                if (const auto from = resolveProbe("bgm-tab", kBgmTabReadPattern, nullptr,
+                                                   arrsize(kBgmTabReadPattern), 0x29B4E2)) {
+                    addr = from;
+                    ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmTabRead, this->orgBgmTabRead},
+                                   "bgm-tab");
+                }
             }
+            bgm64H(1, ok, addr);   // 235 P1 自证：-NRedBgmTab 未开 ⇒ state=0
         }
         // 235 P2：`0x298ce5` 通用 memcpy（默认关）。⚠ 仅门控开时注册。
         //  P3/P4 不在此注册：`0x2ab398`/`0x2ab00e` 已被上方 cfg-read/mode2-tail 路由占用，
         //  二次 route 不生效 ⇒ 取样逻辑直接并入那两个既有 wrapper（gBgm64 门控）。
-        if (gBgm64) {
-            if (const auto from = resolveProbe("bgm64-memcpy", kBgm64MemcpyPattern, nullptr,
-                                               arrsize(kBgm64MemcpyPattern), 0x298CE5)) {
-                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgm64Memcpy, this->orgBgm64Memcpy},
-                          "bgm64-memcpy");
+        {
+            bool ok = false;
+            mach_vm_address_t addr = 0;
+            if (gBgm64) {
+                if (const auto from = resolveProbe("bgm64-memcpy", kBgm64MemcpyPattern, nullptr,
+                                                   arrsize(kBgm64MemcpyPattern), 0x298CE5)) {
+                    addr = from;
+                    ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgm64Memcpy,
+                                                                     this->orgBgm64Memcpy},
+                                   "bgm64-memcpy");
+                }
             }
+            bgm64H(2, ok, addr);
         }
         if (const auto from = resolveProbe("read-sel", kReadSelPattern, nullptr, arrsize(kReadSelPattern), 0x29A19E)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapReadSel, this->orgReadSel}, "read-sel");
         }
-        if (const auto from = resolveProbe("cfg-read", kCfgReadPattern, nullptr, arrsize(kCfgReadPattern),
-                                           0x2AB398)) {
-            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapCfgRead, this->orgCfgRead}, "cfg-read");
+        // 235 P3/P4 自证：这两个 hook 由既有 cfg-read/mode2-tail 安装（与 -NRedBgmTab 无关）。
+        {
+            bool ok = false;
+            mach_vm_address_t addr = 0;
+            if (const auto from = resolveProbe("cfg-read", kCfgReadPattern, nullptr, arrsize(kCfgReadPattern),
+                                               0x2AB398)) {
+                addr = from;
+                ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapCfgRead, this->orgCfgRead}, "cfg-read");
+            }
+            bgm64H(3, ok, addr);
         }
-        if (const auto from = resolveProbe("mode2-tail", kMode2TailPattern, nullptr, arrsize(kMode2TailPattern),
-                                           0x2AB00E)) {
-            hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode2Tail, this->orgMode2Tail}, "mode2-tail");
+        {
+            bool ok = false;
+            mach_vm_address_t addr = 0;
+            if (const auto from = resolveProbe("mode2-tail", kMode2TailPattern, nullptr, arrsize(kMode2TailPattern),
+                                               0x2AB00E)) {
+                addr = from;
+                ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode2Tail, this->orgMode2Tail},
+                               "mode2-tail");
+            }
+            bgm64H(4, ok, addr);
         }
         if (const auto from = resolveProbe("mode9440f", kMode9440fPattern, nullptr, arrsize(kMode9440fPattern),
                                            0x9440F)) {
