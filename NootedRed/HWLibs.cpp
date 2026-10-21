@@ -2022,14 +2022,15 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
 }
 
 // 251（`-NRedGc7`）：client 7 双侧观测。
-//  安装侧 `0x93d18(ctx=rdi, sel=esi)`：调原件后、若 `sel==7` 且 ctx 通过 KPtr，读 `p7=*(ctx+0x40)`
-//    （写入后值）；`al` 原样透传。限流：首次调用 + 首次 `hit=1` 各 1 条（≤2）。
+//  安装侧 `0x93d18(ctx=rdi, sel=esi, arg=rdx)`：调原件后、若 `sel==7` 且 ctx 通过 KPtr，读
+//    `p7=*(ctx+0x40)`（写入后值）；`al` 原样透传，**第 3 参 rdx 必须原样转发**（各 selector 的
+//    creator 以它为实参，见 `93d45 movq %rdx,%rsi`）。限流：首次调用 + 首次 `hit=1` 各 1 条（≤2）。
 //  注销侧 `0x93998(obj=rdi, id=esi, val=rdx)`：只在 `val==0 && id==7` 记一次（`[gc7x]`，≤1 条）。
 //  两处均只读入参/固定偏移，不跟随函数指针、不解引用返回值；门控关 ⇒ 不安装 hook、零行为。
-bool X5000HWLibs::wrapGc7Install(void* const ctx, const UInt32 sel)
+bool X5000HWLibs::wrapGc7Install(void* const ctx, const UInt32 sel, void* const arg)
 {
     const bool hit = (sel == 7);
-    const bool ret = FunctionCast(wrapGc7Install, singleton().orgGc7Install)(ctx, sel);
+    const bool ret = FunctionCast(wrapGc7Install, singleton().orgGc7Install)(ctx, sel, arg);
     if (gGc7 && nredKernelPtrOk(ctx) && (!gGc7N || (hit && !gGc7HitSeen))) {
         if (gGc7N < 2) {
             NRedGc7Rec& r = gGc7Rec[gGc7N];

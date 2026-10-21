@@ -170,7 +170,7 @@ private:
     static void* wrapTtlAllocB(void* ctx);
     static bool  wrapTtlCheckD(void* obj, void* param);
     // 251：client 7 双侧观测（只读；al 原样透传）
-    static bool wrapGc7Install(void* ctx, UInt32 sel);
+    static bool wrapGc7Install(void* ctx, UInt32 sel, void* arg);   // 原件第 3 参（rdx）必须透传
     static void wrapGc7SetSlot(void* obj, UInt32 id, UInt64 val);
     static UInt32 wrapTtlInit(void* a1, void* a2);   // B67：ttl_initialize 出入口两读（零行为改动）
     // 第八步观测（2026-09-28 第二十一轮）：接口表注册函数 `0x8b9a5(table, idx, obj, val)`（只读）
