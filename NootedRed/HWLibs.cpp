@@ -5375,9 +5375,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             if (gBgmTab) {
                 if (const auto from = resolveProbe("bgm-tab", kBgmTabReadPattern, nullptr,
                                                    arrsize(kBgmTabReadPattern), 0x29B4E2)) {
-                    addr = from;
                     ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmTabRead, this->orgBgmTabRead},
                                    "bgm-tab");
+                    addr = ok ? from : 0;
                 }
             }
             bgm64H(1, ok, addr);   // 235 P1 自证：-NRedBgmTab 未开 ⇒ state=0
@@ -5391,10 +5391,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             if (gBgm64) {
                 if (const auto from = resolveProbe("bgm64-memcpy", kBgm64MemcpyPattern, nullptr,
                                                    arrsize(kBgm64MemcpyPattern), 0x298CE5)) {
-                    addr = from;
                     ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgm64Memcpy,
                                                                      this->orgBgm64Memcpy},
                                    "bgm64-memcpy");
+                    addr = ok ? from : 0;
                 }
             }
             bgm64H(2, ok, addr);
@@ -5408,8 +5408,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             mach_vm_address_t addr = 0;
             if (const auto from = resolveProbe("cfg-read", kCfgReadPattern, nullptr, arrsize(kCfgReadPattern),
                                                0x2AB398)) {
-                addr = from;
                 ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapCfgRead, this->orgCfgRead}, "cfg-read");
+                addr = ok ? from : 0;
             }
             bgm64H(3, ok, addr);
         }
@@ -5418,9 +5418,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             mach_vm_address_t addr = 0;
             if (const auto from = resolveProbe("mode2-tail", kMode2TailPattern, nullptr, arrsize(kMode2TailPattern),
                                                0x2AB00E)) {
-                addr = from;
                 ok = hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode2Tail, this->orgMode2Tail},
                                "mode2-tail");
+                addr = ok ? from : 0;
             }
             bgm64H(4, ok, addr);
         }
