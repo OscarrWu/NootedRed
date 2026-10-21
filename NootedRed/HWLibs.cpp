@@ -112,8 +112,19 @@ static const char* const kInsSkipReason[] = {"none", "dev-mismatch"};
 // 227/228：`[ttltrim]` 头部戳记数据（仅由 `nredTrimStage0`/`trimRunStage2` 写、`nredTraceFlush` 头部区读）。
 //  ⚠ 环正文区受 4096 B 硬上限"保头丢尾"⇒ 判别行必须落头部区（同 `[ttlchain]`）。
 //  ⚠ 关态：两个 seen 恒 0 ⇒ 不输出本行，未命中形态输出逐字不变。
-struct NredTrimStat { UInt32 seen, n, skip, last, r12, bad; SInt32 ret; };
+struct NredTrimStat {
+    UInt32 seen, n, skip, last, r12, bad;
+    SInt32 ret;
+    UInt32 failMask, firstFail, nFail;   // 240：失败 client 识别（bit=client；firstFail 哨兵 0xFFFFFFFF）
+};
 static NredTrimStat gTrimStat[2] = {};   // [0]=stage0、[1]=stage2（各自最后一次裁剪读数）
+static void nredTrimResetFail(const UInt32 stage)
+{
+    NredTrimStat& d = gTrimStat[(stage == 2) ? 1 : 0];
+    d.failMask = 0;
+    d.firstFail = 0xFFFFFFFFU;
+    d.nFail = 0;
+}
 static void nredTrimRecord(const UInt32 stage, const UInt32 n, const UInt32 skip, const UInt32 last,
                            const UInt32 r12, const UInt32 bad)
 {
@@ -598,13 +609,17 @@ int nredTraceFlush(int secTag)
         if (gTrimStat[k].seen == 0 || off >= sizeof(body)) { continue; }
         const size_t cap = sizeof(body) - off;
         const int nt = snprintf(body + off, cap,
-                                "[ttltrim] st=%u n=%u skip=%u last=%u r12=%u ret=%d bad=%u\n",
+                                "[ttltrim] st=%u n=%u skip=%u last=%u r12=%u ret=%d bad=%u "
+                                "failmask=%08x firstfail=%u nfail=%u\n",
                                 static_cast<unsigned>(k * 2), static_cast<unsigned>(gTrimStat[k].n),
                                 static_cast<unsigned>(gTrimStat[k].skip),
                                 static_cast<unsigned>(gTrimStat[k].last),
                                 static_cast<unsigned>(gTrimStat[k].r12),
                                 static_cast<int>(gTrimStat[k].ret),
-                                static_cast<unsigned>(gTrimStat[k].bad));
+                                static_cast<unsigned>(gTrimStat[k].bad),
+                                static_cast<unsigned>(gTrimStat[k].failMask),
+                                static_cast<unsigned>(gTrimStat[k].firstFail),
+                                static_cast<unsigned>(gTrimStat[k].nFail));
         if (nt > 0) { off += (static_cast<size_t>(nt) < cap) ? static_cast<size_t>(nt) : cap; }
     }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
@@ -2003,6 +2018,7 @@ UInt32 X5000HWLibs::wrapIpiInit(void* const a, const UInt32 b, void* const c)
 //  返回 true 表示已接管并写出 `retOut`（0=失败/1=成功，同原件 `r12&1`）。
 static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg, UInt32& retOut)
 {
+    nredTrimResetFail(stage);   // 240：入口清零（失败识别只在本次调用内累计）
     if (gHwlibsSlide == 0 || !nredKernelPtrOk(ctx)) { nredTrimRecord(stage, 0, 0, 0, 0, 1); return false; }
 
     UInt8* const base = static_cast<UInt8*>(ctx);
@@ -2044,6 +2060,11 @@ static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg
         } else {                                                   // 失败（原件：0x92e71 + 置位 ctx+0x160 + r12=0）
             fail(*reinterpret_cast<void**>(base + 0x00), client, stage, arg);
             *reinterpret_cast<UInt32*>(base + 0x160) |= (1U << (client & 31));
+            gTrimStat[(stage == 2) ? 1 : 0].failMask |= (1U << (client & 31));
+            if (gTrimStat[(stage == 2) ? 1 : 0].firstFail == 0xFFFFFFFFU) {
+                gTrimStat[(stage == 2) ? 1 : 0].firstFail = client;
+            }
+            ++gTrimStat[(stage == 2) ? 1 : 0].nFail;
             r12 = 0;
         }
         hook(*reinterpret_cast<void**>(base + 0x00), client, stage, arg, 1);
@@ -2068,6 +2089,7 @@ static bool nredTrimStage0(void* const ctx, const UInt32 stage, const UInt64 arg
 //  ⚠ stage0 **不**跳过 3（保持 227 的单变量口径）；stage0 的失败语义与 227 逐字相同。
 static bool trimRunStage2(void* const ctx, const UInt32 stage, const UInt64 arg, UInt32& retOut)
 {
+    nredTrimResetFail(stage);   // 240：入口清零
     if (gHwlibsSlide == 0 || !nredKernelPtrOk(ctx)) { nredTrimRecord(stage, 0, 0, 0, 0, 1); return false; }
 
     UInt8* const base = static_cast<UInt8*>(ctx);
@@ -2101,6 +2123,11 @@ static bool trimRunStage2(void* const ctx, const UInt32 stage, const UInt64 arg,
         if (ok == 0) {                                             // 92c9a：失败 ⇒ 0x92e71 + 位图 + r12=0
             fail(*reinterpret_cast<void**>(base + 0x00), client, stage, arg);
             *reinterpret_cast<UInt32*>(base + 0x160) |= (1U << (client & 31));
+            gTrimStat[(stage == 2) ? 1 : 0].failMask |= (1U << (client & 31));
+            if (gTrimStat[(stage == 2) ? 1 : 0].firstFail == 0xFFFFFFFFU) {
+                gTrimStat[(stage == 2) ? 1 : 0].firstFail = client;
+            }
+            ++gTrimStat[(stage == 2) ? 1 : 0].nFail;
             r12 = 0;
         }
         --idx;                                                     // 92ccc decq（在 post 之前）
