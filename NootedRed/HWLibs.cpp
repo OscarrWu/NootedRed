@@ -3558,6 +3558,11 @@ static int nredSmuSwInit(void* const info, void* const out)
     if (*reinterpret_cast<const UInt32*>(I + 8) != 1) {                            // #5（`64371/64376`）
         gGvmBook.failMask |= (1U << 15); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResParseFail;
     }
+    // ── 231：FwBringup 挂点迁移（方案 B）────────────────────────────────────────────────────
+    //  原 C2 出口 `0x6720b` 因 D2 删除 #20 而不可达；改在 #5（`*(I+8)==1`）之后、#6 之前调用。
+    //  此时 `I` 已过 #3–#5（704/80/1）⇒ 与原挂点所传 ctx 同一对象。仅 `-NRedFwBringup` 时执行；
+    //  不写 failMask、不改返回值；关态零行为（门控在 `runFwBringupAtModule8` 内判断）。
+    X5000HWLibs::runFwBringupAtModule8(const_cast<void*>(static_cast<const void*>(I)));
     const UInt32 v = *reinterpret_cast<const UInt32*>(I + 612);                    // #6（`6437c`）
     gM8V612 = v;                                                                  // R129：判别式读数（R128 §4.3）
     if ((v & 8U) != 0 && ((((v >> 2) | (v >> 4)) & 1U) == 0)) {                    //  `64383..64393` 观测类判据
@@ -6024,6 +6029,19 @@ static inline UInt32 khzToMhzCeil(UInt32 khz) { return (khz + 999U) / 1000U; }
 // 消费方靠"轮询超时或读值不匹配"识别失败；此为**静默退化**，调用方须在
 // 调用前检查 smuContext()[见 AMDGFX9DCN314Display 的 applyDisplayClocks]。
 void* X5000HWLibs::smuContext() { return singleton().smuCtxCache; }
+
+// 231：FwBringup 挂点迁移（方案 B）。原 C2 出口 `0x6720b` 因模块 8 的 D2 删除 #20 而不可达
+//  （230 轮 `[bringup] enter=0`）。新挂点＝`nredSmuSwInit` 的 #5 校验之后：此时 `I` 已证明为
+//  704 字节 Apple 形状对象，与原挂点传入的 ctx 同一对象。
+//  ⚠ 门控关 ⇒ 直接返回（零 MMIO、零 bringup 调用）；`nredFwBringupHook` 内部另有一次性守卫。
+//  ⚠ 不写 `gGvmBook.failMask`、不改模块 8 的返回值。
+void X5000HWLibs::runFwBringupAtModule8(void* const ctx)
+{
+    X5000HWLibs& hw = singleton();
+    if (!hw.smu13FwBringupEnabled) { return; }
+    fw::nredFwBringupHook(ctx);
+    hw.smuCtxCache = ctx;   // 与原 C2 处对齐（I12）：迁移后 smuContext() 仍非空
+}
 
 // ⛔ r96：原 A″「早期 FW-loaded 探测」（smu13FwProbeOnly）**已整体删除，勿重建**。
 //   删除理由：① 它经 smu13WaitForFwLoaded → smu13IsFwLoaded 读 SMN `0x3010028`，属

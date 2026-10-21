@@ -139,6 +139,11 @@ public:
     // A-28：公开 slide 供 `nredTraceFlush`（自由函数）写入文件名认属主（只读访问器，零副作用）。
     auto getKcSlide() const { return this->kcSlide; }
 
+    // 231：FwBringup 挂点迁移（模块 8 的 #5 校验之后调用）。仅 `-NRedFwBringup` 为真时执行；
+    //  关态零行为。内部 `nredFwBringupHook` 自带一次性守卫。声明为 public 是因为调用者
+    //  `nredSmuSwInit` 是文件级静态函数，无法访问 private 的 `smu13FwBringupEnabled`／`smuCtxCache`。
+    static void runFwBringupAtModule8(void* ctx);
+
 private:
     static void       wrapPopulateFirmwareDirectory(void* self);
     static bool       wrapGetIpFw(void* self, UInt32 ipVersion, const char* name, void* out);
