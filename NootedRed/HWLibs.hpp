@@ -111,6 +111,7 @@ class X5000HWLibs
     mach_vm_address_t                                            orgBgmQuery{0};     // 0x29a159
     mach_vm_address_t                                            orgBgmStep4{0};     // 0x2aa5bc
     mach_vm_address_t                                            orgBgmTabRead{0};   // 0x29b4e2（服务读方法；`-NRedBgmTab` 表区转储）
+    mach_vm_address_t                                            orgBgm64Memcpy{0};  // 0x298ce5（memcpy；`-NRedBgm64` P2）
     mach_vm_address_t                                            orgReadSel{0};      // 0x29a19e（selector 7/8 读取）
     mach_vm_address_t                                            orgCfgRead{0};      // 0x2ab398（写后读回，回填结构）
     mach_vm_address_t                                            orgMode2Tail{0};    // 0x2ab00e（模式 2 的尾段；二值判定它是否被调用/返回什么）
@@ -180,6 +181,7 @@ private:
     static UInt32 wrapBgmQuery(void* a, void* b, void* c);
     static UInt32 wrapBgmStep4(void* a);
     static UInt32 wrapBgmTabRead(void* self, UInt32 sel, UInt64 size, void** out);   // 230：BGM 表区转储（只读）
+    static UInt64 wrapBgm64Memcpy(void* dst, const void* src, UInt64 len);          // 235：BGM64 捕获 P2
     static UInt32 wrapReadSel(void* obj, UInt32 sel, UInt32 a2, UInt32 a3, void* buf, UInt32 a5);
     static UInt32 wrapCfgRead(void* obj, UInt32 id, UInt64* out, UInt32* flag);
     static UInt32 wrapMode2Tail(void* a, void* b, void* c, void* d, void* e);

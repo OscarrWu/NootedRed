@@ -139,6 +139,15 @@ static bool gTtlBisect = false;
 static bool gTtlTrim = false;
 // 230（`-NRedBgmTab`，**默认关**）：BGM 表区转储。关态 ⇒ 不安装 hook ⇒ 零输出、零行为。
 static bool gBgmTab = false;
+// 235（`-NRedBgm64`，**默认关**）：BGM 64K 填充链取样（P1–P4）。
+//  与 `-NRedBgmTab` 独立：P1 复用该 wrapper，P3/P4 复用既有 cfg-read/mode2-tail 包装（已无条件安装，
+//  不能再加同地址路由），P2 为新增的 gated 路由。
+static bool   gBgm64 = false;
+static UInt32 gBgm64N[5] = {0};          // 每点 dump 次数（索引＝pt）
+static bool   gBgm64Once1 = false;       // P1 只采一次（64KB 初次读）
+static bool   gBgm64Once2 = false;       // P2 只采一次（64KB memcpy）
+static bool   gBgm64Once4 = false;       // P4 只采一次（唯一调用点）
+static UInt32 gBgm64LoopN = 0;           // P3 调用计数（热路径限流）
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -1227,6 +1236,11 @@ static const UInt8 kBgmStep4Pattern[]  = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  `bool f(void* self, UInt32 sel, UInt64 size, void** out)`；成功时 `*out = resp[0]+16`。
 static const UInt8 kBgmTabReadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x49,
                                            0x89, 0xCE, 0x31, 0xDB, 0x48, 0x8D, 0x45, 0xC8, 0x48, 0x89, 0x58, 0x08};
+// 235 P2：`0x298ce5` 通用 memcpy（`dst,src,len`）。⚠ 实施文档给的 18B pattern 中 `7E 1B` 与
+//  实际二进制不符（实为 `7E 19`，即 je 偏移）⇒ 以下按 `com.apple.kext.AMDRadeonX5000HWLibs.macho`
+//  实际字节（已在全库验证唯一、且位于函数头）。
+static const UInt8 kBgm64MemcpyPattern[] = {0x31, 0xC0, 0x48, 0x85, 0xFF, 0x74, 0x22, 0x48, 0x85, 0xF6, 0x74, 0x1D,
+                                            0x48, 0x85, 0xD2, 0x7E, 0x19, 0x55, 0x48, 0x89, 0xE5};
 // `0x29a19e`：按 selector 读取（7/8 经 `0x29adb0`）。`0x2a9f0f` 用它做 selector=7 的读取 ⇒ 其返回值是判据之一。
 static const UInt8 kReadSelPattern[]   = {0x41, 0x89, 0xC9, 0x89, 0xD0, 0x83, 0xFE, 0x08, 0x74, 0x09, 0x83, 0xFE,
                                            0x07, 0x75, 0x13, 0x31, 0xF6, 0xEB, 0x05, 0xBE, 0x01, 0x00, 0x00, 0x00};
@@ -2579,6 +2593,43 @@ UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
     return ret;
 }
 
+// ─── 235：BGM 64K 捕获的通用小块转储（只读，≤64 B）────────────────────────────────────
+//  pt：1＝provider B 初读缓冲；2＝memcpy 后 dst；3＝SMU 循环体 rdx 目标（16 B）；4＝校验入口 rsi。
+//  安全：先做内核指针校验再解引用；len 上限 64；行缓冲 128B；不新增等待。
+static void nredBgm64Dump(const UInt32 pt, const void* const p, const UInt32 len)
+{
+    const UInt32 cap = (len < 64) ? len : 64;
+    const UInt32 n = ++gBgm64N[(pt < 5) ? pt : 0];
+    const bool ok = nredKernelPtrOk(p) && cap != 0;
+    UInt32 w[4] = {0, 0, 0, 0};
+    if (ok) {
+        const UInt8* const b = static_cast<const UInt8*>(p);
+        for (UInt32 i = 0; i < 4; ++i) {
+            if ((i + 1) * 4 <= cap) { w[i] = *reinterpret_cast<const UInt32*>(b + i * 4); }
+        }
+    }
+    NRED_TRACE("[bgm64] pt=%u n=%u buf=%llx len=%u hdr=%08X b0=%08X b4=%08X b8=%08X bc=%08X bad=%u",
+               static_cast<unsigned>(pt), static_cast<unsigned>(n),
+               static_cast<unsigned long long>(reinterpret_cast<UInt64>(p)), static_cast<unsigned>(len),
+               static_cast<unsigned>(w[0]), static_cast<unsigned>(w[1]),
+               static_cast<unsigned>(w[2]), static_cast<unsigned>(w[3]), ok ? 0u : 1u);
+    if (!ok) { return; }
+    const UInt8* const b = static_cast<const UInt8*>(p);
+    char line[128];
+    for (UInt32 r = 0; r < 2; ++r) {
+        const UInt32 off = r * 32;
+        if (off >= cap) { break; }
+        int k = snprintf(line, sizeof(line), "[bgm64-b] pt=%u off=0x%02X ", static_cast<unsigned>(pt),
+                         static_cast<unsigned>(off));
+        for (UInt32 i = 0; i < 32 && off + i < cap && k > 0 &&
+                          static_cast<size_t>(k) + 2 < sizeof(line); ++i) {
+            k += snprintf(line + k, sizeof(line) - static_cast<size_t>(k), "%02X",
+                          static_cast<unsigned>(b[off + i]));
+        }
+        if (k > 0) { NRED_TRACE("%s", line); }
+    }
+}
+
 // ─── 230：BGM 表区转储（`-NRedBgmTab`，默认关）───────────────────────────────────
 //  挂点 0x29b4e2（服务读方法，无符号，pattern 路由）。原型（反汇编 29b4e2–29b56d）：
 //    `UInt32 f(void* self, UInt32 sel, UInt64 size, void** out)`；
@@ -2650,6 +2701,11 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
 
     const UInt8* const p = static_cast<const UInt8*>(*out);
     const UInt32 len = (size > 0x10000ULL) ? 0x10000U : static_cast<UInt32>(size);
+    // 235 P1：provider B 初读缓冲（`*out` 即 resp[0]+16），只对 64KB 读采一次。
+    if (gBgm64 && !gBgm64Once1 && len >= 0x10000) {
+        gBgm64Once1 = true;
+        nredBgm64Dump(1, p, len);
+    }
     auto rd32 = [p, len](const UInt32 off) -> UInt32 {
         if (static_cast<UInt64>(off) + 4 > len) { return 0; }
         return *reinterpret_cast<const UInt32*>(p + off);
@@ -2685,6 +2741,19 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
     return ret;
 }
 
+// ─── 235 P2：`0x298ce5` memcpy(dst, src, len)（64KB 拷贝后取样）──────────────────────────
+//  反汇编 298ce5：参数 rdi=dst／rsi=src／rdx=len（≤0 直接返回），返回 rax=len 或 0。
+//  该函数是通用 memcpy（调用点 30+）⇒ 只在 `len ≥ 0x10000` 且仅第一次取样。
+UInt64 X5000HWLibs::wrapBgm64Memcpy(void* const dst, const void* const src, const UInt64 len)
+{
+    const UInt64 ret = FunctionCast(wrapBgm64Memcpy, singleton().orgBgm64Memcpy)(dst, src, len);
+    if (gBgm64 && !gBgm64Once2 && len >= 0x10000) {
+        gBgm64Once2 = true;
+        nredBgm64Dump(2, dst, (len > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : static_cast<UInt32>(len));
+    }
+    return ret;
+}
+
 UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 a2, const UInt32 a3, void* const buf,
                                 const UInt32 a5)
 {
@@ -2705,6 +2774,12 @@ UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const 
 {
     const UInt64 before = (nredKernelPtrOk(out)) ? *out : 0;
     const UInt32 ret = FunctionCast(wrapCfgRead, singleton().orgCfgRead)(obj, id, out, flag);
+    // 235 P3：SMU 写-读循环体（0x2ab398）。原件以 rdx 为目标、rsi 为源（2aaf26/2aaf2e）⇒ 在
+    //  wrapper 里 rdx 即第 3 参 `out`。热路径（~1800 次/轮）⇒ 只采前 2 次 + 每 256 次。
+    if (gBgm64) {
+        const UInt32 n3 = ++gBgm64LoopN;
+        if ((n3 <= 2 || (n3 & 0xFF) == 0) && nredKernelPtrOk(out)) { nredBgm64Dump(3, out, 16); }
+    }
     // ⚠️ 已静音（2026-09-28）：本函数是热路径（单轮 ~1800 次调用），其输出会把 L2 环形缓冲挤满，
     //  导致真正关键的观测行（`mode2-tail`/`ip`）落不了盘。信息已收集完毕，需要时再临时打开。
     (void)before;
@@ -2713,6 +2788,11 @@ UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const 
 
 UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, void* const d, void* const e)
 {
+    // 235 P4：校验入口缓冲（0x2ab00e 的第 2 参 rsi，即 `-56(%rbp)` 的初读缓冲）——**调用前**采样。
+    if (gBgm64 && !gBgm64Once4 && nredKernelPtrOk(b)) {
+        gBgm64Once4 = true;
+        nredBgm64Dump(4, b, 0x10000);
+    }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
     // 只读观测：`0x2ab00e` 的第 2 形参是一个 64 KiB 缓冲，函数内部按其构造的 **IP 发现表**做校验
     // （`"IPDS"`/`"HARV"` 魔数 + 三段校验和 + 每块 `num_base_address ∈ {1..6}`）。
@@ -4950,6 +5030,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gTraceAtIpSeq = checkKernelArgument("-NRedTraceAtIpSeq");
     // 230：BGM 表区转储（默认关）。关态 ⇒ 不注册 hook ⇒ 零输出、零行为。
     gBgmTab = checkKernelArgument("-NRedBgmTab");
+    // 235：BGM 64K 捕获取样（默认关）。P3/P4 复用既有 wrapper，仅此开关控制取样。
+    gBgm64 = checkKernelArgument("-NRedBgm64");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
@@ -5283,6 +5365,16 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                                arrsize(kBgmTabReadPattern), 0x29B4E2)) {
                 hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgmTabRead, this->orgBgmTabRead},
                           "bgm-tab");
+            }
+        }
+        // 235 P2：`0x298ce5` 通用 memcpy（默认关）。⚠ 仅门控开时注册。
+        //  P3/P4 不在此注册：`0x2ab398`/`0x2ab00e` 已被上方 cfg-read/mode2-tail 路由占用，
+        //  二次 route 不生效 ⇒ 取样逻辑直接并入那两个既有 wrapper（gBgm64 门控）。
+        if (gBgm64) {
+            if (const auto from = resolveProbe("bgm64-memcpy", kBgm64MemcpyPattern, nullptr,
+                                               arrsize(kBgm64MemcpyPattern), 0x298CE5)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapBgm64Memcpy, this->orgBgm64Memcpy},
+                          "bgm64-memcpy");
             }
         }
         if (const auto from = resolveProbe("read-sel", kReadSelPattern, nullptr, arrsize(kReadSelPattern), 0x29A19E)) {
