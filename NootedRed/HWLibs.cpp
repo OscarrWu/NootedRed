@@ -624,11 +624,13 @@ static void nredSt1W2Stamp(char* const body, size_t& off, const size_t cap)
 }
 
 // 249：`[st1o]` 头部行（最多 14 条；noinline、零解引用）。
+//  250：无任何记录时输出 `[st1o] none seq0=%u`（seq0＝client 2 的调用计数）。
 __attribute__((noinline))
 static void nredSt1OStamp(char* const body, size_t& off, const size_t cap)
 {
     static const UInt8 kIds[7] = {2, 5, 6, 7, 8, 9, 14};
     size_t room = cap;
+    bool any = false;
     for (unsigned i = 0; i < 7; ++i) {
         for (unsigned s = 0; s < 2; ++s) {
             const NRedSt1ORec& r = gSt1ORec[i][s];
@@ -640,9 +642,24 @@ static void nredSt1OStamp(char* const body, size_t& off, const size_t cap)
                                    static_cast<unsigned long long>(r.p),
                                    static_cast<unsigned>(r.seq));
             if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
-                         off += d; room -= d; }
+                         off += d; room -= d; any = true; }
         }
     }
+    if (!any && room != 0) {
+        const int n = snprintf(body + off, room, "[st1o] none seq0=%u\n",
+                               static_cast<unsigned>(gSt1OSeq[0]));
+        if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+    }
+}
+
+// 250：`[st1g]` 开关状态行——**本轮诊断常开**（定位后应改回“仅 gSt1O 时输出”）。
+__attribute__((noinline))
+static void nredSt1GStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[st1g] p=%u w=%u o=%u s=%u\n",
+                           gSt1Pre ? 1u : 0u, (gSt1W || gSt1W2) ? 1u : 0u,
+                           gSt1O ? 1u : 0u, gStage1 ? 1u : 0u);
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
 int nredTraceFlush(int secTag)
@@ -742,6 +759,8 @@ int nredTraceFlush(int secTag)
     // 243：`[st1m]` 头部戳记（stage1 预检结果；仅 -NRedSt1Pre 时输出，关态一字不变）。
     //  **零解引用**：只读 gSt1Mask/gSt1CtxOk/gSt1N 三个 BSS 标量；单行约 32 字符。
     if (gSt1Pre && off < sizeof(body)) { nredSt1mStamp(body, off, sizeof(body) - off); }
+    // 250：`[st1g]` 开关状态行（**本轮诊断常开**；定位后改回门控）。
+    if (off < sizeof(body)) { nredSt1GStamp(body, off, sizeof(body) - off); }
     // 249：`[st1o]` 对齐观测（仅 -NRedSt1O；关态一字不变）。
     if (gSt1O && off < sizeof(body)) { nredSt1OStamp(body, off, sizeof(body) - off); }
     // 244：`[st1r]` 放行观测（仅 -NRedStage1；关态一字不变）。
