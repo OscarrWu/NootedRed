@@ -198,6 +198,7 @@ static UInt64 gSt1P7   = 0;   // *(ctx+0x40)
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
+static UInt32 gSt1SkipHigh = 0;   // 247：pageOff>0xED8 ⇒ 1（高位槽因越页被跳过）
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -604,9 +605,10 @@ static void nredSt1WStamp(char* const body, size_t& off, const size_t cap)
                  static_cast<unsigned long long>(gSt1S[4]));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
-    n = snprintf(body + off, room, "[st1y] s90=%llx s100=%llx s118=%llx s120=%llx\n",
+    n = snprintf(body + off, room, "[st1y] s90=%llx s100=%llx s118=%llx s120=%llx sk=%u\n",
                  static_cast<unsigned long long>(gSt1S[5]), static_cast<unsigned long long>(gSt1S[6]),
-                 static_cast<unsigned long long>(gSt1S[7]), static_cast<unsigned long long>(gSt1S[8]));
+                 static_cast<unsigned long long>(gSt1S[7]), static_cast<unsigned long long>(gSt1S[8]),
+                 static_cast<unsigned>(gSt1SkipHigh));
     if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
 }
 
@@ -4864,11 +4866,29 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 //  规格 `tmp/tech-manager/R-client7只读探针规格-2026-10-21.md` §1/§2。
 //  链：ctx → P7=*(ctx+0x40) → handle=*(P7+0x28) → svc=*(handle+8)；每级先 `nredKernelPtrOk`，
 //  失败即记 0 并停止（不再解引用）。本函数不写非 BSS 内存、不跟随函数指针、无等待/轮询。
+//  247：同页边界保护——`nredKernelPtrOk` 只校验高半区，不保证映射/长度；故每个槽仅在
+//    `pageOff + off + 8 <= 0x1000` 时读，否则记 0（任何槽都不跨出 svc 所在页）。
+//    `pageOff > 0xED8`（9 槽整段会越页）⇒ 置 `gSt1SkipHigh=1`，高位槽按上式自然记 0。
+//  槽读取独立成 noinline 帧，保持探针本体栈帧不变（247 页面边界判断）。
+__attribute__((noinline))
+static void nredStage1WSlots(const UInt8* const svc)
+{
+    const UInt64 pageOff = reinterpret_cast<UInt64>(svc) & 0xFFFULL;
+    if (pageOff > 0xED8ULL) { gSt1SkipHigh = 1; }
+    static const UInt32 kOff[9] = {0x10, 0x18, 0x20, 0x38, 0x40, 0x90, 0x100, 0x118, 0x120};
+    for (unsigned k = 0; k < 9; ++k) {
+        if (pageOff + kOff[k] + 8ULL <= 0x1000ULL) {
+            gSt1S[k] = *reinterpret_cast<const UInt64*>(svc + kOff[k]);
+        }
+    }
+}
+
 static void nredStage1WProbe(const void* const ctx)
 {
     gSt1P7 = 0;
     gSt1H = 0;
     gSt1Svc = 0;
+    gSt1SkipHigh = 0;
     for (unsigned k = 0; k < 9; ++k) { gSt1S[k] = 0; }
     if (!nredKernelPtrOk(ctx)) { return; }
     const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x40);
@@ -4880,10 +4900,7 @@ static void nredStage1WProbe(const void* const ctx)
     const UInt8* const svc = *reinterpret_cast<const UInt8* const*>(h + 8);
     if (!nredKernelPtrOk(svc)) { return; }
     gSt1Svc = reinterpret_cast<UInt64>(svc);
-    static const UInt32 kOff[9] = {0x10, 0x18, 0x20, 0x38, 0x40, 0x90, 0x100, 0x118, 0x120};
-    for (unsigned k = 0; k < 9; ++k) {
-        gSt1S[k] = *reinterpret_cast<const UInt64*>(svc + kOff[k]);
-    }
+    nredStage1WSlots(svc);
 }
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
