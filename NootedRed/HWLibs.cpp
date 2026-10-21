@@ -539,6 +539,17 @@ static void nredTraceTruncateFile(const char* const path)
     vfs_context_rele(ctx);
 }
 
+// 243：`[st1m]` 头部行独立成 noinline 帧（保持 nredTraceFlush 帧增量 0）。
+//  只读 gSt1Mask/gSt1CtxOk/gSt1N 三个 BSS 标量，零解引用。
+__attribute__((noinline))
+static void nredSt1mStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[st1m] mask=%04x ctx=%u n=%u\n",
+                           static_cast<unsigned>(gSt1Mask), static_cast<unsigned>(gSt1CtxOk),
+                           static_cast<unsigned>(gSt1N));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -635,13 +646,7 @@ int nredTraceFlush(int secTag)
     }
     // 243：`[st1m]` 头部戳记（stage1 预检结果；仅 -NRedSt1Pre 时输出，关态一字不变）。
     //  **零解引用**：只读 gSt1Mask/gSt1CtxOk/gSt1N 三个 BSS 标量；单行约 32 字符。
-    if (gSt1Pre && off < sizeof(body)) {
-        const size_t cap = sizeof(body) - off;
-        const int n8 = snprintf(body + off, cap, "[st1m] mask=%04x ctx=%u n=%u\n",
-                                static_cast<unsigned>(gSt1Mask), static_cast<unsigned>(gSt1CtxOk),
-                                static_cast<unsigned>(gSt1N));
-        if (n8 > 0) { off += (static_cast<size_t>(n8) < cap) ? static_cast<size_t>(n8) : cap; }
-    }
+    if (gSt1Pre && off < sizeof(body)) { nredSt1mStamp(body, off, sizeof(body) - off); }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
     //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
