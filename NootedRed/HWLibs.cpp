@@ -221,6 +221,12 @@ static bool       gSt1B = false;
 static NRedSt1BRec gSt1BRec[8];
 static UInt32     gSt1BN = 0;     // 已记录条数（≤8）
 static UInt32     gSt1BSeq = 0;   // 全局调用序号（饱和 255）
+// 256（`-NRedSt1C`，默认关）：`[st1c]` 仅记 `c>=1` 的前 8 条调次（钉死 stage1 实际 client 集合）。
+struct NRedSt1CRec { UInt32 b; UInt32 c; UInt32 seq; };
+static bool       gSt1C = false;
+static NRedSt1CRec gSt1CRec[8];
+static UInt32     gSt1CN = 0;     // 已记录条数（≤8）
+static UInt32     gSt1CSeq = 0;   // stage≥1 调用序号（饱和 255）
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -747,6 +753,34 @@ static void nredSt1BStamp(char* const body, size_t& off, const size_t cap)
     }
 }
 
+// 256：`[st1c]` 仅 c>=1 的调次行（≤8 条；固定模板直写，帧 ≤64 B）。
+__attribute__((noinline))
+static void nredSt1CStamp(char* const body, size_t& off, const size_t cap)
+{
+    static const char kTpl[] = "[st1c] b=000 c=000 seq=000\n";
+    static_assert(sizeof(kTpl) == 28, "st1c line length");
+    constexpr size_t kLen = sizeof(kTpl) - 1;
+    size_t room = cap;
+    for (unsigned i = 0; i < gSt1CN && i < 8; ++i) {
+        if (room < kLen) { return; }
+        __builtin_memcpy(body + off, kTpl, kLen);
+        const UInt32 b = gSt1CRec[i].b % 1000;
+        const UInt32 c = gSt1CRec[i].c % 1000;
+        const UInt32 s = gSt1CRec[i].seq % 1000;
+        body[off + 9]  = static_cast<char>('0' + b / 100);
+        body[off + 10] = static_cast<char>('0' + (b / 10) % 10);
+        body[off + 11] = static_cast<char>('0' + b % 10);
+        body[off + 15] = static_cast<char>('0' + c / 100);
+        body[off + 16] = static_cast<char>('0' + (c / 10) % 10);
+        body[off + 17] = static_cast<char>('0' + c % 10);
+        body[off + 23] = static_cast<char>('0' + s / 100);
+        body[off + 24] = static_cast<char>('0' + (s / 10) % 10);
+        body[off + 25] = static_cast<char>('0' + s % 10);
+        off += kLen;
+        room -= kLen;
+    }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -883,6 +917,8 @@ int nredTraceFlush(int secTag)
     if (gGc7 && off < sizeof(body)) { nredGc7Stamp(body, off, sizeof(body) - off); }
     // 252：`[st1b]` 原始调次（仅 -NRedSt1B；关态一字不变）。
     if (gSt1B && off < sizeof(body)) { nredSt1BStamp(body, off, sizeof(body) - off); }
+    // 256：`[st1c]` 仅 c>=1 的调次（仅 -NRedSt1C；关态一字不变）。
+    if (gSt1C && off < sizeof(body)) { nredSt1CStamp(body, off, sizeof(body) - off); }
     // 253：`[mes]` MES stage0 真实路径观测（仅 -NRedMesReal；关态一字不变）。
     if (gMesReal && off < sizeof(body)) { nredMesStamp(body, off, sizeof(body) - off); }
     // 254：`[mesb]` b 系列提供者观测（仅 -NRedMesB；关态一字不变）。
@@ -5216,10 +5252,24 @@ static void nredStage1BRecord(const UInt32 b, const UInt32 c)
     r.seq = gSt1BSeq;
     ++gSt1BN;
 }
+// ─── 256：`[st1c]` 仅 `c>=1` 的调次（`-NRedSt1C`，默认关）──────────────────────────────
+//  入口最前、先于其它记录；仅 c>=1 才记，最多 8 条；seq 全局递增（饱和 255）；零解引用。
+static void nredStage1CRecord(const UInt32 b, const UInt32 c)
+{
+    if (gSt1CSeq < 255) { ++gSt1CSeq; }
+    if (gSt1CN >= 8) { return; }
+    NRedSt1CRec& r = gSt1CRec[gSt1CN];
+    r.b = b;
+    r.c = c;
+    r.seq = gSt1CSeq;
+    ++gSt1CN;
+}
 
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 256：仅 c>=1 的调次（默认关）——入口最前，只写 BSS，不改返回值。
+    if (gSt1C && c >= 1) { nredStage1CRecord(b, c); }
     // 252：原始调次（默认关）——入口最前，只写 BSS，不改返回值。
     if (gSt1B) { nredStage1BRecord(b, c); }
     // 249：对齐观测（默认关）——入口、护栏之前；仅 c==1；只写 BSS，不改返回值。
@@ -5720,6 +5770,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gGc7 = checkKernelArgument("-NRedGc7");
     // 252：原始 (b,c) 调次（默认关）。只在前 8 次调用时写 BSS，头部区输出。
     gSt1B = checkKernelArgument("-NRedSt1B");
+    // 256：仅 c>=1 的调次（默认关）。钉死 stage1 实际 client 集合。
+    gSt1C = checkKernelArgument("-NRedSt1C");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
     gMesReal = checkKernelArgument("-NRedMesReal");
     // 254：MES b 系列提供者（默认关）。仅构造静态描述符并挂到 +0x790；不调 0x441ad、不写 MMIO。
