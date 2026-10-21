@@ -197,6 +197,11 @@ static bool   gSt1W    = false;
 static UInt64 gSt1P7   = 0;   // *(ctx+0x40)
 static UInt64 gSt1P3   = 0;   // 255：*(ctx+0x20)（client 7 stage1 唯一硬 fault 依赖）
 static UInt64 gSt1B3P3  = 0;  // 258：client 3 分支读到的 P3（供 `[st1b3]` 头部行）
+// 259：剩余 client 放行的观测值（P 与关键二级指针；头部行零解引用）。
+static UInt64 gSt1G2P = 0, gSt1G2Key = 0;
+static UInt64 gSt1G5P = 0, gSt1G5Key = 0;
+static UInt64 gSt1G6P = 0, gSt1G6Key = 0;
+static UInt64 gSt1G9P = 0, gSt1G9Key = 0;
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -826,6 +831,32 @@ static void nredSt1B3Stamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 259：`[st1g2/5/6/7/9]` 各行（仅 -NRedStage1；noinline、零解引用、每行 ≤64 字符）。
+__attribute__((noinline))
+static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room, "[st1g2] p2=%llx key=%llx\n",
+                     static_cast<unsigned long long>(gSt1G2P), static_cast<unsigned long long>(gSt1G2Key));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1g5] p5=%llx key=%llx\n",
+                 static_cast<unsigned long long>(gSt1G5P), static_cast<unsigned long long>(gSt1G5Key));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1g6] p6=%llx key=%llx\n",
+                 static_cast<unsigned long long>(gSt1G6P), static_cast<unsigned long long>(gSt1G6Key));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1g7] p7=%llx p3=%llx\n",
+                 static_cast<unsigned long long>(gSt1P7), static_cast<unsigned long long>(gSt1P3));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1g9] p9=%llx key=%llx\n",
+                 static_cast<unsigned long long>(gSt1G9P), static_cast<unsigned long long>(gSt1G9Key));
+    if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -956,6 +987,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1vStamp(body, off, sizeof(body) - off); }
     // 258：`[st1b3]` client 3 的 P3（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1B3Stamp(body, off, sizeof(body) - off); }
+    // 259：`[st1g2/5/6/7/9]` 各 client 的 P/关键指针（仅 -NRedStage1）。
+    if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
     if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // 248：槽值行独立开关（-NRedSt1W2）；W 开而 W2 关 ⇒ 不 deref svc、不输出这两行。
@@ -5219,29 +5252,151 @@ static bool nredStage1Guard3(const void* const ctx)
 //  每条都先 `nredKernelPtrOk` 校验上一级指针再读固定偏移；不跟随函数指针、不调用任何东西。
 //  读出值存入 BSS（头部行零解引用）；返回 false ⇒ 调用方按苹果极性 `return 0`。
 
+// ─── 259：client 2/5/6/9 的 stage1 前置检查（规格 `tmp/tech-manager/R-stage1剩余client放行规格-2026-10-22.md` §1）
+//  统一纪律：每级先 `nredKernelPtrOk` 再读固定偏移；不跟随函数指针、不调用苹果方法；
+//  只保留 1 个游标局部（其余存 `gSt1*`），保证每个函数栈帧 ≤64 B。
+__attribute__((noinline))
+static bool nredStage1Guard2(const void* const ctx)
+{
+    gSt1G2P = 0; gSt1G2Key = 0;
+    if (!nredKernelPtrOk(ctx)) { return false; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x18);
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G2P = reinterpret_cast<UInt64>(q);
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // dev=*(P2)
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(dev)
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // slot1
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G2Key = reinterpret_cast<UInt64>(q);
+    if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { return false; }
+    const UInt8* const p2 = reinterpret_cast<const UInt8*>(gSt1G2P);
+    if (*reinterpret_cast<const UInt64*>(p2 + 0x18) == 0) { return false; }
+    return true;
+}
+
+__attribute__((noinline))
+static bool nredStage1Guard5(const void* const ctx)
+{
+    gSt1G5P = 0; gSt1G5Key = 0;
+    if (!nredKernelPtrOk(ctx)) { return false; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G5P = reinterpret_cast<UInt64>(q);
+    if (*reinterpret_cast<const UInt64*>(q) == 0) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(P5)
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(*(P5))
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // slot1
+    if (!nredKernelPtrOk(q)) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { return false; }
+    const UInt8* p5 = reinterpret_cast<const UInt8*>(gSt1G5P);
+    if (*reinterpret_cast<const UInt64*>(p5 + 0x18) == 0) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(p5 + 0x28);         // S
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0xE48);         // *(S+0xE48)
+    if (!nredKernelPtrOk(q)) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x90) == 0) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x08);          // *(..+0x08)
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x58);          // slot3（209 链 base）
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G5Key = reinterpret_cast<UInt64>(q);
+    q = *reinterpret_cast<const UInt8* const*>(q + 0xE8);          // hop0: *(slot3+0xE8)
+    if (!nredKernelPtrOk(q)) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x40) == 0) { return false; }   // hop1
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x40);          // hop2 base
+    if (!nredKernelPtrOk(q)) { return false; }
+    if (*reinterpret_cast<const UInt64*>(q + 0x08) == 0) { return false; }   // hop2
+    return true;
+}
+
+__attribute__((noinline))
+static bool nredStage1Guard6(const void* const ctx)
+{
+    gSt1G6P = 0; gSt1G6Key = 0;
+    if (!nredKernelPtrOk(ctx)) { return false; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x38);
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G6P = reinterpret_cast<UInt64>(q);
+    if (*reinterpret_cast<const UInt64*>(q) == 0) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // dev
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(dev)
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // prov（苹果不判，缺失必 trap）
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G6Key = reinterpret_cast<UInt64>(q);
+    const UInt8* const p6 = reinterpret_cast<const UInt8*>(gSt1G6P);
+    if (*reinterpret_cast<const UInt64*>(p6 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p6 + 0x40) == 0) { return false; }
+    return true;
+}
+
+__attribute__((noinline))
+static bool nredStage1Guard7(const void* const ctx)
+{
+    gSt1P7 = 0;
+    gSt1P3 = 0;
+    if (!nredKernelPtrOk(ctx)) { return false; }
+    const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x40);
+    if (!nredKernelPtrOk(p7)) { return false; }
+    gSt1P7 = reinterpret_cast<UInt64>(p7);
+    if (*reinterpret_cast<const UInt64*>(p7 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p7 + 0x28) == 0) { return false; }
+    const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
+    gSt1P3 = reinterpret_cast<UInt64>(p3);
+    if (!nredKernelPtrOk(p3)) { return false; }
+    return true;
+}
+
+__attribute__((noinline))
+static bool nredStage1Guard9(const void* const ctx)
+{
+    gSt1G9P = 0; gSt1G9Key = 0;
+    if (!nredKernelPtrOk(ctx)) { return false; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x50);
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G9P = reinterpret_cast<UInt64>(q);
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(P9)
+    if (!nredKernelPtrOk(q)) { return false; }
+    gSt1G9Key = reinterpret_cast<UInt64>(q);
+    if (*reinterpret_cast<const UInt64*>(q + 0x20) == 0) { return false; }
+    const UInt8* const p9 = reinterpret_cast<const UInt8*>(gSt1G9P);
+    if (*reinterpret_cast<const UInt64*>(p9 + 0x18) == 0) { return false; }
+    if (*reinterpret_cast<const UInt64*>(p9 + 0x28) != 0 &&
+        *reinterpret_cast<const UInt64*>(p9 + 0x30) == 0) { return false; }
+    return true;
+}
+
+__attribute__((noinline))
+static bool nredStage1Guard14(const void* const ctx);   // 定义在后（暂缓，仅收集读数）
+
+// ─── 259：各 client 的 guard 分派（白名单 {2,3,5,6,7,9}；8/14 暂缓 = 恒 false）──────────────
 static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 {
-    if (client == 3) {   // 258：11 条前置（见 nredStage1Guard3）
-        if (!nredStage1Guard3(ctx)) { return false; }
-        gSt1Try |= (1U << 3);
-        return true;
+    bool ok = false;
+    switch (client) {
+        case 2: ok = nredStage1Guard2(ctx); break;
+        case 3: ok = nredStage1Guard3(ctx); break;
+        case 5: ok = nredStage1Guard5(ctx); break;
+        case 6: ok = nredStage1Guard6(ctx); break;
+        case 7: ok = nredStage1Guard7(ctx); break;
+        case 9: ok = nredStage1Guard9(ctx); break;
+        case 14: (void)nredStage1Guard14(ctx); return false;   // 暂缓：只收集读数，不放行
+        default: return false;   // 8（暂缓）及其它 client：继续 fail-closed
     }
-    if (client == 7) {
-        gSt1P7 = 0;
-        gSt1P3 = 0;
-        if (!nredKernelPtrOk(ctx)) { return false; }
-        const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x40);
-        if (!nredKernelPtrOk(p7)) { return false; }
-        gSt1P7 = reinterpret_cast<UInt64>(p7);
-        if (*reinterpret_cast<const UInt64*>(p7 + 0x18) == 0) { return false; }
-        if (*reinterpret_cast<const UInt64*>(p7 + 0x28) == 0) { return false; }
-        const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
-        gSt1P3 = reinterpret_cast<UInt64>(p3);
-        if (!nredKernelPtrOk(p3)) { return false; }
-        gSt1Try |= (1U << 7);
-        return true;
-    }
-    if (client != 14) { return false; }
+    if (!ok) { return false; }
+    gSt1Try |= (1U << client);
+    return true;
+}
+
+// 14 的 5 条检查保留为独立函数（供将来解冻时直接接入），**本轮恒返回 false**。
+__attribute__((noinline))
+static bool nredStage1Guard14(const void* const ctx)
+{
     gSt1Mes = 0;
     gSt1M8 = 0;
     gSt1M790 = 0;
@@ -5256,7 +5411,7 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
     gSt1M790 = *reinterpret_cast<const UInt64*>(mes + 0x790);   // ⑤ G5
     if (gSt1M8 == 0) { return false; }
     if (gSt1M790 == 0) { return false; }
-    return true;
+    return false;   // 259：本轮暂缓放行（即使 5 条全过）
 }
 
 // ─── 246：client 7 只读探针（`-NRedSt1W`，默认关；不放行、不调原件）──────────────────────
