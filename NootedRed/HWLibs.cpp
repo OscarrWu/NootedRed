@@ -5287,9 +5287,11 @@ static bool nredStage1Guard5(const void* const ctx)
     if (*reinterpret_cast<const UInt64*>(q) == 0) { return false; }
     q = *reinterpret_cast<const UInt8* const*>(q);                 // *(P5)
     if (!nredKernelPtrOk(q)) { return false; }
-    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(*(P5))
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(*(P5)) = 0x8b4bf 实参
     if (!nredKernelPtrOk(q)) { return false; }
-    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // slot1
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // 0x8b4bf 内部：*(实参)
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // slot1 = *(helper 结果 +0x28)
     if (!nredKernelPtrOk(q)) { return false; }
     if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { return false; }
     const UInt8* p5 = reinterpret_cast<const UInt8*>(gSt1G5P);
@@ -5322,9 +5324,11 @@ static bool nredStage1Guard6(const void* const ctx)
     if (!nredKernelPtrOk(q)) { return false; }
     gSt1G6P = reinterpret_cast<UInt64>(q);
     if (*reinterpret_cast<const UInt64*>(q) == 0) { return false; }
-    q = *reinterpret_cast<const UInt8* const*>(q);                 // dev
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // dev=*(P6)
     if (!nredKernelPtrOk(q)) { return false; }
-    q = *reinterpret_cast<const UInt8* const*>(q);                 // *(dev)
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // 0x8b4bf 实参 = *(dev)
+    if (!nredKernelPtrOk(q)) { return false; }
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // 0x8b4bf 内部：*(实参)
     if (!nredKernelPtrOk(q)) { return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // prov（苹果不判，缺失必 trap）
     if (!nredKernelPtrOk(q)) { return false; }
