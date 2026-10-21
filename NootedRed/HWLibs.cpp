@@ -261,6 +261,12 @@ static UInt32 gM14Step = 0;                       // 最后失败步编号（R17
 static UInt32 gM14Code = 0xFFFFFFU;               // A12 处 `0x48632(obj+0x6c)` 的返回值
 static UInt64 gM14Cfg  = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(obj+0x790)`（清零回读后，应为 0）
 static UInt64 gM14Q    = 0xFFFFFFFFFFFFFFFFULL;   // `*(u64*)(obj+0x7b0)`（清零回读后，应为 0）
+// 253（`-NRedMesReal`，默认关）：MES stage0 真实路径（调用苹果 0x441ad）的观测与开关。
+static bool   gMesReal = false;
+static UInt32 gMesCode = 0xFFFFFFU;              // 0x48632(obj+0x6c) 现场读数
+static UInt64 gMesP790 = 0;                      // 0x441ad 之后的 *(u64*)(obj+0x790)
+static UInt64 gMesP7B0 = 0;                      // 0x441ad 之后的 *(u64*)(obj+0x7b0)
+static UInt32 gMesRet  = 0xFFFFFFFFU;            // 0x441ad 返回值（未调用＝哨兵）
 // R175：模块 9（VCN）实实现的观测载体（BSS 标量；`0xFF…FF`＝"未读到"哨兵）。
 //  产出条件＝`gVcnN != 0`；成功时 st=00。
 static UInt32 gVcnN    = 0;                       // 本实现被调次数（`[swvcn] n=`）
@@ -733,6 +739,18 @@ static void nredSt1BStamp(char* const body, size_t& off, const size_t cap)
     }
 }
 
+// 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
+__attribute__((noinline))
+static void nredMesStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[mes] code=%x p790=%llx p7b0=%llx ret=%d\n",
+                           static_cast<unsigned>(gMesCode),
+                           static_cast<unsigned long long>(gMesP790),
+                           static_cast<unsigned long long>(gMesP7B0),
+                           static_cast<int>(gMesRet == 0xFFFFFFFFU ? -1 : static_cast<int>(gMesRet)));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 int nredTraceFlush(int secTag)
 {
     if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
@@ -846,6 +864,8 @@ int nredTraceFlush(int secTag)
     if (gGc7 && off < sizeof(body)) { nredGc7Stamp(body, off, sizeof(body) - off); }
     // 252：`[st1b]` 原始调次（仅 -NRedSt1B；关态一字不变）。
     if (gSt1B && off < sizeof(body)) { nredSt1BStamp(body, off, sizeof(body) - off); }
+    // 253：`[mes]` MES stage0 真实路径观测（仅 -NRedMesReal；关态一字不变）。
+    if (gMesReal && off < sizeof(body)) { nredMesStamp(body, off, sizeof(body) - off); }
     // B95v2 包F：`[nredInsert]` 头部戳记（基础启动序列补入的**执行确认通道**）。
     //  **为什么必须放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束；判别读数必须落头部区才每片必现。
     //  ★ **O-1 无条件化**（R12 教训）：判据**只看门控是否开**，**不依赖封装是否被调用**。
@@ -4902,24 +4922,43 @@ static int nredMesSwInit(void* const p1, void* const p2)
         __builtin_memcpy(obj + dst, P1 + i, 0x260);
     }
     fnMisc(obj);                                                               // A9
-    // A10（D2）：删 0x441ad 的门分派；保留 W2/W3，清零 per-code 产物并回读（8 槽）
-    *reinterpret_cast<UInt32*>(P2 + 8) = 0;                                    // W2
-    *reinterpret_cast<UInt32*>(obj + 0x788) = 0;                               // W3
-    __builtin_memset(obj + 0x790, 0, 0x20);
-    __builtin_memset(obj + 0x7B0, 0, 0x20);
-    for (UInt32 off = 0; off < 0x20; off += 8) {
-        if (*reinterpret_cast<const UInt64*>(obj + 0x790 + off) != 0 ||
-            *reinterpret_cast<const UInt64*>(obj + 0x7B0 + off) != 0) {
-            gGvmBook.failMask |= (1U << 12); gM14Step = 0x05; return kSwResStepFail;  // 6
+    // A10：`-NRedMesReal` 关 ⇒ D2 原行为（W2/W3 + 清零 + 回读为 0，逐字不变）。
+    //     开 ⇒ 调用苹果 `0x441ad` 真实初始化 per-code 描述符（第 4 参＝P2 基址）。
+    //  ⚠ 两个 code 实参**必须按原件取 8 字节**：`42fbe movq 108(%rdi),%rsi` / `42fc2 movq 116(%rdi),%rdx`
+    //    （0x48632 按 `p[0]<<16 | p[1]<<8 | p[2]` 取三个相邻 u32；只传两个 u32 会丢 `obj+0x70` 那一位）。
+    *reinterpret_cast<UInt32*>(P2 + 8) = 0;                                    // W2（两路径共用）
+    if (gMesReal) {
+        using NRedMes441ad = int (*)(void*, UInt64, UInt64, void*);
+        const NRedMes441ad fn441ad = reinterpret_cast<NRedMes441ad>(gHwlibsSlide + 0x441AD);
+        const UInt64 codeA = *reinterpret_cast<const UInt64*>(obj + 0x6C);
+        const UInt64 codeB = *reinterpret_cast<const UInt64*>(obj + 0x74);
+        gMesCode = fnCode(reinterpret_cast<const void*>(obj + 0x6C));
+        const int rc441 = fn441ad(obj, codeA, codeB, P2);                      // 第 4 参＝P2 基址
+        gMesRet = static_cast<UInt32>(rc441);
+        gMesP790 = *reinterpret_cast<const UInt64*>(obj + 0x790);
+        gMesP7B0 = *reinterpret_cast<const UInt64*>(obj + 0x7B0);
+        if (rc441 != 0) { gGvmBook.failMask |= (1U << 12); gM14Step = 0x05; return kSwResStepFail; }
+        if (gMesP790 == 0) { gGvmBook.failMask |= (1U << 12); gM14Step = 0x05; return kSwResStepFail; }
+    }
+    else {
+        *reinterpret_cast<UInt32*>(obj + 0x788) = 0;                           // W3
+        __builtin_memset(obj + 0x790, 0, 0x20);
+        __builtin_memset(obj + 0x7B0, 0, 0x20);
+        for (UInt32 off = 0; off < 0x20; off += 8) {
+            if (*reinterpret_cast<const UInt64*>(obj + 0x790 + off) != 0 ||
+                *reinterpret_cast<const UInt64*>(obj + 0x7B0 + off) != 0) {
+                gGvmBook.failMask |= (1U << 12); gM14Step = 0x05; return kSwResStepFail;  // 6
+            }
         }
+        if (*reinterpret_cast<const UInt32*>(P2 + 8) != 0 ||
+            *reinterpret_cast<const UInt32*>(obj + 0x788) != 0) {
+            gGvmBook.failMask |= (1U << 12); gM14Step = 0x04; return kSwResStepFail;      // 6
+        }
+        gGvmBook.omittedMask |= (1U << 4);   // per-code 分派跳过（版本门）
+        gGvmBook.omittedMask |= (1U << 5);   // 描述符 0 项导出
+        gGvmBook.omittedMask |= (1U << 6);   // 队列对象/字符串指针未创建
     }
-    if (*reinterpret_cast<const UInt32*>(P2 + 8) != 0 ||
-        *reinterpret_cast<const UInt32*>(obj + 0x788) != 0) {
-        gGvmBook.failMask |= (1U << 12); gM14Step = 0x04; return kSwResStepFail;      // 6
-    }
-    gGvmBook.omittedMask |= (1U << 4);   // per-code 分派跳过（版本门）
-    gGvmBook.omittedMask |= (1U << 5);   // 描述符 0 项导出
-    gGvmBook.omittedMask |= (1U << 6);   // 队列对象/字符串指针未创建
+
     {                                                                          // A11
         const UInt32 b = *reinterpret_cast<const UInt32*>(P1 + 0xE50);
         UInt32 w = *reinterpret_cast<const UInt32*>(obj + 0x9E8);
@@ -5616,6 +5655,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gGc7 = checkKernelArgument("-NRedGc7");
     // 252：原始 (b,c) 调次（默认关）。只在前 8 次调用时写 BSS，头部区输出。
     gSt1B = checkKernelArgument("-NRedSt1B");
+    // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
+    gMesReal = checkKernelArgument("-NRedMesReal");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
