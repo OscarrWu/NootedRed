@@ -176,6 +176,8 @@ static SInt32 gBgmRealCheck = -1;        // -1 未校验、0 fail、1 ok
 static bool   gBgmHw = false;
 static UInt8  gBgmHwCnt[9][5] = {};
 static UInt32 gBgmHwTotal = 0;
+// 242（`-NRedSt1Pre`，默认关）：stage1 预检观测（护栏 return 0 之前、只读一级指针）。
+static bool gSt1Pre = false;
 // （hex 行数由 len 决定，最多 8 行×32B；不设一次性限制，保持“每次转储都完整”。）
 // 本 kext 的运行时基址（＝ `processKext` 的 `slide`）。供 N-2 把 RA 归零到 VM 地址。
 //  ⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
@@ -4724,6 +4726,34 @@ static int NRedSwInitDispatch(const UInt32 clientId, void* const info, void* con
     nredSwLogCall(clientId, info, out, o8init, res);
     return res;
 }
+// ─── 242：stage1 预检（`-NRedSt1Pre`，默认关）────────────────────────────────────────
+//  仅在护栏分支 c==1 且 `return 0` 之前调用（不调原件、不解引用 P_i 内部）。
+//  P_i = *(void**)(ctx + 8 + i*8)（子对象 getter 0x93980 的统一入口）。
+//  每 client 仅首 1 条（BSS 标记），ctx 非法只打一行；通道 fw::fwTrace（无 SYSLOG）。
+static void nredStage1Precheck(const void* const ctx)
+{
+    static bool sCtxLogged = false;
+    if (!nredKernelPtrOk(ctx)) {
+        if (!sCtxLogged) { sCtxLogged = true; fw::fwTrace("[st1] c=0 null=1 lvl=0"); }
+        return;
+    }
+    static const UInt8 kIds[7] = {2, 5, 6, 7, 8, 9, 14};
+    static UInt8 sSeen[16] = {};
+    for (unsigned k = 0; k < 7; ++k) {
+        const UInt32 i = kIds[k];
+        if (i >= 16 || sSeen[i] != 0) { continue; }
+        sSeen[i] = 1;
+        const void* const p = *reinterpret_cast<void* const*>(static_cast<const UInt8*>(ctx) + 8 + i * 8u);
+        UInt32 lvl = 0;
+        UInt32 nul = (p == nullptr) ? 1u : 0u;
+        if (nul == 0) {
+            lvl = nredKernelPtrOk(p) ? 1u : 0u;
+            nul = (lvl == 0) ? 1u : 0u;
+        }
+        fw::fwTrace("[st1] c=%u null=%u lvl=%u", static_cast<unsigned>(i), nul, lvl);
+    }
+}
+
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
@@ -4755,6 +4785,8 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
         const int ng = snprintf(grdLine, sizeof(grdLine), "[swgrd] c=%u st=%u hit=1\n",
                                 static_cast<unsigned>(b), static_cast<unsigned>(c));
         if (ng > 0) { nredTraceLine(grdLine, ng); }
+        // 242：stage1 预检（只读一级指针；不调原件、不改返回值）。
+        if (gSt1Pre && c == 1) { nredStage1Precheck(a); }
         return 0;   // 苹果极性：0＝失败（不是 kSwRes* 的成功语义）
     }
     // 观测通道修复（需求 v2）**M2：安装点出现**（`wrapMode9440f` 入口且属**模块 5**，**不额外限制 stage**）
@@ -5188,6 +5220,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gBgmReal = checkKernelArgument("-NRedBgmReal");
     // 241：BGM HW_INIT 事件观测（默认关）。仅门控开时安装 0x91222 函数级 hook。
     gBgmHw = checkKernelArgument("-NRedBgmHw");
+    // 242：stage1 预检（默认关）。只影响护栏分支内的只读观测。
+    gSt1Pre = checkKernelArgument("-NRedSt1Pre");
     // N-2 的 RA 归零基址：`slide` 就是本 kext 的运行时基址（既有 `resolveProbe` 的 `slide + want`
     //  同源于此）。⚠ 与 `kcSlide` 无关（该成员全仓库只读不写、恒 0 ⇒ 用它归零会得到假读数）。
     gHwlibsSlide = static_cast<UInt64>(slide);
