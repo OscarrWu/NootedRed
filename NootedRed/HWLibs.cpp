@@ -6556,7 +6556,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  （否则 powerUp 的 client5 未执行，失败仍可能落到 WindowServer）。
     if (gGvm5EarlyOk != 0 && b == 5 && c == 1) {
         gGvm5EarlyPowerSeen = true;
-        const UInt64 p1now = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30);
+        // `a` 非法 ⇒ 不解引用（p1now=0 ⇒ 不跳过，落到 D；D 内部会判 a 并 fail-closed）。
+        const UInt64 p1now = nredKernelPtrOk(a)
+            ? *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30) : 0;
         if (nredKernelPtrOk(reinterpret_cast<const void*>(p1now)) && p1now == gGvm5EarlyP1) {
             gGvm5EarlyPowerIdem = 1;
             gGvm5EarlyPowerRc = static_cast<SInt32>(gGvm5EarlyRc);
