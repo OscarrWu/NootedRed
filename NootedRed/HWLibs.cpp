@@ -5425,6 +5425,18 @@ static bool nredStage1Guard5(const void* const ctx)
     q = *reinterpret_cast<const UInt8* const*>(q + 0x40);          // 17：blk
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 17); return false; }
     if (*reinterpret_cast<const UInt64*>(q + 0x08) == 0) { nredStage1GfMark(5, 18); return false; }   // 18：arr≠0
+    // 19：叶内 0x98a28 `callq *56(%r13)` ⇒ *(ctx+0x38) 作为函数指针直接调用（未判空）
+    {
+        const UInt8* const c38 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x38);
+        if (!nredKernelPtrOk(c38)) { nredStage1GfMark(5, 19); return false; }
+    }
+    // 20：叶内 0x98a08 读 `0x8b4bf(*(*(ctx)))+0x258`；只复刻其前置两级指针（不调 0x8b4bf）
+    {
+        const UInt8* const p = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx));
+        if (!nredKernelPtrOk(p)) { nredStage1GfMark(5, 20); return false; }
+        const UInt8* const qq = *reinterpret_cast<const UInt8* const*>(p);
+        if (!nredKernelPtrOk(qq)) { nredStage1GfMark(5, 20); return false; }
+    }
     return true;
 }
 
