@@ -2442,6 +2442,7 @@ X5000HWLibs::X5000HWLibs()
 //  但 `ttl_initialize` 仍以 `status = 4` 失败 ⇒ 判决点在查询**之后** ⇒ 需看 out 里写回的数据是否有效。
 void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 flags, UInt64* const out)
 {
+    if (singleton().orgTtlQuery == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapTtlQuery, singleton().orgTtlQuery)(buf, id, flags, out);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt64 v0 = 0, v1 = 0;
@@ -2480,6 +2481,7 @@ void* X5000HWLibs::wrapTtlQuery(void* const buf, const UInt32 id, const UInt32 f
 bool X5000HWLibs::wrapGc7Install(void* const ctx, const UInt32 sel, void* const arg)
 {
     const bool hit = (sel == 7);
+    if (singleton().orgGc7Install == 0) { return false; }
     const bool ret = FunctionCast(wrapGc7Install, singleton().orgGc7Install)(ctx, sel, arg);
     if (gGc7 && nredKernelPtrOk(ctx) && (!gGc7N || (hit && !gGc7HitSeen))) {
         if (gGc7N < 2) {
@@ -2508,6 +2510,7 @@ UInt32 X5000HWLibs::wrapGc7SetSlot(void* const obj, const UInt32 id, const UInt6
         }
     }
     if (gP7Hold && id == 7 && val == 0) { ++gP7Cleared; }
+    if (singleton().orgGc7SetSlot == 0) { return id; }
     const UInt32 ret = FunctionCast(wrapGc7SetSlot, singleton().orgGc7SetSlot)(obj, id, val);
     if (gGc7 && val == 0 && id == 7 && gGc7xSeen == 0) {
         gGc7xSlot = id;
@@ -2575,6 +2578,7 @@ UInt8 X5000HWLibs::wrap93F64(void* const obj, const UInt32 id)
 //  G `0x928f4(void*) -> void*`；D `0xa285f(void* obj, void* param) -> bool`。
 void* X5000HWLibs::wrapTtlCollect(void* const ctx)
 {
+    if (singleton().orgTtlCollect == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapTtlCollect, singleton().orgTtlCollect)(ctx);
     if (checkKernelArgument("-NRedAccelLog")) {
         NRED_TRACE("ttl-coll: ctx=%llx ret=%llx (NULL would fail 0x8b10e)",
@@ -2640,6 +2644,7 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
 
 void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
 {
+    if (singleton().orgTtlAllocA == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapTtlAllocA, singleton().orgTtlAllocA)(ctx);
     if (checkKernelArgument("-NRedAccelLog")) {
         NRED_TRACE("ttl-allocA: ctx=%llx ret=%llx (NULL -> exit 0x8b3d4)",
@@ -2651,6 +2656,7 @@ void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
 
 void* X5000HWLibs::wrapTtlAllocB(void* const ctx)
 {
+    if (singleton().orgTtlAllocB == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapTtlAllocB, singleton().orgTtlAllocB)(ctx);
     if (checkKernelArgument("-NRedAccelLog")) {
         // 直接读"接口表"：`0x8bb9f(pool, idx)` = `*(pool)` 作表、表项 stride 0x18、字段 +0x10 = 对象。
@@ -2986,6 +2992,7 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
             if (nSm > 0) { nredTraceLine(lineSm, nSm); }
         }
     }
+    if (singleton().orgTtlCheckD == 0) { return false; }
     const bool ret = FunctionCast(wrapTtlCheckD, singleton().orgTtlCheckD)(obj, param);
     if (checkKernelArgument("-NRedAccelLog")) {
         // `obj` 此处即收集器（`0x8b10e` 的 r14）；同时读出它的接口表快照，判断 idx=4 是否已注册。
@@ -3197,6 +3204,7 @@ void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* con
                static_cast<unsigned>(idx), static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(val)));
     }
+    if (singleton().orgTtlRegIface == 0) { return; }
     FunctionCast(wrapTtlRegIface, singleton().orgTtlRegIface)(table, idx, obj, val);
     // B94 介入补装（最终用户已授权；回滚＝删本块）：给"收集器表 idx=1 槽对象"补 `+0xE0` 函数指针。
     //  第一因：Apple 0x93880（ttl_initialize step2 内）读并调用 idx=1 槽对象 +0xE0，读到空 ⇒ 返 0 ⇒
@@ -3217,6 +3225,7 @@ void X5000HWLibs::wrapTtlRegIface(void* const table, const UInt32 idx, void* con
 // 第八步观测（2026-09-28 第二十三轮）：`TlsCreateInstance`(0x93f76) 与 `TlsSwInit` 内部创建(0x95e9f)（只读）。
 bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
 {
+    if (singleton().orgTlsCreate == 0) { return false; }
     const bool ret = FunctionCast(wrapTlsCreate, singleton().orgTlsCreate)(obj, slots);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt32 s0 = 0, s1 = 0, s2 = 0;
@@ -3289,6 +3298,7 @@ bool X5000HWLibs::wrapTlsCreate(void* const obj, void* const slots)
 // 【不改 ABI】只改返回值，**不改**参数个数/宽度/返回类型/调用约定。
 void* X5000HWLibs::wrapDevLookup(const UInt64 k1, const UInt64 k2, const UInt64 k3)
 {
+    if (singleton().orgDevLookup == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapDevLookup, singleton().orgDevLookup)(k1, k2, k3);
     if (!gDevTablePatch) { return ret; }
     // O-2：查表读数（**只写标量**，不入环、不打印 ⇒ 由头部戳记汇总成一行）。
@@ -3314,6 +3324,7 @@ void* X5000HWLibs::wrapDevLookup(const UInt64 k1, const UInt64 k2, const UInt64 
 
 void* X5000HWLibs::wrapTlsSwInit(void* const obj)
 {
+    if (singleton().orgTlsSwInit == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapTlsSwInit, singleton().orgTlsSwInit)(obj);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt64 f0 = 0, f8 = 0;
@@ -3353,6 +3364,7 @@ static void nredNoteBgmStep(const char* tag, UInt64 a1, UInt64 a2, UInt64 a3, UI
 
 UInt32 X5000HWLibs::wrapBgmInit(void* const a, void* const b, void* const c, void* const d, void* const e)
 {
+    if (singleton().orgBgmInit == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapBgmInit, singleton().orgBgmInit)(a, b, c, d, e);
     nredNoteBgmStep("bgm-init", reinterpret_cast<UInt64>(a), reinterpret_cast<UInt64>(b),
                     reinterpret_cast<UInt64>(c), ret);
@@ -3382,6 +3394,7 @@ static void nredBgmStep1Log(const void* const a, const void* const b, const void
 
 UInt32 X5000HWLibs::wrapBgmStep1(void* const a, void* const b, void* const c, void* const d)
 {
+    if (singleton().orgBgmStep1 == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapBgmStep1, singleton().orgBgmStep1)(a, b, c, d);
     nredBgmStep1Log(a, b, c, d, ret);
     return ret;
@@ -3391,11 +3404,13 @@ UInt32 X5000HWLibs::wrapBgmQuery(void* const a, void* const b, void* const c)
 {
     // ⚠️ 已静音（2026-09-28）：本函数是热路径（单轮 ~2000 次调用），输出会挤满 L2 环形缓冲、
     //  使关键观测行（`mode2-tail`/`ip`）落不了盘。信息已收集完毕；仍保留 hook（行为不变）。
+    if (singleton().orgBgmQuery == 0) { return 0; }
     return FunctionCast(wrapBgmQuery, singleton().orgBgmQuery)(a, b, c);
 }
 
 UInt32 X5000HWLibs::wrapBgmStep4(void* const a)
 {
+    if (singleton().orgBgmStep4 == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapBgmStep4, singleton().orgBgmStep4)(a);
     if (checkKernelArgument("-NRedAccelLog")) {
         // `0x2aa5bc` 的判据：读 `*(UInt32*)(obj+0x14)` 作为"模式"，只接受 1/2/3，否则返回 1（失败）。
@@ -3590,6 +3605,7 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
         fw::fwTrace("[bgm] src=real len=65536 selfcheck=fail");
         // 自检失败 ⇒ 不接管，继续走原件（保持关态/异常态行为可预测）。
     }
+    if (singleton().orgBgmTabRead == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapBgmTabRead, singleton().orgBgmTabRead)(self, sel, size, out);
     if (!gBgmTab) { return ret; }   // 理论不可达（门控关不安装）；双保险
     // 233：调用点归因。pattern 路由后调用者仍是 `call 0x29b4e2` ⇒ `__builtin_return_address(0)`
@@ -3637,6 +3653,7 @@ UInt32 X5000HWLibs::wrapBgmTabRead(void* const self, const UInt32 sel, const UIn
 //  该函数是通用 memcpy（调用点 30+）⇒ 只在 `len ≥ 0x10000` 且仅第一次取样。
 UInt64 X5000HWLibs::wrapBgm64Memcpy(void* const dst, const void* const src, const UInt64 len)
 {
+    if (singleton().orgBgm64Memcpy == 0) { return 0; }
     const UInt64 ret = FunctionCast(wrapBgm64Memcpy, singleton().orgBgm64Memcpy)(dst, src, len);
     // 长度窗口：64KB ≤ len ≤ 16MB（排除负 size 被当 UInt64 巨值与异常大拷贝）。
     if (gBgm64 && !gBgm64Once2 && len >= 0x10000 && len <= 0x1000000ULL) {
@@ -3666,12 +3683,14 @@ void X5000HWLibs::wrapBgmHwNotify(void* const root, const UInt32 client, const U
                     static_cast<unsigned>(mode), static_cast<unsigned long long>(arg),
                     static_cast<unsigned long long>(sub));
     }
+    if (singleton().orgBgmHwNotify == 0) { return; }
     FunctionCast(wrapBgmHwNotify, singleton().orgBgmHwNotify)(root, client, stage, arg, mode);
 }
 
 UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 a2, const UInt32 a3, void* const buf,
                                 const UInt32 a5)
 {
+    if (singleton().orgReadSel == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapReadSel, singleton().orgReadSel)(obj, sel, a2, a3, buf, a5);
     // 只记录 BGM 相关的 selector/id（其余为热路径，静默通过，避免刷屏覆盖 L2 环形缓冲）。
     if ((sel == 7 || sel == 8 || a2 == 1 || a2 == 6 || a2 == 0xde5 || a2 == 0x16a00 || a2 == 0x16091) &&
@@ -3688,6 +3707,7 @@ UInt32 X5000HWLibs::wrapReadSel(void* const obj, const UInt32 sel, const UInt32 
 UInt32 X5000HWLibs::wrapCfgRead(void* const obj, const UInt32 id, UInt64* const out, UInt32* const flag)
 {
     const UInt64 before = (nredKernelPtrOk(out)) ? *out : 0;
+    if (singleton().orgCfgRead == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapCfgRead, singleton().orgCfgRead)(obj, id, out, flag);
     // 235 P3：SMU 写-读循环体（0x2ab398）。原件以 rdx 为目标、rsi 为源（2aaf26/2aaf2e）⇒ 在
     //  wrapper 里 rdx 即第 3 参 `out`。热路径（~1800 次/轮）⇒ 只采前 2 次 + 每 256 次。
@@ -3708,6 +3728,7 @@ UInt32 X5000HWLibs::wrapMode2Tail(void* const a, void* const b, void* const c, v
         gBgm64Once4 = true;
         nredBgm64Dump(4, b, 0x10000);
     }
+    if (singleton().orgMode2Tail == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapMode2Tail, singleton().orgMode2Tail)(a, b, c, d, e);
     // 238：验证器返回值（与“表被接受”分开记录；仅真实容器开关时输出，走 trace-only 通道）。
     if (gBgmReal) { fw::fwTrace("[bgm] verifier_ret=%d", static_cast<int>(ret)); }
@@ -6219,6 +6240,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
         }
         gSt1Try |= (1U << b);
         if (gSt1RunN < 255) { ++gSt1RunN; }
+        if (singleton().orgMode9440f == 0) { return 0; }
         const UInt32 retSt1 = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
         if (retSt1 == 0) { gSt1Ret0 |= (1U << b); }   // 叶返回失败也计入 ret0
         return retSt1;
@@ -6240,6 +6262,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     if (gTraceAtIpSeq && b == 5) {
         nredTraceMark(gFlushedAtIpSeqM2, kMarkM2, static_cast<int>(sizeof(kMarkM2) - 1));
     }
+    if (singleton().orgMode9440f == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
     // H1 观测集 N-4（2026-10-18）：记**前三次** `(client, stage, ret)`（**零解引用**，只写标量）。
     //  ⚠️ 门控关 ⇒ 本块整段不执行（零写入、零成本）—— 本回调曾在 B25 的 double-fault 栈上
@@ -6528,6 +6551,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
 //  覆盖函数两个 return 出口（成功填表 return 1 / 失败 return 0，统一在出口读）。
 UInt32 X5000HWLibs::wrapMode96c4c(void* const obj, UInt32 const hw, void* const out)
 {
+    if (singleton().orgMode96c4c == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapMode96c4c, singleton().orgMode96c4c)(obj, hw, out);
     if (checkKernelArgument("-NRedAccelLog")) {
         char line[128];
@@ -6556,6 +6580,7 @@ UInt32 X5000HWLibs::wrapMode9e505(void* const slot)
                                __DATE__, __TIME__);
         if (n > 0) { nredTraceLine(line, n); }
     }
+    if (singleton().orgMode9e505 == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapMode9e505, singleton().orgMode9e505)(slot);
     if (checkKernelArgument("-NRedAccelLog")) {
         UInt64 m = 0;
@@ -6601,6 +6626,7 @@ SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
                                static_cast<unsigned long long>(v2), in2v);
         if (n > 0) { nredTraceLine(line, n); }
     }
+    if (singleton().orgMode6430f == 0) { return 0; }
     const SInt32 ret = FunctionCast(wrapMode6430f, singleton().orgMode6430f)(in, out);
     if (checkKernelArgument("-NRedAccelLog")) {
         char line[128];
@@ -7381,6 +7407,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
 // Taking advantage of the fact device type "Navi 10" is not used in the original function.
 void X5000HWLibs::wrapPopulateFirmwareDirectory(void* const self)
 {
+    if (singleton().orgGetIpFw == 0) { return; }
     FunctionCast(wrapPopulateFirmwareDirectory, singleton().orgGetIpFw)(self);
 
     const auto fwDir = singleton().fwDirField(self);
@@ -7421,6 +7448,7 @@ bool X5000HWLibs::wrapGetIpFw(void* const self, const UInt32 ipVersion, const ch
     if (strncmp(name, "atidmcub_0.dat", 14) == 0) {    // DMCU version B
         return setIpFwOutForFW(atidmcub_rn_dat, out);
     }
+    if (singleton().orgGetIpFw == 0) { return false; }
     return FunctionCast(wrapGetIpFw, singleton().orgGetIpFw)(self, ipVersion, name, out);
 }
 
@@ -7505,6 +7533,7 @@ CAILResult X5000HWLibs::wrapPspCmdKmSubmit(void* const ctx, void* const cmd, voi
         } break;
     }
 
+    if (singleton().orgPspCmdKmSubmit == 0) { return kCAILResultFailed; }
     return FunctionCast(wrapPspCmdKmSubmit, singleton().orgPspCmdKmSubmit)(ctx, cmd, outData, outResponse);
 }
 
@@ -7633,6 +7662,7 @@ CAILResult X5000HWLibs::wrapSmu90SendMessageWithParameter(void* const ctx, const
         }
     }
 
+    if (singleton().orgSmu90SendMessageWithParameter == 0) { return kCAILResultFailed; }
     return FunctionCast(wrapSmu90SendMessageWithParameter, singleton().orgSmu90SendMessageWithParameter)(ctx, message,
                                                                                                         param);
 }
@@ -8385,6 +8415,7 @@ CAILResult X5000HWLibs::wrapSmuInitFunctionPointerList(void* const ctx, const SW
         const int n = snprintf(line, sizeof(line), "smu-init-list: enter\n");
         if (n > 0) { nredTraceLine(line, n); }
     }
+    if (singleton().orgSmuInitFunctionPointerList == 0) { return kCAILResultFailed; }
     CAILResult ret =
         FunctionCast(wrapSmuInitFunctionPointerList, singleton().orgSmuInitFunctionPointerList)(ctx, ipVersion);
     // B43 版本门放行（单变量）：0x6720b 对 id=2（0xa0000，本机）落 default 返 2 ⇒
@@ -8665,7 +8696,9 @@ CAILResult X5000HWLibs::wrapGcSetFwEntryInfo(void* const ctx, const SWIPIPVersio
         case SWIPIPVersion(9, 3, 0).toHW(): {
             gc93GetFwConstants(ctx, fwInfo);
         } break;
-        default: return FunctionCast(wrapGcSetFwEntryInfo, singleton().orgGcSetFwEntryInfo)(ctx, ipVersion, initData);
+        default:
+            if (singleton().orgGcSetFwEntryInfo == 0) { return kCAILResultFailed; }
+            return FunctionCast(wrapGcSetFwEntryInfo, singleton().orgGcSetFwEntryInfo)(ctx, ipVersion, initData);
     }
     processGCFWEntries(ctx, initData);
     return kCAILResultOK;
@@ -8768,6 +8801,7 @@ CAILResult X5000HWLibs::wrapSdmaInitFunctionPointerList(void* const ctx, const U
             if (patch == 2) { singleton().sdmaStartEngineField(ctx) = sdma412StartEngine; }
         } break;
         default:
+            if (singleton().orgSdmaInitFunctionPointerList == 0) { return kCAILResultFailed; }
             return FunctionCast(wrapSdmaInitFunctionPointerList,
                                 singleton().orgSdmaInitFunctionPointerList)(ctx, major, minor, patch);
     }
