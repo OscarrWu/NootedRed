@@ -3036,8 +3036,10 @@ UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
                      static_cast<unsigned long long>(reinterpret_cast<UInt64>(a2)));
         if (nIn > 0) { nredTraceLine(lineIn, nIn); }
     }
-    // 266：TTL 门面模式（默认关）。判据全部满足才写 `*a2` 并返回 0（等价 0x8b09f 的语义）；
-    //  判据不满足 ⇒ 不写、回落苹果原路径（保持现有失败形态，不引入新的失败源）。
+    // 先把参数逐字透传给原件（stage0/stage1 在原件内部运行）。
+    const UInt32 ret = FunctionCast(wrapTtlInit, singleton().orgTtlInit)(a1, a2);
+    // 267：门面评估必须在原件返回之后（入口时 gTrimStat[0] 尚未产生 ⇒ 必然 inst=2）。
+    //  判据全满足 ⇒ 用门面覆盖 `*a2` 并返回 0（覆盖原件失败）；否则原样返回 ret。
     if (gTtlFacade) {
         if (nredTtlFacadeBuild() && nredTtlFacadeReady() && nredKernelPtrOk(a2)) {
             *reinterpret_cast<UInt64*>(a2) = reinterpret_cast<UInt64>(gTtlFacadeRoot);
@@ -3046,7 +3048,6 @@ UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
         }
         gTtlFacadeInst = 2;
     }
-    const UInt32 ret = FunctionCast(wrapTtlInit, singleton().orgTtlInit)(a1, a2);
     {
         // out 行：`v = *(u64*)a2`（a2 非合法内核地址 ⇒ 0xFF 哨兵，不解引用）
         static char lineOut[96];
@@ -3058,7 +3059,7 @@ UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
                      static_cast<unsigned long long>(v));
         if (nOut > 0) {
             nredTraceLine(lineOut, nOut);
-            // R83／规矩 28：早期路径**不落盘**（原刷写调用已删）⇒ 只写内存环，交由既有三个安全时点带出。
+            // R83／规矩 28：早期路径**不落盘**（原刷写调用已删）⇒ 只写内存环。
         }
     }
     return ret;
