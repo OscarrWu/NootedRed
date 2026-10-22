@@ -624,6 +624,14 @@ static inline bool nredKernelPtrOk(const void* const p)
     return p != nullptr && (reinterpret_cast<UInt64>(p) >> 48) == 0xFFFF;
 }
 
+// 269：`__text` 函数入口判据（`push %rbp` = 0x55）。仅用于已确认“应为代码指针”的槽；
+//  数据指针不得套用此判据。KPtr 仍不证明映射，读首字节属低概率残余风险。
+static inline bool nredTextPrologue(const UInt64 p)
+{
+    return p != 0 && nredKernelPtrOk(reinterpret_cast<const void*>(p)) &&
+           *reinterpret_cast<const UInt8*>(p) == 0x55;
+}
+
 // 257：boot-arg **精确 token** 匹配（避免 `-NRedSt1P` 与既有 `-NRedSt1Pre`、
 //  `-NRedSt1W` 与 `-NRedSt1W2` 这类“前缀开关”互相误开）。只读 `PE_boot_args()` 字符串，
 //  不解析值、不分配内存。
@@ -5627,23 +5635,17 @@ static bool nredStage1Guard5(const void* const ctx)
         gSt1G5P23 = reinterpret_cast<UInt64>(s);
     }
     // 24（仅 -NRedQqHdl）：步23 的 slot1 三值＋服务函数（叶内 0x98ac6/叶主体调用点）。
-    //   0x98a42：*(slot1+0x268)==0 ⇒ 苹果失败返回（合法）；非 0 ⇒ 0x98ac6 callq 它 ⇒ 必须 KPtr。
-    //   *(slot1+0x70) 为断言函数：非 0 且 KPtr；*(slot1+0x2b8) 同理（0 允许）。
+    //   0x98a42：*(slot1+0x268)==0 ⇒ 苹果失败返回（合法）；非 0 ⇒ 0x98ac6 callq 它。
+    //   269：f70/f268/f2b8 必须是 __text 函数入口（首字节 0x55＝push %rbp），否则 fail-closed。
     if (gQqHdl) {
         const UInt8* const s1 = reinterpret_cast<const UInt8*>(gSt1G5P23);
         if (!nredKernelPtrOk(s1)) { nredStage1GfMark(5, 24); return false; }
         const UInt64 f70 = *reinterpret_cast<const UInt64*>(s1 + 0x70);
         const UInt64 f268 = *reinterpret_cast<const UInt64*>(s1 + 0x268);
         const UInt64 f2b8 = *reinterpret_cast<const UInt64*>(s1 + 0x2b8);
-        if (f70 == 0 || !nredKernelPtrOk(reinterpret_cast<const UInt8*>(f70))) {
-            nredStage1GfMark(5, 24); return false;
-        }
-        if (f268 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(f268))) {
-            nredStage1GfMark(5, 24); return false;
-        }
-        if (f2b8 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(f2b8))) {
-            nredStage1GfMark(5, 24); return false;
-        }
+        if (!nredTextPrologue(f70)) { nredStage1GfMark(5, 24); return false; }
+        if (f268 != 0 && !nredTextPrologue(f268)) { nredStage1GfMark(5, 24); return false; }
+        if (f2b8 != 0 && !nredTextPrologue(f2b8)) { nredStage1GfMark(5, 24); return false; }
     }
     return true;
 }
@@ -6078,10 +6080,10 @@ static bool nredQqHdlInstall(const void* const ctx)
     gQqV258 = *reinterpret_cast<const UInt64*>(slot1 + 0x258);
     gQqV268 = *reinterpret_cast<const UInt64*>(slot1 + 0x268);
     gQqV2B8 = *reinterpret_cast<const UInt64*>(slot1 + 0x2b8);
-    if (!nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV70))) { gQqHdlRet = 7; return false; }
-    if (gQqV258 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV258))) { gQqHdlRet = 8; return false; }
-    if (gQqV268 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV268))) { gQqHdlRet = 8; return false; }
-    if (gQqV2B8 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV2B8))) { gQqHdlRet = 8; return false; }
+    if (!nredTextPrologue(gQqV70)) { gQqHdlRet = 7; return false; }
+    if (gQqV258 == 0 || !nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV258))) { gQqHdlRet = 8; return false; }
+    if (gQqV268 != 0 && !nredTextPrologue(gQqV268)) { gQqHdlRet = 8; return false; }
+    if (gQqV2B8 != 0 && !nredTextPrologue(gQqV2B8)) { gQqHdlRet = 8; return false; }
     if (!gSt1G5Step24) { gQqHdlRet = 9; return false; }
     UInt8* const h = gQqHdlStore;
     gQqHdlOld = *reinterpret_cast<const UInt64*>(p);
