@@ -245,6 +245,22 @@ static UInt64 gGvm5A0 = 0;      // *(u64*)A（A 的首字段；用于确认 IP �
 static UInt64 gGvm5A58 = 0;     // *(A+0x58)（provider 克隆继承的槽）
 static UInt64 gGvm5Iproot = 0;  // *(IP+0x58)（＝0x8b8e7(A)）
 static UInt32 gGvm5Reg = 2;   // 0=未命中 1=命中 2=无法判定
+// 273（`-NRedGvm5D`，默认关）：client5 stage1 叶（`0x985d0`）的我方完整复刻。
+//  ⚠ 描述块必须放 BSS（`0x1c8`+`0x68`+24+24+16 ≈ 624 B，远超 128 B 栈纪律）；
+//    调用点串行（`wrapMode9440f` 的 client5/stage1 路径），无并发写者。
+static bool   gGvm5D = false;
+static UInt32 gGvm5DRet = 0xFFFFFFFFU;   // 最近一次叶返回值（0xFFFFFFFF=未跑）
+static UInt64 gGvm5DP1 = 0;              // 最近一次 p1 = *(a+0x30)
+static UInt32 gGvm5DLocal68 = 0;         // 最近一次 local_68 低 32 位（类型）
+static UInt32 gGvm5DStep = 0;            // 最后执行的步骤号（失败定位；0=未进入）
+struct NRedGvm5DBlocks {
+    UInt8 desc[0x1c8];   // local_2a8：描述块（首 u32=0x1c8；+0xf0 起 0xd8 字节为待拷贝视图）
+    UInt8 clk[0x68];     // local_d0：时钟/能力位块（首 u32=0x68；+4 为位域）
+    UInt8 type[24];      // local_68：0xa28ad 输出（[0]=类型，[1]/[2] 供 clk 使用）
+    UInt8 hub[24];       // local_40：0xa3d6c 输出 / p1[0xf] 输入输出
+    UInt8 save[16];      // local_216：GART save context 输出
+};
+alignas(8) static NRedGvm5DBlocks gGvm5DBlocks;
 // 262（`-NRedGSlot`，默认关）：client5 golden 6 槽（type/实例数/base[0..2]）只读快照。
 struct NRedGSlotRec { UInt32 type, n, b0, b1, b2; };
 static bool         gGSlot = false;
@@ -1055,6 +1071,19 @@ static void nredGvm5Stamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 273：`[gvm5d]` client5 stage1 叶复刻结果（noinline、零解引用、≤128 字符）。
+//  ret=0xFFFFFFFF 表示叶未跑；step=最后执行的步骤号（失败定位）。
+__attribute__((noinline))
+static void nredGvm5DStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[gvm5d] ret=%u p1=%llx local68=%x step=%u\n",
+                           static_cast<unsigned>(gGvm5DRet),
+                           static_cast<unsigned long long>(gGvm5DP1),
+                           static_cast<unsigned>(gGvm5DLocal68),
+                           static_cast<unsigned>(gGvm5DStep));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 262：`[gslot]` client5 6 槽读数（头行 h/t/a + 每槽一行；noinline、零解引用）。
 __attribute__((noinline))
 static void nredGSlotStamp(char* const body, size_t& off, const size_t cap)
@@ -1241,6 +1270,8 @@ int nredTraceFlush(int secTag)
     if (gGvm5 && off < sizeof(body)) { nredGvm5Stamp(body, off, sizeof(body) - off); }
     // 262：`[gslot]` client5 6 槽（仅 -NRedGSlot）。
     if (gGSlot && off < sizeof(body)) { nredGSlotStamp(body, off, sizeof(body) - off); }
+    // 273：`[gvm5d]` client5 stage1 叶复刻结果（仅 -NRedGvm5D）。
+    if (gGvm5D && off < sizeof(body)) { nredGvm5DStamp(body, off, sizeof(body) - off); }
     // 263：`[ipr]` IP 根安装结果（仅 -NRedIpR）。
     if (gIpR && off < sizeof(body)) { nredIpRStamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
@@ -6181,10 +6212,191 @@ static bool nredQqHdlInstall(const void* const ctx)
     return true;
 }
 
+// ─── 273：client5 stage1 叶（`0x985d0`）的我方完整复刻（`-NRedGvm5D`，默认关）──────────────
+//  依据：`kb/序列数据/反汇编/证据/HWLibs全量反编译/fn/985d0.c` 与 `HWLibs_full.asm` 的
+//        `985d0..989a4` 段（逐字核对；16 步对照见交付件）。
+//  替换点＝`wrapMode9440f` 的 dispatch 层（B1）：与 `0x94831` 的尾跳等价——先
+//        `p1 = *(a+0x30)`，再进入叶。不写 `*(p)`、不做 MMIO、不新增 hook。
+//  失败一律返 0（苹果语义：0＝失败）；任何指针/回调判空即 fail-closed，不 panic。
+//  ⚠ 描述块在 BSS（`gGvm5DBlocks`）；本函数局部帧只含标量（≤128 B 纪律）。
+//  ⚠ 步骤号写入 `gGvm5DStep`（失败定位）；观测行 `[gvm5d]` 由 `nredGvm5DStamp` 输出。
+__attribute__((noinline))
+static UInt32 nredGvm5Stage1(void* const a, void* const d)
+{
+    (void)d;
+    gGvm5DStep = 0;
+    gGvm5DRet  = 0xFFFFFFFFU;
+    if (gHwlibsSlide == 0 || !nredKernelPtrOk(a)) { gGvm5DRet = 0; return 0; }
+
+    // ① p1 = *(a+0x30)（U1：`0x98050(a)` 的语义，纯读）
+    const UInt64 p1 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30);
+    gGvm5DP1 = p1;
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1))) { gGvm5DRet = 0; return 0; }
+    const UInt8* const p1b = reinterpret_cast<const UInt8*>(p1);
+    const UInt64 host = *reinterpret_cast<const UInt64*>(p1b);                 // *p1
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(host))) { gGvm5DRet = 0; return 0; }
+    const UInt64 dev = *reinterpret_cast<const UInt64*>(reinterpret_cast<const void*>(host)); // *(u64*)*p1
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(dev))) { gGvm5DRet = 0; return 0; }
+
+    const UInt64 s = gHwlibsSlide;
+    NRedGvm5DBlocks& blk = gGvm5DBlocks;
+    UInt8* const desc = blk.desc;
+    UInt8* const clk  = blk.clk;
+    UInt8* const type = blk.type;
+    UInt8* const hub  = blk.hub;
+    UInt8* const save = blk.save;
+
+    // ② 两个描述块清零 + 首字段（`0x1c8` / `0x68`）
+    gGvm5DStep = 2;
+    __builtin_memset(desc, 0, 0x1c8);
+    __builtin_memset(clk, 0, 0x68);
+    __builtin_memset(type, 0, 24);
+    *reinterpret_cast<UInt32*>(clk) = 0x68;
+    *reinterpret_cast<UInt32*>(desc) = 0x1c8;
+
+    // ③ 11 个能力位查询（只读；逐字复刻 985d0.c:63–101）
+    gGvm5DStep = 3;
+    const auto fn_a3542 = reinterpret_cast<UInt32 (*)(UInt64)>(s + 0xa3542);
+    const auto fn_a28ad = reinterpret_cast<UInt8 (*)(UInt64, void*)>(s + 0xa28ad);
+    const auto fn_a2b6c = reinterpret_cast<UInt8 (*)(UInt64, UInt32)>(s + 0xa2b6c);
+    const auto fn_a32d5 = reinterpret_cast<UInt8 (*)(UInt64)>(s + 0xa32d5);
+    const auto fn_a1ddd = reinterpret_cast<UInt64 (*)(UInt64)>(s + 0xa1ddd);
+    const auto fn_90da8 = reinterpret_cast<UInt64 (*)()>(s + 0x90da8);
+    const auto fn_a2b51 = reinterpret_cast<UInt64 (*)(UInt64)>(s + 0xa2b51);
+    const auto fn_94ff7 = reinterpret_cast<UInt64 (*)(UInt64)>(s + 0x94ff7);
+    const auto fn_a2811 = reinterpret_cast<UInt64 (*)(UInt64)>(s + 0xa2811);
+    const auto fn_a2847 = reinterpret_cast<UInt64 (*)(UInt64)>(s + 0xa2847);
+    const auto fn_a3d6c = reinterpret_cast<UInt8 (*)(UInt64, void*)>(s + 0xa3d6c);
+
+    const UInt32 iVar5 = fn_a3542(dev);                                        // 0xa3542
+    const UInt64 local50 = *reinterpret_cast<const UInt64*>(p1b + 0x18);       // p1[3]
+
+    if (fn_a28ad(dev, type) != 0) {                                            // 0xa28ad
+        // local_b0.lo = type[2].lo；local_a8 = type[1]
+        *reinterpret_cast<UInt32*>(clk + 0x20) = *reinterpret_cast<const UInt32*>(type + 0x10);
+        *reinterpret_cast<UInt64*>(clk + 0x28) = *reinterpret_cast<const UInt64*>(type + 0x08);
+    }
+
+    UInt32 uVar6 = 0;
+    UInt32 uVar9 = 0;
+    if (fn_a2b6c(dev, 1) != 0) {                                               // 0xa2b6c
+        uVar6 = fn_a32d5(dev);                                                 // 0xa32d5
+        uVar9 = *reinterpret_cast<const UInt32*>(clk + 4) & 0xfffffff8U;
+        uVar6 = (uVar6 & 0xffU) | 2U;
+    }
+    uVar9 = ((iVar5 - 1U < 2U) ? 1U : 0U) + uVar6 * 2U | uVar9;
+    *reinterpret_cast<UInt32*>(clk + 4) = uVar9;
+
+    const UInt32 bVar4 = static_cast<UInt32>(fn_a1ddd(dev)) & 0xffU;           // 0xa1ddd
+    *reinterpret_cast<UInt32*>(clk + 4) =
+        (((*reinterpret_cast<const UInt32*>(type) & 3U) << 7) |
+         ((uVar9 & 0xffff0007U) + bVar4 * 8U));
+
+    *reinterpret_cast<UInt32*>(clk + 0x50) = static_cast<UInt32>(fn_90da8());  // 0x90da8
+    const UInt64 lVar8a = fn_a2b51(dev);                                       // 0xa2b51
+    const UInt64 lVar8b = fn_94ff7(host);                                      // 0x94ff7(*p1)
+    *reinterpret_cast<UInt64*>(clk + 0x58) = lVar8b + lVar8a;
+    *reinterpret_cast<UInt64*>(clk + 0x30) = fn_a2811(dev);                    // 0xa2811
+    *reinterpret_cast<UInt64*>(clk + 0x38) = fn_a2847(dev);                    // 0xa2847
+
+    if (uVar6 == 3U) {
+        __builtin_memset(hub, 0, 24);
+        if (fn_a3d6c(dev, hub) != 0) {                                         // 0xa3d6c（2 参，汇编已核）
+            const UInt32 h0 = *reinterpret_cast<const UInt32*>(hub);
+            const UInt32 cur = *reinterpret_cast<const UInt32*>(clk + 4);
+            *reinterpret_cast<UInt32*>(clk + 4) =
+                ((h0 << 12) & 0x10000U) | (cur & 0xfffcffffU) | ((h0 << 12) & 0x20000U);
+        }
+    }
+
+    // ④ 判空 p1[3] / p1[5]，调回调（核心）
+    gGvm5DStep = 4;
+    const UInt64 p15 = *reinterpret_cast<const UInt64*>(p1b + 0x28);           // p1[5]
+    if (local50 == 0 || p15 == 0) { gGvm5DRet = 0; return 0; }
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(local50))) { gGvm5DRet = 0; return 0; }
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(p15))) { gGvm5DRet = 0; return 0; }
+    const auto fn_slot3 = reinterpret_cast<UInt32 (*)(UInt64, void*, void*)>(local50);
+    if (fn_slot3(p15, clk, desc) != 0) { gGvm5DRet = 0; return 0; }
+
+    // ⑤ 拷 0xd8：源为 desc+0xf0（local_1b8 是 local_2a8 的内部视图）
+    gGvm5DStep = 5;
+    __builtin_memcpy(const_cast<UInt8*>(p1b) + 0x30, desc + 0xf0, 0xd8);
+
+    // ⑥ local_68 分支（<3 查 DAT_0042da78；>=3 走断言）
+    gGvm5DStep = 6;
+    const SInt32 idx68 = static_cast<SInt32>(*reinterpret_cast<const UInt32*>(type));
+    gGvm5DLocal68 = static_cast<UInt32>(idx68);
+    UInt32 uVar7 = 0;
+    if (idx68 >= 0 && idx68 < 3) {
+        uVar7 = *reinterpret_cast<const UInt32*>(s + 0x42da78 + static_cast<UInt64>(idx68) * 4);
+    } else {
+        // 苹果此处调用断言回调（`(* *(slot+112))(*(slot+8), …, "Invalid ZFB mode!")`）后继续。
+        // ⚠ 该回调是否 panic 未确证 ⇒ 按"不 panic"纪律**不调用**，只记录步骤号并继续
+        //   （uVar7=8 与苹果一致；唯一差异是少一行断言日志）。
+        uVar7 = 8;
+    }
+
+    // ⑦ 后续 7 个动作（985d0.c:124–170）
+    const auto fn_989a5 = reinterpret_cast<UInt8 (*)(void*, SInt32, UInt32)>(s + 0x989a5);
+    const auto fn_a2f00 = reinterpret_cast<void (*)(UInt64, UInt32, UInt64)>(s + 0xa2f00);
+    const auto fn_a3f63 = reinterpret_cast<void (*)(UInt64)>(s + 0xa3f63);
+    const auto fn_8b4bf = reinterpret_cast<UInt64 (*)(UInt64)>(s + 0x8b4bf);
+
+    gGvm5DStep = 7;
+    if ((*reinterpret_cast<const UInt8*>(p1b + 0x108) & 1U) != 0) {
+        (void)fn_989a5(const_cast<UInt8*>(p1b), static_cast<SInt32>(uVar7), 6);
+    }
+    if (static_cast<UInt32>(idx68) == 2U) {
+        (void)fn_989a5(const_cast<UInt8*>(p1b), 1, 1);
+    }
+    fn_a2f00(dev, 3, (*reinterpret_cast<const UInt64*>(desc + 8) & 2U) >> 1);
+
+    gGvm5DStep = 8;
+    const UInt64 p1c = *reinterpret_cast<const UInt64*>(p1b + 0xE0);          // p1[0x1c]
+    if (p1c != 0) {
+        if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1c))) { gGvm5DRet = 0; return 0; }
+        if (reinterpret_cast<UInt32 (*)(UInt64)>(p1c)(p15) != 0) { gGvm5DRet = 0; return 0; }
+    }
+    if (fn_989a5(const_cast<UInt8*>(p1b), 2, 3) == 0) { gGvm5DRet = 0; return 0; }
+
+    // ⑧ GART save context（985d0.c:139–168）
+    gGvm5DStep = 9;
+    const UInt64 slot = fn_8b4bf(dev);
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(slot))) { gGvm5DRet = 0; return 0; }
+    const UInt64 ctxObj = *reinterpret_cast<const UInt64*>(reinterpret_cast<const void*>(slot + 600));
+    const UInt64 ctxFn  = *reinterpret_cast<const UInt64*>(reinterpret_cast<const void*>(slot + 696));
+    __builtin_memset(save, 0, 16);
+    __builtin_memset(hub, 0, 24);
+    *reinterpret_cast<UInt32*>(hub) = 0x10;
+    const UInt64 p1f = *reinterpret_cast<const UInt64*>(p1b + 0x78);          // p1[0xf]
+    if (p15 == 0 || p1f == 0) {
+        // 苹果此处调用断言回调（`"Unrecognized or invalid hub type!"`）后返回 false。
+        // ⚠ 同上：不调用断言（避免未确证的 panic 风险），直接 fail-closed。
+        gGvm5DRet = 0;
+        return 0;
+    }
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1f))) { gGvm5DRet = 0; return 0; }
+    if (reinterpret_cast<UInt32 (*)(UInt64, void*)>(p1f)(p15, hub) != 0) { gGvm5DRet = 0; return 0; }
+    *reinterpret_cast<UInt32*>(save) = *reinterpret_cast<const UInt32*>(hub + 4);
+    __builtin_memcpy(save + 4, hub + 8, 8);   // 非对齐写（save+4）⇒ 用 memcpy 避免 UB
+    if (ctxFn == 0 || !nredKernelPtrOk(reinterpret_cast<const void*>(ctxFn))) { gGvm5DRet = 0; return 0; }
+    const UInt32 ret = (reinterpret_cast<UInt32 (*)(UInt64)>(ctxFn)(ctxObj) == 0) ? 1U : 0U;
+
+    // ⑨ 收尾（0xa3f63 为空实现，逐字调用）
+    gGvm5DStep = 10;
+    fn_a3f63(dev);
+    gGvm5DRet = ret;
+    return ret;
+}
+
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
     // 270：client7 stage1 的窗口在函数返回时关闭（任何 return 路径）。
     NredP7Window p7win(gP7Hold && b == 7 && c == 1);
+    // ── 273：client5 stage1 叶替换（`-NRedGvm5D`，默认关）──────────────────────────────────
+    //  与 `0x94831` 的尾跳等价：先 `p1 = *(a+0x30)`（在叶内），再执行我方 16 步复刻。
+    //  关态 ⇒ 本行不成立，后续路径逐字不变；开态 ⇒ 不进入苹果叶（也不进入下方 fail-closed 护栏）。
+    if (gGvm5D && b == 5 && c == 1) { return nredGvm5Stage1(a, d); }
     // 268：qq 只读探针必须先于句柄安装（安装会改 *(p)）。
     if (gQqProbe && !gQqProbeSeen && c == 1 && b == 5) { nredQqProbe(a); }
     if (gQqHdl && c == 1 && b == 5) { (void)nredQqHdlInstall(a); }
@@ -6713,6 +6925,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1C = checkKernelArgument("-NRedSt1C");
     // 261：client5 GVM type/注册表探针（默认关；只读一次）。
     gGvm5 = checkKernelArgument("-NRedGvm5");
+    // 273：client5 stage1 叶替换（默认关）。开 ⇒ 我方完整复刻 0x985d0；关 ⇒ 苹果原叶。
+    gGvm5D = checkKernelArgument("-NRedGvm5D");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
     // 265：client5 qq 四字段探针（默认关；只读一次）。
