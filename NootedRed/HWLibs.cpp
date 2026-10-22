@@ -264,6 +264,13 @@ static UInt64 gGvm5PhaseA = 0;           // 入参 a
 static UInt64 gGvm5PhaseP1 = 0;          // *(a+0x30)（KPtr 后）
 static UInt64 gGvm5PhaseRa = 0;          // 返回地址归零（ra - gHwlibsSlide）
 static UInt32 gGvm5PhaseRc = 0xFF;       // 探针不执行 D ⇒ 恒 0xFF（未执行）
+// 275（`-NRedGvm5Early`，默认关；依赖 `-NRedGvm5D`）：M4′ 早期注入（start/kernel_task 执行 D）。
+//  幂等：只有**早期真实成功**才置 `gGvm5EarlyOk=1`，powerUp 阶段据此返回缓存的真实 rc。
+static bool   gGvm5Early = false;
+static UInt32 gGvm5EarlyOk = 0;          // 0=未执行/失败；1=早期真实成功
+static UInt32 gGvm5EarlyRc = 0;          // 早期真实成功时的返回值（原样缓存）
+static SInt32 gGvm5EarlyStartRc = -1;    // start 阶段 rc（-1=未跑）
+static SInt32 gGvm5EarlyPowerRc = -1;    // powerup 阶段 rc（-1=未跑）
 struct NRedGvm5DBlocks {
     UInt8 desc[0x1c8];   // local_2a8：描述块（首 u32=0x1c8；+0xf0 起 0xd8 字节为待拷贝视图）
     UInt8 clk[0x68];     // local_d0：时钟/能力位块（首 u32=0x68；+4 为位域）
@@ -1113,6 +1120,32 @@ static void nredGvm5PStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 275：`[gvm5e]` M4′ 早期注入两阶段读数（noinline、零解引用、≤128 字符）。
+//  phase=start：早期（kernel_task）执行 D 的 rc；phase=powerup：powerUp 阶段是否幂等跳过。
+__attribute__((noinline))
+static void nredGvm5EStamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    if (gGvm5EarlyStartRc == 0) {
+        // 失败：panic 前写 `panic=1`（panic 在 X5000::wrapInitializeTtl 内调用）。
+        const int n = snprintf(body + off, room, "[gvm5e] phase=start rc=0 panic=1\n");
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    } else if (gGvm5EarlyStartRc > 0) {
+        const int n = snprintf(body + off, room, "[gvm5e] phase=start rc=%d idem=%d\n",
+                               static_cast<int>(gGvm5EarlyStartRc), 0);
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
+    if (room == 0) { return; }
+    if (gGvm5EarlyPowerRc >= 0) {
+        const int n = snprintf(body + off, room, "[gvm5e] phase=powerup rc=%d idem=%d\n",
+                               static_cast<int>(gGvm5EarlyPowerRc),
+                               static_cast<int>(gGvm5EarlyOk));
+        if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+    }
+}
+
 // 262：`[gslot]` client5 6 槽读数（头行 h/t/a + 每槽一行；noinline、零解引用）。
 __attribute__((noinline))
 static void nredGSlotStamp(char* const body, size_t& off, const size_t cap)
@@ -1303,6 +1336,8 @@ int nredTraceFlush(int secTag)
     if (gGvm5D && off < sizeof(body)) { nredGvm5DStamp(body, off, sizeof(body) - off); }
     // 274：`[gvm5p]` client5 stage1 入口只读探针（仅 -NRedGvm5Phase）。
     if (gGvm5Phase && off < sizeof(body)) { nredGvm5PStamp(body, off, sizeof(body) - off); }
+    // 275：`[gvm5e]` M4′ 早期注入两阶段读数（仅 -NRedGvm5Early）。
+    if (gGvm5Early && off < sizeof(body)) { nredGvm5EStamp(body, off, sizeof(body) - off); }
     // 263：`[ipr]` IP 根安装结果（仅 -NRedIpR）。
     if (gIpR && off < sizeof(body)) { nredIpRStamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
@@ -6469,6 +6504,28 @@ static UInt32 nredGvm5Stage1(void* const a, void* const d)
     gGvm5DRet = ret;
     return ret;
 }
+// ─── 275：M4′ 早期注入入口（`-NRedGvm5Early`，默认关；依赖 `-NRedGvm5D`）────────────────────
+//  由 `X5000::wrapInitializeTtl` 在 `orgTtl` **之前**调用（kernel_task 上下文）。
+//  返回：-1=未启用/不干预（继续原路径）；0=早期真实失败（**调用方必须 panic**）；
+//        1=早期真实成功（已置 `gGvm5EarlyOk` 并缓存 rc；调用方继续调 orgTtl）。
+//  ⚠ 本函数**不 panic**（panic 在调用方，便于反汇编验收"失败分支存在 panic 调用"）。
+//  ⚠ `d=nullptr`：`nredGvm5Stage1` 内部 `(void)d`，不使用 out（苹果叶同样只用 `param_1`）。
+int nredGvm5EarlyInject(void* const self)
+{
+    if (!gGvm5Early || !gGvm5D) { return -1; }
+    gGvm5EarlyStartRc = 0;
+    gGvm5EarlyOk = 0;
+    gGvm5EarlyRc = 0;
+    if (!nredKernelPtrOk(self)) { return 0; }
+    const UInt64 ctx = reinterpret_cast<UInt64>(self) + 0x50;
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(ctx))) { return 0; }
+    const UInt32 rc = nredGvm5Stage1(reinterpret_cast<void*>(ctx), nullptr);
+    gGvm5EarlyStartRc = static_cast<SInt32>(rc);
+    if (rc == 0) { return 0; }
+    gGvm5EarlyOk = 1;
+    gGvm5EarlyRc = rc;
+    return 1;
+}
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
@@ -6477,6 +6534,12 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     // ── 274：client5 stage1 入口只读探针（`-NRedGvm5Phase`，默认关；**在 D 之前**）──────────
     //  只写 BSS；不执行 D、不改返回值。`ra` 取本函数的调用者地址并归零（ra - slide）。
     if (gGvm5Phase && b == 5 && c == 1) { nredGvm5Phase(a, __builtin_return_address(0)); }
+    // ── 275：M4′ 幂等（`-NRedGvm5Early` 早期已真实成功 ⇒ powerUp 阶段不再执行 D）──────────
+    //  只有 `gGvm5EarlyOk==1`（早期真实成功）才命中；未置位 ⇒ 落到下方 `-NRedGvm5D` 真实执行。
+    if (gGvm5EarlyOk != 0 && b == 5 && c == 1) {
+        gGvm5EarlyPowerRc = static_cast<SInt32>(gGvm5EarlyRc);
+        return gGvm5EarlyRc;   // 原样返回早期真实成功的 rc（不伪造）
+    }
     // ── 273：client5 stage1 叶替换（`-NRedGvm5D`，默认关）──────────────────────────────────
     //  与 `0x94831` 的尾跳等价：先 `p1 = *(a+0x30)`（在叶内），再执行我方 16 步复刻。
     //  关态 ⇒ 本行不成立，后续路径逐字不变；开态 ⇒ 不进入苹果叶（也不进入下方 fail-closed 护栏）。
@@ -7014,6 +7077,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gGvm5D = nredExactBootArg("-NRedGvm5D");
     // 274：client5 stage1 入口只读探针（默认关；只写 BSS，不执行 D）。
     gGvm5Phase = nredExactBootArg("-NRedGvm5Phase");
+    // 275：M4′ 早期注入（默认关；依赖 -NRedGvm5D）。开 ⇒ wrapInitializeTtl 入口执行 D。
+    gGvm5Early = nredExactBootArg("-NRedGvm5Early");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
     // 265：client5 qq 四字段探针（默认关；只读一次）。

@@ -1335,6 +1335,19 @@ bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(load64(f338, 0xA0)));
     }
 
+    // ── 275：M4′ 早期注入（`-NRedGvm5Early`，默认关；依赖 `-NRedGvm5D`）────────────────────
+    //  在 kernel_task 上下文执行 client5 stage1（`ctx = self+0x50`，`d=nullptr`）。
+    //  失败 ⇒ **主动断言型 panic**（不是 return false：274/r241 证明 TTL 失败后系统仍可能
+    //  继续到 powerUp，panic 会拖晚 ⇒ 回到"不自动重启"）。成功 ⇒ 继续调 orgTtl。
+    //  未启用 ⇒ 返回 -1，不干预（关态逐字不变）。
+    {
+        extern int nredGvm5EarlyInject(void* self);
+        const int earlyRc = nredGvm5EarlyInject(self);
+        if (earlyRc == 0) {
+            panic("NRed: gvm5 client5 stage1 failed (early inject, kernel_task)");
+        }
+    }
+
     const auto orgTtl = FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl);
     if (orgTtl == nullptr) { return false; }
     const bool orgRet = orgTtl(self, gartParams);
