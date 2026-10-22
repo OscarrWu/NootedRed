@@ -205,6 +205,14 @@ static UInt64 gSt1G9P = 0, gSt1G9Key = 0;
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
+// 261（`-NRedGvm5`，默认关）：client5 GVM provider type 与注册表状态（只读一次）。
+static bool   gGvm5 = false;
+static bool   gGvm5Seen = false;
+static UInt32 gGvm5Type = 0;
+static UInt64 gGvm5A58 = 0;
+static UInt64 gGvm5T78 = 0;
+static UInt64 gGvm5T90 = 0;
+static UInt32 gGvm5Reg = 2;   // 0=未命中 1=命中 2=无法判定
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -870,6 +878,19 @@ static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 261：`[gvm5]` client5 GVM type/注册表读数（noinline、零解引用、≤120 字符）。
+__attribute__((noinline))
+static void nredGvm5Stamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[gvm5] type=%x a58=%llx t78=%llx t90=%llx reg=%u\n",
+                           static_cast<unsigned>(gGvm5Type),
+                           static_cast<unsigned long long>(gGvm5A58),
+                           static_cast<unsigned long long>(gGvm5T78),
+                           static_cast<unsigned long long>(gGvm5T90),
+                           static_cast<unsigned>(gGvm5Reg));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -1004,6 +1025,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
     // 260：`[st1gf]` 守卫首个失败步号（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
+    // 261：`[gvm5]` client5 GVM type/注册表（仅 -NRedGvm5）。
+    if (gGvm5 && off < sizeof(body)) { nredGvm5Stamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
     if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // 248：槽值行独立开关（-NRedSt1W2）；W 开而 W2 关 ⇒ 不 deref svc、不输出这两行。
@@ -5550,8 +5573,44 @@ static void nredStage1PRecord(const void* const ctx)
 }
 
 
+// ─── 261：client5 GVM provider type / 注册表探针（`-NRedGvm5`，默认关；只读一次）──────────
+//  链：ctx → P5 → H=*(P5+0x28) → T=*(H+0xE48) → A=*(T+0x08)；逐级 KPtr。
+//  reg 复刻 0xa31f6 的**只读**查表（不调用 0x8b8e7）：IP=*(A)、n=*(u32*)(IP+232)、
+//  arr=*(void**)(IP+8)，在前 n 项（步长 8）中比较 u32 键；形状不合理/越界 ⇒ reg=2（无法判定）。
+__attribute__((noinline))
+static void nredGvm5Probe(const void* const ctx)
+{
+    gGvm5Seen = true;
+    gGvm5Type = 0; gGvm5A58 = 0; gGvm5T78 = 0; gGvm5T90 = 0; gGvm5Reg = 2;
+    if (!nredKernelPtrOk(ctx)) { return; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
+    if (!nredKernelPtrOk(q)) { return; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // H
+    if (!nredKernelPtrOk(q)) { return; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0xE48);         // T
+    if (!nredKernelPtrOk(q)) { return; }
+    const UInt8* const t = q;
+    const UInt8* const a = *reinterpret_cast<const UInt8* const*>(t + 0x08);   // A
+    if (!nredKernelPtrOk(a)) { return; }
+    gGvm5Type = *reinterpret_cast<const UInt32*>(a);
+    gGvm5A58 = *reinterpret_cast<const UInt64*>(a + 0x58);
+    gGvm5T78 = *reinterpret_cast<const UInt64*>(t + 0x78);
+    gGvm5T90 = *reinterpret_cast<const UInt64*>(t + 0x90);
+    const UInt8* const ip = *reinterpret_cast<const UInt8* const*>(a);         // IP=*(A)
+    if (!nredKernelPtrOk(ip)) { return; }
+    const UInt32 n = *reinterpret_cast<const UInt32*>(ip + 232);
+    const UInt8* const arr = *reinterpret_cast<const UInt8* const*>(ip + 8);
+    if (n == 0 || n > 4096 || !nredKernelPtrOk(arr)) { return; }   // 保持 reg=2
+    for (UInt32 i = 0; i < n; ++i) {
+        if (*reinterpret_cast<const UInt32*>(arr + i * 8) == gGvm5Type) { gGvm5Reg = 1; return; }
+    }
+    gGvm5Reg = 0;
+}
+
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 261：client5 GVM type/注册表探针（默认关；只读一次）。
+    if (gGvm5 && !gGvm5Seen && c == 1 && b == 5) { nredGvm5Probe(a); }
     // 257：client 3 stage1 时刻的 P3 观测（默认关；仅首次）。
     if (gSt1P && !gSt1PDone && c == 1 && b == 3) { nredStage1PRecord(a); }
     // 256：仅 c>=1 的调次（默认关）——入口最前，只写 BSS，不改返回值。
@@ -6060,6 +6119,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1B = checkKernelArgument("-NRedSt1B");
     // 256：仅 c>=1 的调次（默认关）。钉死 stage1 实际 client 集合。
     gSt1C = checkKernelArgument("-NRedSt1C");
+    // 261：client5 GVM type/注册表探针（默认关；只读一次）。
+    gGvm5 = checkKernelArgument("-NRedGvm5");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
     gSt1P = nredExactBootArg("-NRedSt1P");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
