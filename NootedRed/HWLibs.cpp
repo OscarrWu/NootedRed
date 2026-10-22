@@ -6432,7 +6432,9 @@ static UInt32 nredGvm5Stage1(void* const a, void* const d)
     const UInt64 p1c = *reinterpret_cast<const UInt64*>(p1b + 0xE0);          // p1[0x1c]
     if (p1c != 0) {
         if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1c))) { gGvm5DRet = 0; return 0; }
-        if (reinterpret_cast<UInt32 (*)(UInt64)>(p1c)(p15) != 0) { gGvm5DRet = 0; return 0; }
+        // 苹果在 `988be` 同样**重新读** `p1[5]`（`movq 40(%r14),%rdi`）⇒ 逐字复刻。
+        const UInt64 p15c = *reinterpret_cast<const UInt64*>(p1b + 0x28);
+        if (reinterpret_cast<UInt32 (*)(UInt64)>(p1c)(p15c) != 0) { gGvm5DRet = 0; return 0; }
     }
     if (fn_989a5(const_cast<UInt8*>(p1b), 2, 3) == 0) { gGvm5DRet = 0; return 0; }
 
