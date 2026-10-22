@@ -270,17 +270,26 @@ namespace NvMsgBuf {
 	//   ⇒ 离线无法区分"调度未启动（C1/C2）"与"写盘失败（C5）"。本探针用**不依赖 L2 写盘**
 	//   的通道（NVRAM 独立键 `NRedObs`）各记一个标记，重启回 Manjaro 后经 efivarfs 直接读。
 	//
-	//  四个标记（每项只成功写一次；内容按已知项整体重建，故后写的项会带上先前的项）：
+	//  四个标记（内容按已知项整体重建，故后写的项会带上先前的项）：
 	//    P1 `obs:s`        进入 `-NRedObserveDisk` 分支（`NRed::init`）
 	//    P2 `obs:k`/`obs:a` `scheduleDumps()` 之后：k=调度已启动，a=`thread_call_allocate` 失败
 	//    P3 `obs:t0=0x<sec>` 首拍到达（`dumpTick` 第一次执行；0 秒是合法值）
 	//    P4 `obs:wf=0x<err>` 首次写盘失败及其错误码（`writeWithFingerprint`）
-	//  另附 `boot=0x<uptime>` 指纹，供判读时核对标记归属（跨轮残留）。
+	//  另附 `sync=0/1`（截至本次写入时是否已有一次 sync 成功）与 `boot=0x<uptime>` 指纹。
 	//
-	//  纪律（与需求文档 §3/§6 一致）：
+	//  ★ v2 的 sync 策略（依据 `tmp/prog/R-run525-diff与init锁-2026-10-23.md` §4）：
+	//    `setProperty` 只改内存，落盘靠 `sync()`；而 `IODTNVRAM::safeToSync()` 首次 true、
+	//    之后 900 秒内 false（`MIN_SYNC_NOW_INTERVAL = 15*60`）⇒ **一次启动内只有第一次
+	//    sync 可能生效**。故：
+	//      · P1/P2 **合并为一次** write+sync，放在 `NRed::init`（必定执行 ⇒ 覆盖 C1/C2）；
+	//      · P3/P4 只 write + **尝试** sync（大概率被限速拒绝，T0/C5 属"尽力而为"）；
+	//      · 总 sync 尝试 ≤3（`sSyncTries`）；sync 返回 false **不重试**；
+	//      · `sDone` 只在 **write 成功**时置位（不要求 sync 成功）。
+	//
+	//  纪律（与需求文档 v2 §3/§7 一致）：
 	//    · 关态第一行即 return ⇒ 零 NVRAM 写、零行为变化；
 	//    · 不写文件、不 SYSLOG、不等待；写失败静默（不重试循环，留给下一调用点）；
-	//    · 缓冲在静态区（`sBuf`）⇒ `markOnce` 局部帧仅寄存器保存（实测 40 B，无局部数组）；
+	//    · 缓冲在静态区（`sBuf`）⇒ `markOnce` 局部帧仅寄存器保存（无局部数组）；
 	//    · P3（`dumpTick` 线程）与 P4（`dumpNow` 的调用线程）**可能**并发 ⇒ 用非阻塞原子
 	//      test-and-set（`sBusy`，与 `stFlushBusy` 同款）保护 `sBuf`/NVStorage；抢占失败即返回。
 	//    · 键与 `NRedStage` **分开**（避免 256 B 上限被阶段标记占满）。
@@ -306,6 +315,9 @@ namespace NvMsgBuf {
 		//  线程、P4 可能跑在 `dumpNow()` 的调用线程（Apple 驱动上下文）⇒ 二者**可能**并发；
 		//  `sBuf`/NVStorage 不是并发安全的。抢占失败即返回（不等待），留给下一调用点重试。
 		inline UInt32 &sBusy()     { static UInt32 v = 0; return v; }
+		// v2：sync 尝试计数（总上限 3）与"是否已有一次 sync 成功"（写入内容 `sync=0/1`）。
+		inline UInt32 &sSyncTries() { static UInt32 v = 0; return v; }
+		inline UInt32 &sSyncOk()    { static UInt32 v = 0; return v; }
 		// 探针自己的 boot 指纹：**不复用** `stUptimeTicks()`（那个值被 L2 文件首行使用，
 		//  若探针在 init 阶段先取，会把 L2 的指纹冻结到更早时刻 ⇒ 改变 L2 行为）。
 		inline UInt64 &sBoot()     { static UInt64 v = 0; return v; }
@@ -343,7 +355,10 @@ namespace NvMsgBuf {
 		}
 
 		// idx: 0=obs:s 1=obs:k/a 2=obs:t0 3=obs:wf。只成功写一次；失败留待下一调用点重试。
-		inline void markOnce(int idx) {
+		// doSync：是否尝试 sync（总尝试上限 3；返回 false 不重试）。`sync=` 记录"截至本次
+		//  写入时是否已有一次 sync 成功"——本次 sync 发生在 write 之后，故其结果体现在**下一次**
+		//  写入的内容里（若没有下一次，则以 `sSyncOk` 的最终值无法读出，属已知局限）。
+		inline void markOnce(int idx, bool doSync) {
 			if (!sOn() || idx < 0 || idx > 3 || sDone()[idx]) return;
 			if (!OSCompareAndSwap(0, 1, &sBusy())) return;   // 已被另一线程占用 ⇒ 不等待
 
@@ -356,12 +371,16 @@ namespace NvMsgBuf {
 				else if (sSched() == 2) n = append(buf, n, "obs:a|");
 				if (sTickSeen()) n = appendHex(buf, n, "obs:t0=0x", sTick0(), "|");
 				if (sWfSeen()) n = appendHex(buf, n, "obs:wf=0x", sWfErr(), "|");
+				n = append(buf, n, sSyncOk() != 0 ? "sync=1|" : "sync=0|");
 				n = appendHex(buf, n, "boot=0x", bootTicks(), "");
 				if (n > 0 && nv->write(NVRAM_PREFIX(LILU_VENDOR_GUID, "NRedObs"),
 				                       reinterpret_cast<const uint8_t *>(buf),
 				                       static_cast<uint32_t>(n), NVStorage::OptRaw)) {
-					nv->sync();
-					sDone()[idx] = true;
+					sDone()[idx] = true;                     // ★ 只要求 write 成功
+					if (doSync && sSyncTries() < 3) {        // ★ 总尝试上限 3
+						sSyncTries()++;
+						if (nv->sync()) sSyncOk() = 1;       // ★ 记录结果，不重试
+					}
 				}
 			}
 			sBusy() = 0;
@@ -388,12 +407,13 @@ namespace NvMsgBuf {
 			rc = FileIO::writeBufferToFile(name, merged, hn + len);
 		}
 		// P4：首次写盘失败（C5）⇒ 记错误码。关态整块不执行（零状态写入、零额外调用）。
+		//  v2：只 write + **尝试** sync（第 3 次，大概率被限速）；sync 失败不重试。
 		if (rc != 0 && ObsProbe::sOn()) {
 			if (!ObsProbe::sWfSeen()) {
 				ObsProbe::sWfSeen() = true;
 				ObsProbe::sWfErr()  = static_cast<UInt32>(rc);
 			}
-			ObsProbe::markOnce(3);
+			ObsProbe::markOnce(3, /*doSync=*/true);
 		}
 		return rc;
 	}
@@ -442,14 +462,12 @@ namespace NvMsgBuf {
 		if (tick < kMaxTicks && stTotal() < kMaxTotal) {
 			tick++;
 			// P3：首拍到达（thread_call 已触发 ⇒ C1/C2 均否）。同时重建全部已知项，
-			//  兜底 `NRed::init` 阶段 NVStorage 不可用而丢失的 P1/P2（需求文档 §6 R1）。
-			//  关态整块不执行（零状态写入、零额外调用）。
-			if (ObsProbe::sOn()) {
-				if (!ObsProbe::sTickSeen()) {
-					ObsProbe::sTickSeen() = true;
-					ObsProbe::sTick0()    = static_cast<UInt64>(sec);
-				}
-				ObsProbe::markOnce(2);
+			//  兜底 `NRed::init` 阶段 NVStorage 不可用而丢失的 P1/P2。
+			//  v2：**只在首拍**写一次 + 尝试 sync（第 2 次，大概率被限速）；关态整块不执行。
+			if (ObsProbe::sOn() && !ObsProbe::sTickSeen()) {
+				ObsProbe::sTickSeen() = true;
+				ObsProbe::sTick0()    = static_cast<UInt64>(sec);
+				ObsProbe::markOnce(2, /*doSync=*/true);
 			}
 
 			// ★★ 根文件系统挂载判据（**本实现的核心安全措施**）：

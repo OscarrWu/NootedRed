@@ -56,16 +56,14 @@ void NRed::init()
     //  绝不在探针里调用 checkKernelArgument（见 NvMsgBuf.hpp 门控状态缓存的说明）。
     NvMsgBuf::ObsProbe::sOn() = checkKernelArgument("-NRedObsProbe");
     if (checkKernelArgument("-NRedObserveDisk")) {
-        // P1：进入 L2 分支；P2：scheduleDumps() 之后区分"调度已启动"与"alloc 失败"。
+        // P1/P2 **合并为一次** write+sync（v2：init 是唯一可靠 sync 点，覆盖 C1/C2）。
         //  关态整块不执行（零状态写入），`scheduleDumps()` 的调用位置与语义不变。
-        if (NvMsgBuf::ObsProbe::sOn()) {
-            NvMsgBuf::ObsProbe::sEntered() = true;
-            NvMsgBuf::ObsProbe::markOnce(0);
-        }
+        const bool obsOn = NvMsgBuf::ObsProbe::sOn();
+        if (obsOn) NvMsgBuf::ObsProbe::sEntered() = true;
         NvMsgBuf::scheduleDumps();
-        if (NvMsgBuf::ObsProbe::sOn()) {
+        if (obsOn) {
             NvMsgBuf::ObsProbe::sSched() = (NvMsgBuf::stCall() != nullptr) ? 1 : 2;
-            NvMsgBuf::ObsProbe::markOnce(1);
+            NvMsgBuf::ObsProbe::markOnce(0, /*doSync=*/true);
         }
     }
     SYSLOG("NRed", "|-----------------------------------------------------------------|");
