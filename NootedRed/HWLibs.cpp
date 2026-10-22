@@ -227,7 +227,7 @@ static bool          gIpRInit = false;
 static NRedIpEntry   gIpArr[5];   // 4 个有效键 + 1 个 key==0 哨兵（苹果扫描以 key==0 停止）
 static UInt8         gIpBlk[16];
 static UInt8         gIpHead[0x48];
-static UInt8         gIpRoot[0x240];
+static UInt8         gIpRoot[0xF0];    // ≥ 0xE8+8：head 指针写在 +0xE8（232 十进制）
 static UInt8         gIpProvider[0x128];
 static UInt64        gIpRIp = 0;
 static UInt32        gIpRRet = 0xFF;   // 0=成功；1..6=失败跳；7=slide 为 0；8=区间重叠；0xFF=未执行
@@ -5729,7 +5729,7 @@ static void nredGSlotProbe(const void* const ctx)
 // ─── 263：client5 的 IP 根静态提供者（`-NRedIpR`，默认关）─────────────────────────────
 //  契约：IP=*(A)；IPR=*(IP+0x58)；head=*(IPR+232)；C=*(head+64)；arr=*(C+8)；
 //  项 16B {u32 key, u32 pad, u64 provider}，key==0 停止。本实现把 IP+0x58 指向
-//  静态 gIpRoot，其 +0x232 → gIpHead → +0x40 → gIpBlk → +8 → gIpArr(4 项)；
+//  静态 gIpRoot，其 +0xE8（232 十进制）→ gIpHead → +0x40 → gIpBlk → +8 → gIpArr(4 项+哨兵)；
 //  provider 槽只填真实函数地址（slide+0x91F32/0x91EE8/0x12280/0x124F0）。
 __attribute__((noinline))
 static bool nredIpRInit(void)
@@ -5753,7 +5753,7 @@ static bool nredIpRInit(void)
     *reinterpret_cast<UInt64*>(gIpBlk + 8) = reinterpret_cast<UInt64>(gIpArr);
     *reinterpret_cast<UInt64*>(gIpHead + 0x40) = reinterpret_cast<UInt64>(gIpBlk);
     const UInt64 head = reinterpret_cast<UInt64>(gIpHead);
-    __builtin_memcpy(gIpRoot + 0x232, &head, sizeof(head));   // packed 偏移 0x232
+    __builtin_memcpy(gIpRoot + 0xE8, &head, sizeof(head));   // 契约偏移 232 十进制＝0xE8
     gIpRInit = true;
     return true;
 }
