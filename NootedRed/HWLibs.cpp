@@ -283,6 +283,20 @@ static UInt64     gGc7xVal = 0;
 static UInt32     gGc7xSeen = 0;
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
+// 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
+//  窗口＝安装命中（0x93d18 sel==7 / 0x93f64 id==7 位为 1）→ client7 stage1 返回；
+//  窗口内拦截 0x93998 对 id==7 的写 0；窗口外一律透传（保留苹果注销语义）。
+static bool   gP7Hold = false;
+static bool   gP7Armed = false;
+static UInt32 gP7Skip = 0;
+static UInt32 gP7Cleared = 0;
+// 270：stage1 返回即关窗（RAII：覆盖 wrapMode9440f 的所有 return 路径）。
+struct NredP7Window {
+    const bool active;
+    explicit NredP7Window(const bool a) : active(a) {}
+    ~NredP7Window() { if (active) { gP7Armed = false; } }
+};
+static UInt64 gP7Seen = 0;
 static bool       gSt1B = false;
 static NRedSt1BRec gSt1BRec[8];
 static UInt32     gSt1BN = 0;     // 已记录条数（≤8）
@@ -996,6 +1010,18 @@ static void nredQqStamp(char* const body, size_t& off, size_t cap, const bool pr
     }
 }
 
+// 270：`[p7h]` P7 保活状态（noinline、零解引用、≤128 字符）。
+__attribute__((noinline))
+static void nredP7hStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[p7h] p7=%llx cleared=%u skip=%u armed=%u\n",
+                           static_cast<unsigned long long>(gP7Seen),
+                           static_cast<unsigned>(gP7Cleared),
+                           static_cast<unsigned>(gP7Skip),
+                           gP7Armed ? 1u : 0u);
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 260：`[st1gf]` 守卫首个失败步号（无失败时输出 c=65535 step=0；noinline、零解引用）。
 __attribute__((noinline))
 static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
@@ -1193,6 +1219,8 @@ int nredTraceFlush(int secTag)
     if ((gQqProbe || gQqHdl) && off < sizeof(body)) {
         nredQqStamp(body, off, sizeof(body) - off, gQqProbe, gQqHdl);
     }
+    // 270：`[p7h]` P7 保活状态（仅 -NRedP7Hold）。
+    if (gP7Hold && off < sizeof(body)) { nredP7hStamp(body, off, sizeof(body) - off); }
     // 260：`[st1gf]` 守卫首个失败步号（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
     // 261：`[gvm5]` client5 GVM type/注册表（仅 -NRedGvm5）。
@@ -2449,11 +2477,23 @@ bool X5000HWLibs::wrapGc7Install(void* const ctx, const UInt32 sel, void* const 
             if (hit) { gGc7HitSeen = true; }
         }
     }
+    // 270：安装命中（selector==7）即开窗（幂等；与 0x93f64 的置位取先到者）。
+    if (gP7Hold && sel == 7) { gP7Armed = true; }
     return ret;
 }
 
 UInt32 X5000HWLibs::wrapGc7SetSlot(void* const obj, const UInt32 id, const UInt64 val)
 {
+    // 270：窗口内拦截 client7 的写 0（只读 obj+0x40；P7 空/非法 ⇒ 透传）。
+    if (gP7Hold && gP7Armed && id == 7 && val == 0 && nredKernelPtrOk(obj)) {
+        const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(obj) + 0x40);
+        if (nredKernelPtrOk(p7)) {
+            gP7Seen = reinterpret_cast<UInt64>(p7);
+            ++gP7Skip;
+            return id;   // 跳过写 0；返回值仍为原件语义（eax=id）
+        }
+    }
+    if (gP7Hold && id == 7 && val == 0) { ++gP7Cleared; }
     const UInt32 ret = FunctionCast(wrapGc7SetSlot, singleton().orgGc7SetSlot)(obj, id, val);
     if (gGc7 && val == 0 && id == 7 && gGc7xSeen == 0) {
         gGc7xSlot = id;
@@ -2501,6 +2541,8 @@ UInt8 X5000HWLibs::wrap93F64(void* const obj, const UInt32 id)
     const UInt8 ret = (singleton().org93F64 != 0)
                           ? FunctionCast(wrap93F64, singleton().org93F64)(obj, id)
                           : 0;
+    // 270：能力位检查命中（id==7 且位为 1）也开窗（与 0x93d18 的置位取先到者，幂等）。
+    if (gP7Hold && id == 7 && ret != 0) { gP7Armed = true; }
     const UInt32 bm = nredKernelPtrOk(obj)
         ? *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(obj) + 0x7B8) : 0;
     if (id == 5 || id == 8) {
@@ -2835,6 +2877,8 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
         else { gC4site = 0; }                                 // 未匹配 ⇒ 记 `off` 原值供追加判据
     }
     gP4 = static_cast<SInt32>(ret & 0xFF);
+    // 270 兜底：stage1 遍历返回即关窗（防 client7 未到达时永久 armed）。
+    if (gP7Hold) { gP7Armed = false; }
     return ret;
 }
 
@@ -6095,6 +6139,8 @@ static bool nredQqHdlInstall(const void* const ctx)
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 270：client7 stage1 的窗口在函数返回时关闭（任何 return 路径）。
+    NredP7Window p7win(gP7Hold && b == 7 && c == 1);
     // 268：qq 只读探针必须先于句柄安装（安装会改 *(p)）。
     if (gQqProbe && !gQqProbeSeen && c == 1 && b == 5) { nredQqProbe(a); }
     if (gQqHdl && c == 1 && b == 5) { (void)nredQqHdlInstall(a); }
@@ -6610,6 +6656,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1O = checkKernelArgument("-NRedSt1O");
     // 251：client 7 双侧观测（默认关）。仅在开时安装 0x93d18/0x93998 两个只读 hook。
     gGc7 = checkKernelArgument("-NRedGc7");
+    // 270：client7 P7 窗口化保活（默认关；与 -NRedGc7 共用两个 hook）。
+    gP7Hold = checkKernelArgument("-NRedP7Hold");
     // 252：原始 (b,c) 调次（默认关）。只在前 8 次调用时写 BSS，头部区输出。
     gSt1B = checkKernelArgument("-NRedSt1B");
     // 256：仅 c>=1 的调次（默认关）。钉死 stage1 实际 client 集合。
@@ -7098,7 +7146,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         // 251（`-NRedGc7`）：client 7 双侧观测。模式已在离线核对为 __text 唯一；
         //  `resolveProbe` 先按**预期偏移**逐字节校验（等同 hook-check 的“期望偏移＝函数头”），
         //  回退扫描也要求命中偏移一致 ⇒ 绝不 patch 错位置；失败只记日志、不 panic。
-        if (gGc7) {
+        // 270：`-NRedP7Hold` 也需要这两个 hook（安装侧开窗、注销侧拦截）。
+        if (gGc7 || gP7Hold) {
             if (const auto from = resolveProbe("gc7-inst", kGc7InstallPattern, nullptr,
                                                arrsize(kGc7InstallPattern), 0x93D18)) {
                 hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapGc7Install, this->orgGc7Install},
