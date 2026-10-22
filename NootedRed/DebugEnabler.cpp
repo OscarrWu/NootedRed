@@ -229,6 +229,7 @@ void DebugEnabler::processKext(KernelPatcher& patcher, const size_t id, const ma
 
 bool DebugEnabler::wrapInitWithPciInfo(void* self, void* pciDevice)
 {
+    if (singleton().orgInitWithPciInfo == 0) { return false; }
     const auto ret      = FunctionCast(wrapInitWithPciInfo, singleton().orgInitWithPciInfo)(self, pciDevice);
     auto       logTypes = 0xFFFFFFFFFFFFFFFFULL;
     if (!checkKernelArgument("-NRedCursorDebug")) { logTypes &= ~(1ULL << 10); }
@@ -326,6 +327,7 @@ void DebugEnabler::pspDebugPrint(void*, const char* fmt, ...)
 
 bool DebugEnabler::wrapGetNumericProperty(void* self, const char* name, UInt32* value)
 {
+    if (singleton().orgGetNumericProperty == 0) { return false; }
     auto ret = FunctionCast(wrapGetNumericProperty, singleton().orgGetNumericProperty)(self, name, value);
     if (name == nullptr || strncmp(name, "GpuDebugPolicy", 14) != 0) { return ret; }
     if (value != nullptr) {

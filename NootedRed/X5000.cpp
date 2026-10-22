@@ -646,6 +646,7 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
         hwMaxCUs = 11;
     }
 
+    if (singleton().orgGFX9SetupAndInitializeHWCapabilities == 0) { return; }
     FunctionCast(wrapSetupAndInitializeHWCapabilities, singleton().orgGFX9SetupAndInitializeHWCapabilities)(self);
 
     singleton().supportedDisplayCountField(self) = 4;
@@ -661,6 +662,7 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
 void* X5000::wrapGetHWChannel(void* const self, AMDHWEngineType engineType, const UInt32 ringId)
 {
     if (engineType == kAMDHWEngineTypeSDMA1) { engineType = kAMDHWEngineTypeSDMA0; }
+    if (singleton().orgGetHWChannel == 0) { return nullptr; }
     return FunctionCast(wrapGetHWChannel, singleton().orgGetHWChannel)(self, engineType, ringId);
 }
 
@@ -683,6 +685,7 @@ void* X5000::allocateAMDHWDisplay(void* const)
 
 UInt64 X5000::wrapAdjustVRAMAddress(void* const self, const UInt64 addr)
 {
+    if (singleton().orgAdjustVRAMAddress == 0) { return addr; }
     auto ret = FunctionCast(wrapAdjustVRAMAddress, singleton().orgAdjustVRAMAddress)(self, addr);
     if (ret != addr) { return ret + NRed::singleton().getFbOffset(); }
     return ret;
@@ -700,12 +703,14 @@ static void* fixAccelGroup(void* const group)
 
 void* X5000::wrapObtainAccelChannelGroup(void* const self, const UInt32 priority)
 {
+    if (singleton().orgObtainAccelChannelGroup == 0) { return nullptr; }
     return fixAccelGroup(
         FunctionCast(wrapObtainAccelChannelGroup, singleton().orgObtainAccelChannelGroup)(self, priority));
 }
 
 void* X5000::wrapObtainAccelChannelGroup1304(void* const self, const UInt32 priority, void* const task)
 {
+    if (singleton().orgObtainAccelChannelGroup == 0) { return nullptr; }
     return fixAccelGroup(
         FunctionCast(wrapObtainAccelChannelGroup1304, singleton().orgObtainAccelChannelGroup)(self, priority, task));
 }
@@ -728,12 +733,14 @@ UInt32 X5000::wrapHwlConvertChipFamily(void* const self, const UInt32 family, co
         settings.metaBaseAlignFix = 1;
         return ADDR_CHIP_FAMILY_AI;
     }
+    if (singleton().orgHwlConvertChipFamily == 0) { return 0; }
     return FunctionCast(wrapHwlConvertChipFamily, singleton().orgHwlConvertChipFamily)(self, family, revision);
 }
 
 UInt32 X5000::computeSubmitCommandBuffer(void* const self, void* const info)
 {
     singleton().notifyGfxAccess(singleton().hwChannelHWInterfaceField(self));
+    if (singleton().orgPM4SubmitCommandBuffer == 0) { return 0; }
     return FunctionCast(computeSubmitCommandBuffer, singleton().orgPM4SubmitCommandBuffer)(self, info);
 }
 
@@ -1154,6 +1161,7 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
         SYSLOG("X5000", "accel start: restored f140 = %llx", static_cast<unsigned long long>(gLastF140));
     }
 
+    if (singleton().orgAccelStart == 0) { return false; }
     const auto ret = FunctionCast(wrapAccelStart, singleton().orgAccelStart)(self, provider);
 
     const UInt64 s = reinterpret_cast<UInt64>(self);
@@ -1327,6 +1335,7 @@ bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(load64(f338, 0xA0)));
     }
 
+    if (singleton().orgInitializeTtl == 0) { return false; }
     const bool orgRet = FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
 
     UInt64 ttl568 = 0, ttl570 = 0, ttl578 = 0, ttl580 = 0, ttl588 = 0, ttl590 = 0, ttl598 = 0, ttl5a0 = 0;
@@ -1458,6 +1467,7 @@ bool X5000::wrapConfigureRegisterBases(void* const self)
     // 防重入（实施文档 §3.2）：重入时只转发原件，不改行为、不重复观测。
     static bool sCfgRbBusy = false;
     if (sCfgRbBusy) {
+        if (singleton().orgConfigureRegisterBases == 0) { return false; }
         return FunctionCast(wrapConfigureRegisterBases, singleton().orgConfigureRegisterBases)(self);
     }
 
@@ -1477,6 +1487,7 @@ bool X5000::wrapConfigureRegisterBases(void* const self)
     }
 
     sCfgRbBusy = true;
+    if (singleton().orgConfigureRegisterBases == 0) { return false; }
     const bool ret = FunctionCast(wrapConfigureRegisterBases, singleton().orgConfigureRegisterBases)(self);
 
     UInt64 v5a8b = 0, t38 = 0;
@@ -1685,6 +1696,7 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
     //   `provider` 形参此时原样有效（尚未被 Apple 代码使用）。ret 尚不存在 ⇒ 传 0（仅自证用）。
     if (checkKernelArgument("-NRedDiagProvider")) { diagProviderDump("e", provider, s, 0); }
 
+    if (singleton().orgConfigureDevice == 0) { return 0; }
     UInt64 ret = FunctionCast(wrapConfigureDevice, singleton().orgConfigureDevice)(self, provider);
 
     // 判别性实验（门控 `-NRedCfgDevForce`，默认关闭）：`configureDevice` 在 `0x360f` 检查失败后
@@ -2075,6 +2087,7 @@ UInt64 X5000::wrapConfigureDevice(void* const self, void* const provider)
 
 void* X5000::wrapInitLinkToPeer(void* const self, const char* const name)
 {
+    if (singleton().orgInitLinkToPeer == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapInitLinkToPeer, singleton().orgInitLinkToPeer)(self, name);
     if (checkKernelArgument("-NRedAccelLog")) {
         // 名称为本 kext 内的字面量（"ATIFramebuffer"/"IOFramebuffer"）⇒ 打印是安全的。
@@ -2097,6 +2110,7 @@ void* X5000::wrapInitLinkToPeer(void* const self, const char* const name)
 bool X5000::wrapAmdHwInit(void* const self, void* const provider, void* const handler,
                           UInt32* const a3, void* const gart, void* const fb)
 {
+    if (singleton().orgAmdHwInit == 0) { return false; }
     const bool ret = FunctionCast(wrapAmdHwInit, singleton().orgAmdHwInit)(self, provider, handler, a3, gart, fb);
     if (ret != false) { return ret; }   // 只在 init 成功（ret==0/false）后快照
 
@@ -2450,6 +2464,7 @@ static void p5SampleExtIfaces(void* const selfArg, const UInt32 ret)
 //  返回值原样透传，采样只读）。
 bool X5000::wrapInitExtIfaces(void* const self)
 {
+    if (singleton().orgInitExtIfaces == 0) { return false; }
     const bool ret = FunctionCast(wrapInitExtIfaces, singleton().orgInitExtIfaces)(self);
     p5SampleExtIfaces(self, ret ? 1u : 0u);
     return ret;
@@ -2477,6 +2492,7 @@ UInt64 gAccelProbeScoreOut = 0;   // 出口 score（0xffffffff = *score 被置 -
 IOService* X5000::wrapAccelProbe(void* const self, void* const provider, SInt32* const score)
 {
     const SInt32 scoreIn = (score != nullptr) ? *score : 0x7FFFFFFF;
+    if (singleton().orgAccelProbe == 0) { return nullptr; }
     auto*        ret     = FunctionCast(wrapAccelProbe, singleton().orgAccelProbe)(self, provider, score);
     const SInt32 scoreOut = (score != nullptr) ? *score : 0x7FFFFFFF;
 

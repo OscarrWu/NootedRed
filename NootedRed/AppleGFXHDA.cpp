@@ -43,6 +43,7 @@ void AppleGFXHDA::processKext(KernelPatcher& patcher, size_t id, mach_vm_address
 
 IOService* AppleGFXHDA::wrapProbe(IOService* that, IOService* provider, SInt32* score)
 {
+    if (singleton().orgProbe == 0) { return nullptr; }
     const auto dev = OSDynamicCast(IOPCIDevice, provider);
     if (dev == nullptr) { return FunctionCast(wrapProbe, singleton().orgProbe)(that, provider, score); }
 
@@ -90,6 +91,7 @@ IOService* AppleGFXHDA::wrapProbe(IOService* that, IOService* provider, SInt32* 
 
 void* AppleGFXHDA::wrapCreateAppleHDAFunctionGroup(void* devId)
 {
+    if (singleton().orgCreateAppleHDAFunctionGroup == 0) { return nullptr; }
     const auto vendorID = getMember<UInt16>(devId, 0x2);
     const auto deviceID = getMember<UInt32>(devId, 0x8);
     if (vendorID == AMDVendorID && (deviceID == RavenHDMIDeviceID || deviceID == RenoirHDMIDeviceID)) {
@@ -100,6 +102,7 @@ void* AppleGFXHDA::wrapCreateAppleHDAFunctionGroup(void* devId)
 
 void* AppleGFXHDA::wrapCreateAppleHDAWidget(void* devId)
 {
+    if (singleton().orgCreateAppleHDAFunctionGroup == 0) { return nullptr; }
     auto vendorID = getMember<UInt16>(devId, 0x2);
     auto deviceID = getMember<UInt32>(devId, 0x8);
     if (vendorID == AMDVendorID && (deviceID == RavenHDMIDeviceID || deviceID == RenoirHDMIDeviceID)) {

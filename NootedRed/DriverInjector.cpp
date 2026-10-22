@@ -156,5 +156,6 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
         }
     }
 
+    if (singleton().orgAddDrivers == 0) { return false; }
     return FunctionCast(wrapAddDrivers, singleton().orgAddDrivers)(self, array, doNubMatching);
 }

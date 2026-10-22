@@ -162,6 +162,7 @@ bool Backlight::OnAppleBacklightDisplayLoad(void* const, void* const, IOService*
 IOReturn Backlight::wrapSetAttributeForConnection(IOService* const framebuffer, const IOIndex connectIndex,
                                                   const IOSelect attribute, const uintptr_t value)
 {
+    if (singleton().orgSetAttributeForConnection == 0) { return kIOReturnError; }
     const auto ret = FunctionCast(wrapSetAttributeForConnection, singleton().orgSetAttributeForConnection)(
         framebuffer, connectIndex, attribute, value);
     if (attribute != kIOAppleBacklightAttribute) { return ret; }
@@ -193,6 +194,7 @@ IOReturn Backlight::wrapSetAttributeForConnection(IOService* const framebuffer, 
 IOReturn Backlight::wrapGetAttributeForConnection(IOService* framebuffer, IOIndex connectIndex, IOSelect attribute,
                                                   uintptr_t* value)
 {
+    if (singleton().orgGetAttributeForConnection == 0) { return kIOReturnError; }
     const auto ret = FunctionCast(wrapGetAttributeForConnection, singleton().orgGetAttributeForConnection)(
         framebuffer, connectIndex, attribute, value);
     if (attribute != kIOAppleBacklightAttribute) { return ret; }
@@ -202,6 +204,7 @@ IOReturn Backlight::wrapGetAttributeForConnection(IOService* framebuffer, IOInde
 
 void* Backlight::wrapLinkCreate(void* data)
 {
+    if (singleton().orgLinkCreate == 0) { return nullptr; }
     const auto ret = FunctionCast(wrapLinkCreate, singleton().orgLinkCreate)(data);
     if (ret == nullptr) { return ret; }
 
@@ -295,5 +298,6 @@ bool Backlight::wrapApplePanelSetDisplay(IOService* self, IODisplay* display)
         }
     }
 
+    if (singleton().orgApplePanelSetDisplay == 0) { return false; }
     return FunctionCast(wrapApplePanelSetDisplay, singleton().orgApplePanelSetDisplay)(self, display);
 }

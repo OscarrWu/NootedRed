@@ -22,8 +22,9 @@ AMDRadeonX5000_AMDGFX9DCNDisplay::VFT AMDRadeonX5000_AMDGFX9DCN2Display::vft;
 void AMDRadeonX5000_AMDGFX9DCN2Display::Constructor(AMDRadeonX5000_AMDGFX9DCN2Display* const self,
                                                     const OSMetaClass* const                 metaClass)
 {
-    assert(AMDRadeonX5000_AMDHWDisplay::constructor() != 0);
-    FunctionCast(Constructor, AMDRadeonX5000_AMDHWDisplay::constructor())(self, metaClass);
+    const auto ctor = AMDRadeonX5000_AMDHWDisplay::constructor();
+    if (ctor == 0) { return; }
+    FunctionCast(Constructor, ctor)(self, metaClass);
     vft.replaceVFT(self);
     gRTMetaClass.instanceConstructed();
 }
