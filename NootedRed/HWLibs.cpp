@@ -202,6 +202,11 @@ static UInt64 gSt1B3P3  = 0;  // 258：client 3 分支读到的 P3（供 `[st1b3
 static UInt64 gSt1G2P = 0, gSt1G2Key = 0;
 static UInt64 gSt1G5P = 0, gSt1G5Ip = 0, gSt1G5Ipr = 0;
 static UInt64 gSt1G5P20 = 0, gSt1G5P21 = 0, gSt1G5P22 = 0, gSt1G5P23 = 0;   // 步20-23 四级指针
+// 265（`-NRedSt1Q`，默认关）：client5 的 qq 对象四字段（只读一次；用于分流 C1/C2）。
+static bool   gSt1Q = false;
+static bool   gSt1QQSeen = false;
+static UInt64 gSt1QQ0 = 0, gSt1QQ8 = 0, gSt1QQ10 = 0, gSt1QQ18 = 0;
+static UInt32 gSt1QQF = 1;   // 1=尚未执行/任一级失败；0=读取成功
 static UInt64 gSt1G6P = 0, gSt1G6Key = 0;
 static UInt64 gSt1G9P = 0, gSt1G9Key = 0;
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
@@ -898,6 +903,19 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
 }
 
+// 265：`[st1qq]` client5 qq 对象四字段（noinline、零解引用、≤120 字符）。
+__attribute__((noinline))
+static void nredSt1QQStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[st1qq] q0=%llx q8=%llx q10=%llx q18=%llx f=%u\n",
+                           static_cast<unsigned long long>(gSt1QQ0),
+                           static_cast<unsigned long long>(gSt1QQ8),
+                           static_cast<unsigned long long>(gSt1QQ10),
+                           static_cast<unsigned long long>(gSt1QQ18),
+                           static_cast<unsigned>(gSt1QQF));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 260：`[st1gf]` 守卫首个失败步号（无失败时输出 c=65535 step=0；noinline、零解引用）。
 __attribute__((noinline))
 static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
@@ -1087,6 +1105,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1B3Stamp(body, off, sizeof(body) - off); }
     // 259：`[st1g2/5/6/7/9]` 各 client 的 P/关键指针（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
+    // 265：`[st1qq]` client5 qq 四字段（仅 -NRedSt1Q）。
+    if (gSt1Q && off < sizeof(body)) { nredSt1QQStamp(body, off, sizeof(body) - off); }
     // 260：`[st1gf]` 守卫首个失败步号（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
     // 261：`[gvm5]` client5 GVM type/注册表（仅 -NRedGvm5）。
@@ -5821,8 +5841,31 @@ static void nredIpRInstall(const void* const ctx)
     gIpRRet = 0;
 }
 
+// ─── 265：client5 的 qq 对象四字段探针（`-NRedSt1Q`，默认关；只读一次）──────────────────
+//  链：ctx → p=*(ctx) → qq=*(p)；任一级 KPtr 失败 ⇒ 值全 0 且 f=1。
+//  四字段：q0=*(u64*)qq、q8=*(qq+8)、q10=*(qq+0x10)、q18=*(qq+0x18)。
+__attribute__((noinline))
+static void nredSt1QQProbe(const void* const ctx)
+{
+    gSt1QQSeen = true;
+    gSt1QQ0 = 0; gSt1QQ8 = 0; gSt1QQ10 = 0; gSt1QQ18 = 0;
+    gSt1QQF = 1;
+    if (!nredKernelPtrOk(ctx)) { return; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx));
+    if (!nredKernelPtrOk(q)) { return; }
+    q = *reinterpret_cast<const UInt8* const*>(q);
+    if (!nredKernelPtrOk(q)) { return; }
+    gSt1QQ0 = *reinterpret_cast<const UInt64*>(q);
+    gSt1QQ8 = *reinterpret_cast<const UInt64*>(q + 8);
+    gSt1QQ10 = *reinterpret_cast<const UInt64*>(q + 0x10);
+    gSt1QQ18 = *reinterpret_cast<const UInt64*>(q + 0x18);
+    gSt1QQF = 0;
+}
+
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 265：client5 的 qq 四字段探针（默认关；只读一次）。
+    if (gSt1Q && !gSt1QQSeen && c == 1 && b == 5) { nredSt1QQProbe(a); }
     // 263：client5 的 IP 根提供者（默认关）。必须在守卫之前安装。
     if (gIpR && c == 1 && b == 5) { nredIpRInstall(a); }
     // 262：client5 golden 6 槽探针（默认关；只读一次）。
@@ -6341,6 +6384,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gGvm5 = checkKernelArgument("-NRedGvm5");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
+    // 265：client5 qq 四字段探针（默认关；只读一次）。
+    gSt1Q = checkKernelArgument("-NRedSt1Q");
     // 263：client5 IP 根提供者（默认关）。
     gIpR = checkKernelArgument("-NRedIpR");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
