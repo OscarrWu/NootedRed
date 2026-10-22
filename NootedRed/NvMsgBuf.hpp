@@ -57,6 +57,7 @@
 
 #include <Headers/kern_util.hpp>   // SYSLOG（内部走 IOLog ⇒ 同时进内核 console 与 Lilu 日志）
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态写文件）
+#include <Headers/kern_nvram.hpp>  // NVStorage：证据探针的 NVRAM 独立键（见 ObsProbe）
 
 // 内核消息环形缓冲（XNU bsd/kern/subr_log.c）。弱引用：未解析则为空，运行期判空。
 extern "C" {
@@ -261,6 +262,105 @@ namespace NvMsgBuf {
 		return (n > 0 && static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : 0;
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	//  证据通道探针（boot-arg `-NRedObsProbe`，默认关）
+	//
+	//  为什么需要它（第 272 轮）：NRed 日志 0 个，而 panic 在 30.84 s（落在日志窗口内）
+	//   ⇒ 离线无法区分"调度未启动（C1/C2）"与"写盘失败（C5）"。本探针用**不依赖 L2 写盘**
+	//   的通道（NVRAM 独立键 `NRedObs`）各记一个标记，重启回 Manjaro 后经 efivarfs 直接读。
+	//
+	//  四个标记（每项只成功写一次；内容按已知项整体重建，故后写的项会带上先前的项）：
+	//    P1 `obs:s`        进入 `-NRedObserveDisk` 分支（`NRed::init`）
+	//    P2 `obs:k`/`obs:a` `scheduleDumps()` 之后：k=调度已启动，a=`thread_call_allocate` 失败
+	//    P3 `obs:t0=0x<sec>` 首拍到达（`dumpTick` 第一次执行；0 秒是合法值）
+	//    P4 `obs:wf=0x<err>` 首次写盘失败及其错误码（`writeWithFingerprint`）
+	//  另附 `boot=0x<uptime>` 指纹，供判读时核对标记归属（跨轮残留）。
+	//
+	//  纪律（与需求文档 §3/§6 一致）：
+	//    · 关态第一行即 return ⇒ 零 NVRAM 写、零行为变化；
+	//    · 不写文件、不 SYSLOG、不加锁、不等待；写失败静默（不重试循环，留给下一调用点）；
+	//    · 缓冲在 BSS（`sBuf`）⇒ `markOnce` 局部帧 ≈ 0 B；
+	//    · 三处调用点（`NRed::init` 一次、`dumpTick` 首拍、`writeWithFingerprint` 失败）不并发；
+	//    · 键与 `NRedStage` **分开**（避免 256 B 上限被阶段标记占满）。
+	//  ⚠️ 已知实测风险：`StageMark.hpp` 头部记录第 2 批次真机 `NVStorage::init` 成功但
+	//    `write` 失败（早期启动阶段 `IODTNVRAM::setProperty` 不生效）。若本轮仍如此，
+	//    P1/P2 会丢失；P3 首拍会**重建全部已知项**（含 P1/P2），故只要首拍时 NVRAM 可用即可补回。
+	// ═══════════════════════════════════════════════════════════════════════════
+	namespace ObsProbe {
+		static constexpr int kBufSize = 128;
+
+		// 状态一律用 **inline 函数内的静态标量/数组**：POD、常量初始化 ⇒ 全程序唯一、
+		// 不需要 guard variable（kext 不支持），也不会因多翻译单元各持一份而失联。
+		inline bool   &sOn()       { static bool v = false; return v; }              // `-NRedObsProbe`
+		inline bool   &sEntered()  { static bool v = false; return v; }              // P1
+		inline UInt8  &sSched()    { static UInt8 v = 0; return v; }                 // P2：0=未跑 1=ok 2=alloc fail
+		inline bool   &sTickSeen() { static bool v = false; return v; }              // P3
+		inline UInt64 &sTick0()    { static UInt64 v = 0; return v; }                // P3：首拍秒
+		inline bool   &sWfSeen()   { static bool v = false; return v; }              // P4
+		inline UInt32 &sWfErr()    { static UInt32 v = 0; return v; }                // P4：首次失败 err
+		inline bool   *sDone()     { static bool v[4] = {false, false, false, false}; return v; }
+		inline char   *sBuf()      { static char v[kBufSize]; return v; }
+		// 探针自己的 boot 指纹：**不复用** `stUptimeTicks()`（那个值被 L2 文件首行使用，
+		//  若探针在 init 阶段先取，会把 L2 的指纹冻结到更早时刻 ⇒ 改变 L2 行为）。
+		inline UInt64 &sBoot()     { static UInt64 v = 0; return v; }
+		inline UInt64 bootTicks() {
+			UInt64 &t = sBoot();
+			if (t == 0) t = mach_absolute_time();
+			return t;
+		}
+
+		// 惰性初始化 NVStorage（早期阶段可能失败；失败则静默降级，绝不影响引导）
+		inline NVStorage *storage() {
+			static NVStorage v {};
+			static bool tried = false;
+			static bool ok    = false;
+			if (!tried) {
+				tried = true;
+				ok    = v.init();
+			}
+			return ok ? &v : nullptr;
+		}
+
+		inline int append(char *buf, int n, const char *s) {
+			if (n < 0 || n >= kBufSize) return kBufSize - 1;
+			const int r = snprintf(buf + n, kBufSize - n, "%s", s);
+			if (r <= 0) return n;
+			return (n + r < kBufSize) ? (n + r) : (kBufSize - 1);
+		}
+
+		inline int appendHex(char *buf, int n, const char *prefix, UInt64 v, const char *suffix) {
+			if (n < 0 || n >= kBufSize) return kBufSize - 1;
+			const int r = snprintf(buf + n, kBufSize - n, "%s0x%llx%s", prefix,
+			                       static_cast<unsigned long long>(v), suffix);
+			if (r <= 0) return n;
+			return (n + r < kBufSize) ? (n + r) : (kBufSize - 1);
+		}
+
+		// idx: 0=obs:s 1=obs:k/a 2=obs:t0 3=obs:wf。只成功写一次；失败留待下一调用点重试。
+		inline void markOnce(int idx) {
+			if (!sOn() || idx < 0 || idx > 3 || sDone()[idx]) return;
+			auto nv = storage();
+			if (nv == nullptr) return;
+
+			char *buf = sBuf();
+			int n = 0;
+			if (sEntered()) n = append(buf, n, "obs:s|");
+			if (sSched() == 1) n = append(buf, n, "obs:k|");
+			else if (sSched() == 2) n = append(buf, n, "obs:a|");
+			if (sTickSeen()) n = appendHex(buf, n, "obs:t0=0x", sTick0(), "|");
+			if (sWfSeen()) n = appendHex(buf, n, "obs:wf=0x", sWfErr(), "|");
+			n = appendHex(buf, n, "boot=0x", bootTicks(), "");
+			if (n <= 0) return;
+
+			if (!nv->write(NVRAM_PREFIX(LILU_VENDOR_GUID, "NRedObs"),
+			               reinterpret_cast<const uint8_t *>(buf), static_cast<uint32_t>(n),
+			               NVStorage::OptRaw))
+				return;
+			nv->sync();
+			sDone()[idx] = true;
+		}
+	}
+
 	// 把"指纹行 + 正文"写进文件（正文前**不再**另起分隔——首行恒为指纹，判读侧只认首行）。
 	//  返回 0 表示成功（与 `FileIO::writeBufferToFile` 同语义）。
 	//  只有 `hn + len >= sizeof(gBuf)` 时才用第二 buffer 拼接，绝不截断正文。
@@ -268,16 +368,27 @@ namespace NvMsgBuf {
 		char head[kFingerprintMax];
 		const size_t hn = formatFingerprint(head, sizeof(head));
 		if (hn == 0) return -1;
+		int rc;
 		if (hn + len < sizeof(gBuf)) {
 			__builtin_memcpy(gBuf, head, hn);
 			if (len > 0) __builtin_memcpy(gBuf + hn, body, len);
-			return FileIO::writeBufferToFile(name, gBuf, hn + len);
+			rc = FileIO::writeBufferToFile(name, gBuf, hn + len);
+		} else {
+			char merged[2 * kFingerprintMax * 16];   // 1536 B，足够覆盖单帧上限 + 指纹
+			if (hn + len > sizeof(merged)) return -1;
+			__builtin_memcpy(merged, head, hn);
+			if (len > 0) __builtin_memcpy(merged + hn, body, len);
+			rc = FileIO::writeBufferToFile(name, merged, hn + len);
 		}
-		char merged[2 * kFingerprintMax * 16];   // 1536 B，足够覆盖单帧上限 + 指纹
-		if (hn + len > sizeof(merged)) return -1;
-		__builtin_memcpy(merged, head, hn);
-		if (len > 0) __builtin_memcpy(merged + hn, body, len);
-		return FileIO::writeBufferToFile(name, merged, hn + len);
+		// P4：首次写盘失败（C5）⇒ 记错误码。关态整块不执行（零状态写入、零额外调用）。
+		if (rc != 0 && ObsProbe::sOn()) {
+			if (!ObsProbe::sWfSeen()) {
+				ObsProbe::sWfSeen() = true;
+				ObsProbe::sWfErr()  = static_cast<UInt32>(rc);
+			}
+			ObsProbe::markOnce(3);
+		}
+		return rc;
 	}
 
 	// 排下一拍（提取成小函数，多处复用）
@@ -323,6 +434,16 @@ namespace NvMsgBuf {
 
 		if (tick < kMaxTicks && stTotal() < kMaxTotal) {
 			tick++;
+			// P3：首拍到达（thread_call 已触发 ⇒ C1/C2 均否）。同时重建全部已知项，
+			//  兜底 `NRed::init` 阶段 NVStorage 不可用而丢失的 P1/P2（需求文档 §6 R1）。
+			//  关态整块不执行（零状态写入、零额外调用）。
+			if (ObsProbe::sOn()) {
+				if (!ObsProbe::sTickSeen()) {
+					ObsProbe::sTickSeen() = true;
+					ObsProbe::sTick0()    = static_cast<UInt64>(sec);
+				}
+				ObsProbe::markOnce(2);
+			}
 
 			// ★★ 根文件系统挂载判据（**本实现的核心安全措施**）：
 			//    `rootvnode == nullptr` ⇒ 根 FS 还没挂上 ⇒ **绝不碰文件系统**（否则内核线程会阻塞、

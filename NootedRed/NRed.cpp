@@ -51,8 +51,23 @@ void NRed::init()
     //  首次成功后持续写**增量** ⇒ 既不必猜"根文件系统何时挂载"，也不会因早期写失败而丢日志。
     //  这正是所有者定的设计意图："不靠猜时间，靠等条件 + 重试"。
     //  背景、根因与实测见 `NvMsgBuf.hpp` 头部；读取侧 `kb/tools/read-apfs-logs.sh`。
-    if (checkKernelArgument("-NRedObserveDisk"))
+    // 证据通道探针开关（`-NRedObsProbe`，默认关；与 `-NRedObserveDisk` 独立解析）。
+    //  必须在正常上下文解析一次并存入标量：探针（含 dumpTick 线程）只读标量，
+    //  绝不在探针里调用 checkKernelArgument（见 NvMsgBuf.hpp 门控状态缓存的说明）。
+    NvMsgBuf::ObsProbe::sOn() = checkKernelArgument("-NRedObsProbe");
+    if (checkKernelArgument("-NRedObserveDisk")) {
+        // P1：进入 L2 分支；P2：scheduleDumps() 之后区分"调度已启动"与"alloc 失败"。
+        //  关态整块不执行（零状态写入），`scheduleDumps()` 的调用位置与语义不变。
+        if (NvMsgBuf::ObsProbe::sOn()) {
+            NvMsgBuf::ObsProbe::sEntered() = true;
+            NvMsgBuf::ObsProbe::markOnce(0);
+        }
         NvMsgBuf::scheduleDumps();
+        if (NvMsgBuf::ObsProbe::sOn()) {
+            NvMsgBuf::ObsProbe::sSched() = (NvMsgBuf::stCall() != nullptr) ? 1 : 2;
+            NvMsgBuf::ObsProbe::markOnce(1);
+        }
+    }
     SYSLOG("NRed", "|-----------------------------------------------------------------|");
     SYSLOG("NRed", "| Copyright 2022-2025 ChefKiss.                                   |");
     SYSLOG("NRed", "| If you've paid for this, you've been scammed. Ask for a refund! |");
