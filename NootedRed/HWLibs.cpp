@@ -190,6 +190,7 @@ static UInt32 gSt1RunN  = 0;   // 放行尝试次数（饱和 255）
 // 245：`[st1v]` 补充观测（值在 guard 内读出，头部区零解引用）。
 //  §3 约定：`mes=0`（③ 失败）时 m8/m790 未读出 ⇒ 保持 0，不得据此判 G4/G5 失败。
 static UInt64 gSt1Mes  = 0;   // ③ 读出的 MES 对象地址
+static UInt64 gSt1G14P = 0;   // 264：client14 分支读到的 P14（供 `[st1g14]`）
 static UInt64 gSt1M8   = 0;   // ④ *(MES+0x08)
 static UInt64 gSt1M790 = 0;   // ⑤ *(MES+0x790)
 // 246（`-NRedSt1W`，默认关）：client 7 只读探针（不放行、不调原件）；值由探针读出，头戳零解引用。
@@ -883,6 +884,11 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
                  off += d; room -= d; }
     n = snprintf(body + off, room, "[st1g9] p9=%llx key=%llx\n",
                  static_cast<unsigned long long>(gSt1G9P), static_cast<unsigned long long>(gSt1G9Key));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1g14] p14=%llx mes=%llx m790=%llx\n",
+                 static_cast<unsigned long long>(gSt1G14P), static_cast<unsigned long long>(gSt1Mes),
+                 static_cast<unsigned long long>(gSt1M790));
     if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
 }
 
@@ -5496,7 +5502,7 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
         case 6: ok = nredStage1Guard6(ctx); break;
         case 7: ok = nredStage1Guard7(ctx); break;
         case 9: ok = nredStage1Guard9(ctx); break;
-        case 14: (void)nredStage1Guard14(ctx); return false;   // 暂缓：只收集读数，不放行
+        case 14: ok = nredStage1Guard14(ctx); break;
         default: return false;   // 8（暂缓）及其它 client：继续 fail-closed
     }
     if (!ok) { return false; }
@@ -5504,16 +5510,18 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
     return true;
 }
 
-// 14 的 5 条检查保留为独立函数（供将来解冻时直接接入），**本轮恒返回 false**。
+// 14（MES）的 5 条前置；全过 ⇒ 放行（264：0x7b0 的 5 处读者均为搬运/判空，无解引用）。
 __attribute__((noinline))
 static bool nredStage1Guard14(const void* const ctx)
 {
     gSt1Mes = 0;
     gSt1M8 = 0;
     gSt1M790 = 0;
+    gSt1G14P = 0;
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(14, 1); return false; }
     const UInt8* const p14 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x78);
     if (!nredKernelPtrOk(p14)) { nredStage1GfMark(14, 2); return false; }
+    gSt1G14P = reinterpret_cast<UInt64>(p14);
     if (*reinterpret_cast<const UInt64*>(p14 + 0x18) == 0) { nredStage1GfMark(14, 3); return false; }
     const UInt8* const mes = *reinterpret_cast<const UInt8* const*>(p14 + 0x28);   // ③
     if (!nredKernelPtrOk(mes)) { nredStage1GfMark(14, 4); return false; }
@@ -5522,7 +5530,7 @@ static bool nredStage1Guard14(const void* const ctx)
     gSt1M790 = *reinterpret_cast<const UInt64*>(mes + 0x790);   // ⑤ G5
     if (gSt1M8 == 0) { nredStage1GfMark(14, 5); return false; }
     if (gSt1M790 == 0) { nredStage1GfMark(14, 6); return false; }
-    return false;   // 259：本轮暂缓放行（即使 5 条全过）
+    return true;
 }
 
 // ─── 246：client 7 只读探针（`-NRedSt1W`，默认关；不放行、不调原件）──────────────────────
