@@ -253,6 +253,17 @@ static UInt32 gGvm5DRet = 0xFFFFFFFFU;   // 最近一次叶返回值（0xFFFFFFF
 static UInt64 gGvm5DP1 = 0;              // 最近一次 p1 = *(a+0x30)
 static UInt32 gGvm5DLocal68 = 0;         // 最近一次 local_68 低 32 位（类型）
 static UInt32 gGvm5DStep = 0;            // 最后执行的步骤号（失败定位；0=未进入）
+static UInt32 gGvm5DBusy = 0;            // A2：描述块非阻塞重入守卫（OSCompareAndSwap）
+static bool   gGvm5DBusyHit = false;     // A2：是否发生过重入（观测 `busy=1`）
+// 274（`-NRedGvm5Phase`，默认关）：client5 stage1 入口只读探针（回答 D1：start 是否走到 client5）。
+//  ⚠ 能力边界：只能回答 D1；D2（槽 2/6 失败归属）需 powerUp hook，D3（self+0x100 等语义）
+//    需 `AmdPowerPlayHelper::self`——我方在 `wrapMode9440f` 只有 `ctx`，两者均拿不到。
+static bool   gGvm5Phase = false;
+static UInt32 gGvm5PhaseN = 0;           // 第几次（1-based）
+static UInt64 gGvm5PhaseA = 0;           // 入参 a
+static UInt64 gGvm5PhaseP1 = 0;          // *(a+0x30)（KPtr 后）
+static UInt64 gGvm5PhaseRa = 0;          // 返回地址归零（ra - gHwlibsSlide）
+static UInt32 gGvm5PhaseRc = 0xFF;       // 探针不执行 D ⇒ 恒 0xFF（未执行）
 struct NRedGvm5DBlocks {
     UInt8 desc[0x1c8];   // local_2a8：描述块（首 u32=0x1c8；+0xf0 起 0xd8 字节为待拷贝视图）
     UInt8 clk[0x68];     // local_d0：时钟/能力位块（首 u32=0x68；+4 为位域）
@@ -1062,6 +1073,9 @@ static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
 __attribute__((noinline))
 static void nredGvm5Stamp(char* const body, size_t& off, const size_t cap)
 {
+    // A3（L5）：`-NRedGvm5D` 会被 `checkKernelArgument("-NRedGvm5")` 前缀命中，但 D 的早退
+    //  在探针之前 ⇒ 探针未执行。用 `gGvm5Seen` 哨兵避免输出未采样的初值。
+    if (!gGvm5Seen) { return; }
     const int n = snprintf(body + off, cap, "[gvm5] type=%x a0=%llx a58=%llx iproot=%llx reg=%u\n",
                            static_cast<unsigned>(gGvm5Type),
                            static_cast<unsigned long long>(gGvm5A0),
@@ -1072,15 +1086,30 @@ static void nredGvm5Stamp(char* const body, size_t& off, const size_t cap)
 }
 
 // 273：`[gvm5d]` client5 stage1 叶复刻结果（noinline、零解引用、≤128 字符）。
-//  ret=0xFFFFFFFF 表示叶未跑；step=最后执行的步骤号（失败定位）。
+//  ret=0xFFFFFFFF 表示叶未跑；step=最后执行的步骤号（失败定位）；busy=1 表示发生过重入。
 __attribute__((noinline))
 static void nredGvm5DStamp(char* const body, size_t& off, const size_t cap)
 {
-    const int n = snprintf(body + off, cap, "[gvm5d] ret=%u p1=%llx local68=%x step=%u\n",
+    const int n = snprintf(body + off, cap, "[gvm5d] ret=%u p1=%llx local68=%x step=%u busy=%u\n",
                            static_cast<unsigned>(gGvm5DRet),
                            static_cast<unsigned long long>(gGvm5DP1),
                            static_cast<unsigned>(gGvm5DLocal68),
-                           static_cast<unsigned>(gGvm5DStep));
+                           static_cast<unsigned>(gGvm5DStep),
+                           gGvm5DBusyHit ? 1U : 0U);
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
+// 274：`[gvm5p]` client5 stage1 入口只读探针（noinline、零解引用、≤128 字符）。
+//  能力边界：只能回答 D1（start 是否走到 client5）；D2/D3 需 powerUp hook 或 self 路径，本探针拿不到。
+__attribute__((noinline))
+static void nredGvm5PStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[gvm5p] n=%u a=%llx p1=%llx ra=%llx rc=%02x\n",
+                           static_cast<unsigned>(gGvm5PhaseN),
+                           static_cast<unsigned long long>(gGvm5PhaseA),
+                           static_cast<unsigned long long>(gGvm5PhaseP1),
+                           static_cast<unsigned long long>(gGvm5PhaseRa),
+                           static_cast<unsigned>(gGvm5PhaseRc));
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
@@ -1272,6 +1301,8 @@ int nredTraceFlush(int secTag)
     if (gGSlot && off < sizeof(body)) { nredGSlotStamp(body, off, sizeof(body) - off); }
     // 273：`[gvm5d]` client5 stage1 叶复刻结果（仅 -NRedGvm5D）。
     if (gGvm5D && off < sizeof(body)) { nredGvm5DStamp(body, off, sizeof(body) - off); }
+    // 274：`[gvm5p]` client5 stage1 入口只读探针（仅 -NRedGvm5Phase）。
+    if (gGvm5Phase && off < sizeof(body)) { nredGvm5PStamp(body, off, sizeof(body) - off); }
     // 263：`[ipr]` IP 根安装结果（仅 -NRedIpR）。
     if (gIpR && off < sizeof(body)) { nredIpRStamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
@@ -6211,6 +6242,25 @@ static bool nredQqHdlInstall(const void* const ctx)
     gQqHdlRet = 0;
     return true;
 }
+// ─── 274：client5 stage1 入口只读探针（`-NRedGvm5Phase`，默认关）──────────────────────────────
+//  目的：回答 D1——`start` 是否走到 client5（`[gvm5p] n=1` 出现即成立）。
+//  ⚠ 能力边界（必须保留）：本探针**只能**回答 D1；D2（槽 2/6 失败归属）需 hook
+//    `AmdPowerPlayHelper::powerUp`，D3（`self+0x100/+0x108/+0x28F8/+0x28F9` 语义）需
+//    `AmdPowerPlayHelper::self`——我方在 `wrapMode9440f` 只有 `ctx`，两者均拿不到。
+//  纪律：只写 BSS；不写文件、不 SYSLOG、不写寄存器；所有指针先 KPtr；不执行 D。
+__attribute__((noinline))
+static void nredGvm5Phase(const void* const a, const void* const ra)
+{
+    if (gGvm5PhaseN < 0xFFFFFFFFU) { ++gGvm5PhaseN; }
+    gGvm5PhaseA = reinterpret_cast<UInt64>(a);
+    gGvm5PhaseP1 = 0;
+    gGvm5PhaseRc = 0xFF;                                  // 探针不执行 D ⇒ 未执行
+    const UInt64 raw = reinterpret_cast<UInt64>(ra);
+    gGvm5PhaseRa = (gHwlibsSlide != 0 && raw > gHwlibsSlide) ? (raw - gHwlibsSlide) : 0;
+    if (!nredKernelPtrOk(a)) { return; }
+    const UInt64 p1 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30);
+    if (nredKernelPtrOk(reinterpret_cast<const void*>(p1))) { gGvm5PhaseP1 = p1; }
+}
 
 // ─── 273：client5 stage1 叶（`0x985d0`）的我方完整复刻（`-NRedGvm5D`，默认关）──────────────
 //  依据：`kb/序列数据/反汇编/证据/HWLibs全量反编译/fn/985d0.c` 与 `HWLibs_full.asm` 的
@@ -6220,15 +6270,31 @@ static bool nredQqHdlInstall(const void* const ctx)
 //  失败一律返 0（苹果语义：0＝失败）；任何指针/回调判空即 fail-closed，不 panic。
 //  ⚠ 描述块在 BSS（`gGvm5DBlocks`）；本函数局部帧只含标量（≤128 B 纪律）。
 //  ⚠ 步骤号写入 `gGvm5DStep`（失败定位）；观测行 `[gvm5d]` 由 `nredGvm5DStamp` 输出。
+// A2：描述块非阻塞重入守卫（RAII）。重入 ⇒ 该次调用返 0（失败），不等待、不崩溃。
+//  ⚠ 返回语义改变：苹果叶的栈局部描述块天然可重入；我方 BSS 单份 ⇒ 重入必须 fail-closed。
+struct NRedGvm5DBusyGuard {
+    bool held;
+    NRedGvm5DBusyGuard() : held(OSCompareAndSwap(0, 1, &gGvm5DBusy)) {
+        if (!held) { gGvm5DBusyHit = true; }
+    }
+    ~NRedGvm5DBusyGuard() { if (held) { gGvm5DBusy = 0; } }
+};
+
 __attribute__((noinline))
 static UInt32 nredGvm5Stage1(void* const a, void* const d)
 {
     (void)d;
     gGvm5DStep = 0;
     gGvm5DRet  = 0xFFFFFFFFU;
+    gGvm5DP1 = 0;
+    gGvm5DLocal68 = 0;
     if (gHwlibsSlide == 0 || !nredKernelPtrOk(a)) { gGvm5DRet = 0; return 0; }
 
+    NRedGvm5DBusyGuard busyGuard;
+    if (!busyGuard.held) { gGvm5DRet = 0; gGvm5DStep = 0x0E; return 0; }
+
     // ① p1 = *(a+0x30)（U1：`0x98050(a)` 的语义，纯读）
+    gGvm5DStep = 1;
     const UInt64 p1 = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30);
     gGvm5DP1 = p1;
     if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1))) { gGvm5DRet = 0; return 0; }
@@ -6343,6 +6409,17 @@ static UInt32 nredGvm5Stage1(void* const a, void* const d)
     const auto fn_8b4bf = reinterpret_cast<UInt64 (*)(UInt64)>(s + 0x8b4bf);
 
     gGvm5DStep = 7;
+    // A1（M1）：`0x989a5` 内部不判空 `p1[7]`（+0x38）与 `*dev`（`0x8b4bf(dev)` 的入参），
+    //  空指针会 panic。苹果原叶同样不判 ⇒ 本门是**刻意 fail-closed**（与苹果不等价，
+    //  但只在异常路径生效；正常路径两者行为相同）。
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(
+            *reinterpret_cast<const UInt64*>(p1b + 0x38)))) {
+        gGvm5DRet = 0; gGvm5DStep = 0x0C; return 0;
+    }
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(
+            *reinterpret_cast<const UInt64*>(reinterpret_cast<const void*>(dev))))) {
+        gGvm5DRet = 0; gGvm5DStep = 0x0D; return 0;
+    }
     if ((*reinterpret_cast<const UInt8*>(p1b + 0x108) & 1U) != 0) {
         (void)fn_989a5(const_cast<UInt8*>(p1b), static_cast<SInt32>(uVar7), 6);
     }
@@ -6369,14 +6446,16 @@ static UInt32 nredGvm5Stage1(void* const a, void* const d)
     __builtin_memset(hub, 0, 24);
     *reinterpret_cast<UInt32*>(hub) = 0x10;
     const UInt64 p1f = *reinterpret_cast<const UInt64*>(p1b + 0x78);          // p1[0xf]
-    if (p15 == 0 || p1f == 0) {
+    // A4（L1）：苹果在 `9891c` **重新读** `p1[5]`（`movq 40(%r14),%rdi`），不复用前面的值。
+    const UInt64 p15g = *reinterpret_cast<const UInt64*>(p1b + 0x28);
+    if (p15g == 0 || p1f == 0) {
         // 苹果此处调用断言回调（`"Unrecognized or invalid hub type!"`）后返回 false。
         // ⚠ 同上：不调用断言（避免未确证的 panic 风险），直接 fail-closed。
         gGvm5DRet = 0;
         return 0;
     }
     if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1f))) { gGvm5DRet = 0; return 0; }
-    if (reinterpret_cast<UInt32 (*)(UInt64, void*)>(p1f)(p15, hub) != 0) { gGvm5DRet = 0; return 0; }
+    if (reinterpret_cast<UInt32 (*)(UInt64, void*)>(p1f)(p15g, hub) != 0) { gGvm5DRet = 0; return 0; }
     *reinterpret_cast<UInt32*>(save) = *reinterpret_cast<const UInt32*>(hub + 4);
     __builtin_memcpy(save + 4, hub + 8, 8);   // 非对齐写（save+4）⇒ 用 memcpy 避免 UB
     if (ctxFn == 0 || !nredKernelPtrOk(reinterpret_cast<const void*>(ctxFn))) { gGvm5DRet = 0; return 0; }
@@ -6393,6 +6472,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
 {
     // 270：client7 stage1 的窗口在函数返回时关闭（任何 return 路径）。
     NredP7Window p7win(gP7Hold && b == 7 && c == 1);
+    // ── 274：client5 stage1 入口只读探针（`-NRedGvm5Phase`，默认关；**在 D 之前**）──────────
+    //  只写 BSS；不执行 D、不改返回值。`ra` 取本函数的调用者地址并归零（ra - slide）。
+    if (gGvm5Phase && b == 5 && c == 1) { nredGvm5Phase(a, __builtin_return_address(0)); }
     // ── 273：client5 stage1 叶替换（`-NRedGvm5D`，默认关）──────────────────────────────────
     //  与 `0x94831` 的尾跳等价：先 `p1 = *(a+0x30)`（在叶内），再执行我方 16 步复刻。
     //  关态 ⇒ 本行不成立，后续路径逐字不变；开态 ⇒ 不进入苹果叶（也不进入下方 fail-closed 护栏）。
@@ -6926,7 +7008,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 261：client5 GVM type/注册表探针（默认关；只读一次）。
     gGvm5 = checkKernelArgument("-NRedGvm5");
     // 273：client5 stage1 叶替换（默认关）。开 ⇒ 我方完整复刻 0x985d0；关 ⇒ 苹果原叶。
-    gGvm5D = checkKernelArgument("-NRedGvm5D");
+    //  A3（L5）：用精确 token 匹配，避免 `-NRedGvm5D` 被 `checkKernelArgument("-NRedGvm5")` 前缀命中。
+    gGvm5D = nredExactBootArg("-NRedGvm5D");
+    // 274：client5 stage1 入口只读探针（默认关；只写 BSS，不执行 D）。
+    gGvm5Phase = nredExactBootArg("-NRedGvm5Phase");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
     // 265：client5 qq 四字段探针（默认关；只读一次）。
