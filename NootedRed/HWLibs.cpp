@@ -213,6 +213,12 @@ static UInt64 gGvm5A0 = 0;      // *(u64*)A（A 的首字段；用于确认 IP �
 static UInt64 gGvm5A58 = 0;     // *(A+0x58)（provider 克隆继承的槽）
 static UInt64 gGvm5Iproot = 0;  // *(IP+0x58)（＝0x8b8e7(A)）
 static UInt32 gGvm5Reg = 2;   // 0=未命中 1=命中 2=无法判定
+// 262（`-NRedGSlot`，默认关）：client5 golden 6 槽（type/实例数/base[0..2]）只读快照。
+struct NRedGSlotRec { UInt32 type, n, b0, b1, b2; };
+static bool         gGSlot = false;
+static bool         gGSlotSeen = false;
+static NRedGSlotRec gGSlotRec[6];
+static UInt64       gGSlotH = 0, gGSlotT = 0, gGSlotA = 0;
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -891,6 +897,29 @@ static void nredGvm5Stamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 262：`[gslot]` client5 6 槽读数（头行 h/t/a + 每槽一行；noinline、零解引用）。
+__attribute__((noinline))
+static void nredGSlotStamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room, "[gslot] h=%llx t=%llx a=%llx\n",
+                     static_cast<unsigned long long>(gGSlotH),
+                     static_cast<unsigned long long>(gGSlotT),
+                     static_cast<unsigned long long>(gGSlotA));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    for (unsigned k = 0; k < 6; ++k) {
+        if (room == 0) { return; }
+        const NRedGSlotRec& r = gGSlotRec[k];
+        n = snprintf(body + off, room, "[gslot] n=%u t0=%x n0=%u b0=%x b1=%x b2=%x%s\n", k,
+                     static_cast<unsigned>(r.type), static_cast<unsigned>(r.n),
+                     static_cast<unsigned>(r.b0), static_cast<unsigned>(r.b1),
+                     static_cast<unsigned>(r.b2), (r.n > 3) ? " +" : "");
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -1027,6 +1056,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
     // 261：`[gvm5]` client5 GVM type/注册表（仅 -NRedGvm5）。
     if (gGvm5 && off < sizeof(body)) { nredGvm5Stamp(body, off, sizeof(body) - off); }
+    // 262：`[gslot]` client5 6 槽（仅 -NRedGSlot）。
+    if (gGSlot && off < sizeof(body)) { nredGSlotStamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
     if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // 248：槽值行独立开关（-NRedSt1W2）；W 开而 W2 关 ⇒ 不 deref svc、不输出这两行。
@@ -5619,8 +5650,49 @@ static void nredGvm5Probe(const void* const ctx)
     gGvm5Reg = 0;
 }
 
+// ─── 262：client5 golden 6 槽探针（`-NRedGSlot`，默认关；只读一次）────────────────────
+//  链：ctx → P5=*(ctx+0x30) → H=*(P5+0x28)；6 槽地址 H+0x008+k*0x260（k=0..5）。
+//  每槽：type=*(u32*)s、nInst=*(u32*)(s+4)、base[i]=*(u32*)(s+0x2C+4i)（i<min(n,3)）。
+//  H 有效即读槽；(H+0xE48) 的 T 与 *(T+0x08) 的 A 仅用于头部对齐，无效则记 0。
+__attribute__((noinline))
+static void nredGSlotProbe(const void* const ctx)
+{
+    gGSlotSeen = true;
+    gGSlotH = 0; gGSlotT = 0; gGSlotA = 0;
+    for (unsigned k = 0; k < 6; ++k) {
+        gGSlotRec[k].type = 0; gGSlotRec[k].n = 0;
+        gGSlotRec[k].b0 = 0; gGSlotRec[k].b1 = 0; gGSlotRec[k].b2 = 0;
+    }
+    if (!nredKernelPtrOk(ctx)) { return; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
+    if (!nredKernelPtrOk(q)) { return; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // H
+    if (!nredKernelPtrOk(q)) { return; }
+    gGSlotH = reinterpret_cast<UInt64>(q);
+    q = *reinterpret_cast<const UInt8* const*>(q + 0xE48);         // T
+    if (nredKernelPtrOk(q)) {
+        gGSlotT = reinterpret_cast<UInt64>(q);
+        q = *reinterpret_cast<const UInt8* const*>(q + 0x08);      // A
+        if (nredKernelPtrOk(q)) { gGSlotA = reinterpret_cast<UInt64>(q); }
+    }
+    q = reinterpret_cast<const UInt8*>(gGSlotH);
+    for (unsigned k = 0; k < 6; ++k) {
+        const UInt32 type = *reinterpret_cast<const UInt32*>(q + 8 + k * 0x260);
+        const UInt32 cnt = *reinterpret_cast<const UInt32*>(q + 8 + k * 0x260 + 4);
+        gGSlotRec[k].type = type;
+        gGSlotRec[k].n = cnt;
+        const UInt32 cap = (cnt > 3) ? 3 : cnt;
+        if (cap > 0) { gGSlotRec[k].b0 = *reinterpret_cast<const UInt32*>(q + 8 + k * 0x260 + 0x2C); }
+        if (cap > 1) { gGSlotRec[k].b1 = *reinterpret_cast<const UInt32*>(q + 8 + k * 0x260 + 0x30); }
+        if (cap > 2) { gGSlotRec[k].b2 = *reinterpret_cast<const UInt32*>(q + 8 + k * 0x260 + 0x34); }
+    }
+}
+
+
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 262：client5 golden 6 槽探针（默认关；只读一次）。
+    if (gGSlot && !gGSlotSeen && c == 1 && b == 5) { nredGSlotProbe(a); }
     // 261：client5 GVM type/注册表探针（默认关；只读一次）。
     if (gGvm5 && !gGvm5Seen && c == 1 && b == 5) { nredGvm5Probe(a); }
     // 257：client 3 stage1 时刻的 P3 观测（默认关；仅首次）。
@@ -6133,6 +6205,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1C = checkKernelArgument("-NRedSt1C");
     // 261：client5 GVM type/注册表探针（默认关；只读一次）。
     gGvm5 = checkKernelArgument("-NRedGvm5");
+    // 262：client5 golden 6 槽（默认关；只读一次）。
+    gGSlot = checkKernelArgument("-NRedGSlot");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
     gSt1P = nredExactBootArg("-NRedSt1P");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
