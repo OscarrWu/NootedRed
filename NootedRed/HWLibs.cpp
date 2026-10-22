@@ -210,7 +210,7 @@ static bool   gQqProbe = false;
 static bool   gQqProbeSeen = false;
 static bool   gQqHdl = false;
 static bool   gSt1G5Step24 = false;   // 步24 守卫已接入（安装判据 [9]）
-static UInt8  gQqHdlStore[8];         // 8B 句柄（static：无分配器可用，生命周期＝kext）
+alignas(8) static UInt8 gQqHdlStore[8];   // 8B 句柄（static：无分配器；8B 对齐，避免未对齐写）
 static UInt64 gQqHdlOld = 0;
 static UInt32 gQqHdlRet = 0xFF;
 static UInt64 gQqP = 0, gQqQ = 0, gQqQ8 = 0, gQqS1 = 0;
@@ -6026,7 +6026,8 @@ static void nredSt1QQProbe(const void* const ctx)
 }
 
 // ─── 268：client5 的 qq 句柄层（`-NRedQqProbe` 只读；`-NRedQqHdl` 安装；均默认关）──────────
-//  只读探针：ctx→p=*(ctx)→qq=*(p)→q8=*(qq+8)→slot1=*(qq+0x28)→四值。零写入。
+//  只读探针：ctx→p=*(ctx)→qq=*(p)，**先确认 *(qq+0x10)==qq（0x228 表）**，之后才读
+//  q8/slot1 与四值；若 qq 不是表（例如 8B 句柄），只记录 qq 后立即返回。零写入。
 __attribute__((noinline))
 static void nredQqProbe(const void* const ctx)
 {
@@ -6040,6 +6041,7 @@ static void nredQqProbe(const void* const ctx)
     q = *reinterpret_cast<const UInt8* const*>(q);
     if (!nredKernelPtrOk(q)) { return; }
     gQqQ = reinterpret_cast<UInt64>(q);
+    if (*reinterpret_cast<const UInt64*>(q + 0x10) != reinterpret_cast<UInt64>(q)) { return; }
     gQqQ8 = *reinterpret_cast<const UInt64*>(q + 8);
     q = *reinterpret_cast<const UInt8* const*>(q + 0x28);
     if (!nredKernelPtrOk(q)) { return; }
@@ -6063,10 +6065,11 @@ static bool nredQqHdlInstall(const void* const ctx)
     if (!nredKernelPtrOk(qq)) { gQqHdlRet = 3; return false; }
     gQqP = reinterpret_cast<UInt64>(p);
     gQqQ = reinterpret_cast<UInt64>(qq);
+    // 先读任何对象都安全的首 8B：非 0 ⇒ 已补过/非预期，直接拒绝（避免对短对象读 +0x10）
+    if (*reinterpret_cast<const UInt64*>(qq) != 0) { gQqHdlRet = 5; return false; }
     if (*reinterpret_cast<const UInt64*>(qq + 0x10) != reinterpret_cast<UInt64>(qq)) {
         gQqHdlRet = 4; return false;                                  // 非 C1 表
     }
-    if (*reinterpret_cast<const UInt64*>(qq) != 0) { gQqHdlRet = 5; return false; }   // 已补过
     const UInt8* const slot1 = *reinterpret_cast<const UInt8* const*>(qq + 0x28);
     if (!nredKernelPtrOk(slot1)) { gQqHdlRet = 6; return false; }
     gQqS1 = reinterpret_cast<UInt64>(slot1);
