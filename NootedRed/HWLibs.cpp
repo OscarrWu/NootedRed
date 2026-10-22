@@ -209,9 +209,9 @@ static UInt32 gSt1GfStep = 0;
 static bool   gGvm5 = false;
 static bool   gGvm5Seen = false;
 static UInt32 gGvm5Type = 0;
-static UInt64 gGvm5A58 = 0;
-static UInt64 gGvm5T78 = 0;
-static UInt64 gGvm5T90 = 0;
+static UInt64 gGvm5A0 = 0;      // *(u64*)A（A 的首字段；用于确认 IP 根层级）
+static UInt64 gGvm5A58 = 0;     // *(A+0x58)（provider 克隆继承的槽）
+static UInt64 gGvm5Iproot = 0;  // *(IP+0x58)（＝0x8b8e7(A)）
 static UInt32 gGvm5Reg = 2;   // 0=未命中 1=命中 2=无法判定
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
@@ -882,11 +882,11 @@ static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
 __attribute__((noinline))
 static void nredGvm5Stamp(char* const body, size_t& off, const size_t cap)
 {
-    const int n = snprintf(body + off, cap, "[gvm5] type=%x a58=%llx t78=%llx t90=%llx reg=%u\n",
+    const int n = snprintf(body + off, cap, "[gvm5] type=%x a0=%llx a58=%llx iproot=%llx reg=%u\n",
                            static_cast<unsigned>(gGvm5Type),
+                           static_cast<unsigned long long>(gGvm5A0),
                            static_cast<unsigned long long>(gGvm5A58),
-                           static_cast<unsigned long long>(gGvm5T78),
-                           static_cast<unsigned long long>(gGvm5T90),
+                           static_cast<unsigned long long>(gGvm5Iproot),
                            static_cast<unsigned>(gGvm5Reg));
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
@@ -5575,13 +5575,17 @@ static void nredStage1PRecord(const void* const ctx)
 
 // ─── 261：client5 GVM provider type / 注册表探针（`-NRedGvm5`，默认关；只读一次）──────────
 //  链：ctx → P5 → H=*(P5+0x28) → T=*(H+0xE48) → A=*(T+0x08)；逐级 KPtr。
-//  reg 复刻 0xa31f6 的**只读**查表（不调用 0x8b8e7）：IP=*(A)、n=*(u32*)(IP+232)、
-//  arr=*(void**)(IP+8)，在前 n 项（步长 8）中比较 u32 键；形状不合理/越界 ⇒ reg=2（无法判定）。
+//  reg 复刻 0xa31f6（不调用 0x8b8e7）：
+//    IP=*(A)；iproot=*(IP+0x58)（＝0x8b8e7(A) 的语义）；
+//    head=*(void**)(iproot+232) → blk=*(void**)(head+64) → arr=*(void**)(blk+8)；
+//    固定最多 82 项（0xa3228: rdx=8..0x518 步长 16），键=*(u32*)(arr+i*16)；
+//    键==0 ⇒ 停止（未命中）；键==type ⇒ 命中。
+//  IP==0 或 iproot==0 ⇒ reg=0；其余环节非法 ⇒ reg=2（无法判定）。
 __attribute__((noinline))
 static void nredGvm5Probe(const void* const ctx)
 {
     gGvm5Seen = true;
-    gGvm5Type = 0; gGvm5A58 = 0; gGvm5T78 = 0; gGvm5T90 = 0; gGvm5Reg = 2;
+    gGvm5Type = 0; gGvm5A0 = 0; gGvm5A58 = 0; gGvm5Iproot = 0; gGvm5Reg = 2;
     if (!nredKernelPtrOk(ctx)) { return; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
     if (!nredKernelPtrOk(q)) { return; }
@@ -5589,20 +5593,28 @@ static void nredGvm5Probe(const void* const ctx)
     if (!nredKernelPtrOk(q)) { return; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0xE48);         // T
     if (!nredKernelPtrOk(q)) { return; }
-    const UInt8* const t = q;
-    const UInt8* const a = *reinterpret_cast<const UInt8* const*>(t + 0x08);   // A
-    if (!nredKernelPtrOk(a)) { return; }
-    gGvm5Type = *reinterpret_cast<const UInt32*>(a);
-    gGvm5A58 = *reinterpret_cast<const UInt64*>(a + 0x58);
-    gGvm5T78 = *reinterpret_cast<const UInt64*>(t + 0x78);
-    gGvm5T90 = *reinterpret_cast<const UInt64*>(t + 0x90);
-    const UInt8* const ip = *reinterpret_cast<const UInt8* const*>(a);         // IP=*(A)
-    if (!nredKernelPtrOk(ip)) { return; }
-    const UInt32 n = *reinterpret_cast<const UInt32*>(ip + 232);
-    const UInt8* const arr = *reinterpret_cast<const UInt8* const*>(ip + 8);
-    if (n == 0 || n > 4096 || !nredKernelPtrOk(arr)) { return; }   // 保持 reg=2
-    for (UInt32 i = 0; i < n; ++i) {
-        if (*reinterpret_cast<const UInt32*>(arr + i * 8) == gGvm5Type) { gGvm5Reg = 1; return; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x08);          // A
+    if (!nredKernelPtrOk(q)) { return; }
+    gGvm5Type = *reinterpret_cast<const UInt32*>(q);
+    gGvm5A0 = *reinterpret_cast<const UInt64*>(q);
+    gGvm5A58 = *reinterpret_cast<const UInt64*>(q + 0x58);
+    q = reinterpret_cast<const UInt8*>(gGvm5A0);                   // IP=*(A)
+    if (q == nullptr) { gGvm5Reg = 0; return; }
+    if (!nredKernelPtrOk(q)) { return; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x58);          // iproot=*(IP+0x58)
+    if (q == nullptr) { gGvm5Reg = 0; return; }
+    if (!nredKernelPtrOk(q)) { return; }
+    gGvm5Iproot = reinterpret_cast<UInt64>(q);
+    q = *reinterpret_cast<const UInt8* const*>(q + 232);           // head
+    if (!nredKernelPtrOk(q)) { return; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 64);            // blk
+    if (!nredKernelPtrOk(q)) { return; }
+    q = *reinterpret_cast<const UInt8* const*>(q + 8);             // arr
+    if (!nredKernelPtrOk(q)) { return; }
+    for (UInt32 i = 0; i < 82; ++i) {
+        const UInt32 key = *reinterpret_cast<const UInt32*>(q + i * 16);
+        if (key == 0) { gGvm5Reg = 0; return; }
+        if (key == gGvm5Type) { gGvm5Reg = 1; return; }
     }
     gGvm5Reg = 0;
 }
