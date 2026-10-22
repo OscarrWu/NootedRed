@@ -280,6 +280,7 @@ static UInt64 gGvm5EarlyP1 = 0;          // 早期成功时的 p1 = *(ctx+0x30)
 static bool   gGvm5EarlyPowerSeen = false;  // powerUp 阶段是否已到过 b==5&&c==1
 static UInt32 gGvm5EarlyPowerIdem = 0;   // 1=p1 相同已跳过；0=p1 不同/非法未跳过
 static UInt64 gGvm5EarlyPowerP1 = 0;     // powerUp 阶段的 p1now（idem=0 时观测）
+static UInt32 gGvm5EarlyPowerPanic = 0;  // 1=late path D 失败已 panic（观测 `panic=1`）
 struct NRedGvm5DBlocks {
     UInt8 desc[0x1c8];   // local_2a8：描述块（首 u32=0x1c8；+0xf0 起 0xd8 字节为待拷贝视图）
     UInt8 clk[0x68];     // local_d0：时钟/能力位块（首 u32=0x68；+4 为位域）
@@ -1170,6 +1171,11 @@ static void nredGvm5EStamp(char* const body, size_t& off, const size_t cap)
             const int n = snprintf(body + off, room, "[gvm5e] phase=powerup rc=%d idem=1\n",
                                    static_cast<int>(gGvm5EarlyPowerRc));
             if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+        } else if (gGvm5EarlyPowerPanic != 0) {
+            // late path D 失败 ⇒ panic 前写 `panic=1`（panic 在 wrapMode9440f 内调用）
+            const int n = snprintf(body + off, room, "[gvm5e] phase=powerup idem=0 rc=%d panic=1\n",
+                                   static_cast<int>(gGvm5EarlyPowerRc));
+            if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
         } else {
             // p1 不同/非法 ⇒ 未跳过（不得伪装成成功）
             const int n = snprintf(body + off, room, "[gvm5e] phase=powerup idem=0 p1=%llx early=%llx\n",
@@ -1698,6 +1704,7 @@ int nredTraceFlush() { return nredTraceFlush(NvMsgBuf::stTick() * NvMsgBuf::kTic
 
 
 #include <kern/assert.h>
+#include <kern/debug.h>   // 276：panic()（late path D 失败主动断言）
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSBoolean.h>
 #include <mach/i386/vm_types.h>
@@ -6609,7 +6616,20 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     // ── 273：client5 stage1 叶替换（`-NRedGvm5D`，默认关）──────────────────────────────────
     //  与 `0x94831` 的尾跳等价：先 `p1 = *(a+0x30)`（在叶内），再执行我方 16 步复刻。
     //  关态 ⇒ 本行不成立，后续路径逐字不变；开态 ⇒ 不进入苹果叶（也不进入下方 fail-closed 护栏）。
-    if (gGvm5D && b == 5 && c == 1) { return nredGvm5Stage1(a, d); }
+    if (gGvm5D && b == 5 && c == 1) {
+        const UInt32 rc = nredGvm5Stage1(a, d);
+        // 276：`-NRedGvm5Early` 下未命中幂等（p1 不同/非法，或早期未成功）⇒ 这是 late path；
+        //  D 失败必须**主动 panic**（否则失败可能拖到 powerUp/WindowServer，违反"失败必早 panic"）。
+        //  `gGvm5Early` 为假 ⇒ 保持现有 `-NRedGvm5D` 行为（返 0），不得改变。
+        if (rc == 0 && gGvm5Early) {
+            gGvm5EarlyPowerSeen = true;
+            gGvm5EarlyPowerIdem = 0;
+            gGvm5EarlyPowerRc = 0;
+            gGvm5EarlyPowerPanic = 1;
+            panic("NRed: gvm5 client5 stage1 failed (late path)");
+        }
+        return rc;
+    }
     // 268：qq 只读探针必须先于句柄安装（安装会改 *(p)）。
     if (gQqProbe && !gQqProbeSeen && c == 1 && b == 5) { nredQqProbe(a); }
     if (gQqHdl && c == 1 && b == 5) { (void)nredQqHdlInstall(a); }
