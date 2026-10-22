@@ -212,6 +212,19 @@ static UInt64 gSt1G9P = 0, gSt1G9Key = 0;
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
+// 266（`-NRedTtlFacade`，默认关）：TTL 门面（root 552B 槽表 + slot1/2/3/4）。
+//  结构依据：R46 §2（root 槽表 552B；slotN 位于 root+slot*24，项 = {u32 slot, u64 obj, u64 val}；
+//  0x8bbc4(root,slot) 返回项的 val；root 初始化把 slot0 的 val 写为 root 自身）。
+//  ⚠ 除 slot0 外，各 slot 的 obj/val 语义与 slot1+600/616 等字段仍未穷举（R46/R205 标“未解出”）
+//    ⇒ 本实现只填写已被反汇编证实的部分，其余保持 0；默认关，且安装判据极严。
+static bool   gTtlFacade = false;
+static bool   gTtlFacadeInit = false;
+static UInt32 gTtlFacadeInst = 0;   // 0=未安装 1=已安装 2=判据未满足
+static UInt8  gTtlFacadeRoot[552];
+static UInt8  gTtlFacadeSlot1[800];
+static UInt8  gTtlFacadeSlot2[8];
+static UInt8  gTtlFacadeSlot3[680];
+static UInt8  gTtlFacadeSlot4[1992];
 // 261（`-NRedGvm5`，默认关）：client5 GVM provider type 与注册表状态（只读一次）。
 static bool   gGvm5 = false;
 static bool   gGvm5Seen = false;
@@ -916,6 +929,19 @@ static void nredSt1QQStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 266：`[ttlfd]` TTL 门面安装状态（noinline、零解引用、≤120 字符）。
+__attribute__((noinline))
+static void nredTtlFdStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[ttlfd] root=%llx slot1=%llx slot3=%llx slot4=%llx inst=%u\n",
+                           static_cast<unsigned long long>(reinterpret_cast<UInt64>(gTtlFacadeRoot)),
+                           static_cast<unsigned long long>(reinterpret_cast<UInt64>(gTtlFacadeSlot1)),
+                           static_cast<unsigned long long>(reinterpret_cast<UInt64>(gTtlFacadeSlot3)),
+                           static_cast<unsigned long long>(reinterpret_cast<UInt64>(gTtlFacadeSlot4)),
+                           static_cast<unsigned>(gTtlFacadeInst));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 260：`[st1gf]` 守卫首个失败步号（无失败时输出 c=65535 step=0；noinline、零解引用）。
 __attribute__((noinline))
 static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
@@ -1107,6 +1133,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
     // 265：`[st1qq]` client5 qq 四字段（仅 -NRedSt1Q）。
     if (gSt1Q && off < sizeof(body)) { nredSt1QQStamp(body, off, sizeof(body) - off); }
+    // 266：`[ttlfd]` TTL 门面状态（仅 -NRedTtlFacade）。
+    if (gTtlFacade && off < sizeof(body)) { nredTtlFdStamp(body, off, sizeof(body) - off); }
     // 260：`[st1gf]` 守卫首个失败步号（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
     // 261：`[gvm5]` client5 GVM type/注册表（仅 -NRedGvm5）。
@@ -2942,6 +2970,57 @@ bool X5000HWLibs::wrapTtlCheckD(void* const obj, void* const param)
 //      深栈链上（0xa9416→0x8af60），B19 病根＝深栈重 I/O ⇒ I/O 次数取最少；"入口行可能丢失"
 //      可接受——若原函数内 panic，panic 回溯自带本 wrapper 帧即证明"已进入"）。
 //  长度自证：两行均 ≤ 60 字符 ≤ 191（TraceRing 上限）。缓冲 static（不占栈）。
+// ─── 266：TTL 门面（F1/F3；`-NRedTtlFacade`，默认关）──────────────────────────────────
+//  只填反汇编已证实的槽位布局；除 slot0（val=root）外，obj/val 以各自静态对象指针填充
+//  （属【推断】，消费者读点未穷举）。任一未解字段保持 0，不用常量冒充真实状态。
+static void nredTtlFacadeSetSlot(const UInt32 slot, const UInt64 obj, const UInt64 val)
+{
+    UInt8* const e = gTtlFacadeRoot + slot * 24;
+    *reinterpret_cast<UInt32*>(e) = slot;
+    *reinterpret_cast<UInt64*>(e + 8) = obj;
+    *reinterpret_cast<UInt64*>(e + 16) = val;
+}
+
+__attribute__((noinline))
+static bool nredTtlFacadeBuild(void)
+{
+    if (gTtlFacadeInit) { return true; }
+    __builtin_memset(gTtlFacadeRoot, 0, sizeof(gTtlFacadeRoot));
+    __builtin_memset(gTtlFacadeSlot1, 0, sizeof(gTtlFacadeSlot1));
+    __builtin_memset(gTtlFacadeSlot3, 0, sizeof(gTtlFacadeSlot3));
+    __builtin_memset(gTtlFacadeSlot4, 0, sizeof(gTtlFacadeSlot4));
+    const UInt64 root = reinterpret_cast<UInt64>(gTtlFacadeRoot);
+    nredTtlFacadeSetSlot(0, 0, root);                                   // 0x8b969：slot0.val = root
+    nredTtlFacadeSetSlot(1, reinterpret_cast<UInt64>(gTtlFacadeSlot1),
+                         reinterpret_cast<UInt64>(gTtlFacadeSlot1));
+    nredTtlFacadeSetSlot(2, reinterpret_cast<UInt64>(gTtlFacadeSlot2),
+                         reinterpret_cast<UInt64>(gTtlFacadeSlot2));
+    nredTtlFacadeSetSlot(3, reinterpret_cast<UInt64>(gTtlFacadeSlot3),
+                         reinterpret_cast<UInt64>(gTtlFacadeSlot3));
+    nredTtlFacadeSetSlot(4, reinterpret_cast<UInt64>(gTtlFacadeSlot4),
+                         reinterpret_cast<UInt64>(gTtlFacadeSlot4));
+    *reinterpret_cast<UInt64*>(gTtlFacadeSlot2) = root;                 // slot2 是 8B 句柄，+0=root
+    gTtlFacadeInit = true;
+    return true;
+}
+
+// 安装判据（全部满足才返回 true）：
+//  ① 8 个模块的 stage0 均由我方实现真实执行且返回 0（gSwCntById>0 ∧ gSwResById==0）；
+//  ② client3 stage1 尝试过（gSt1Try bit3）且未返回 0（gSt1Ret0 bit3==0）；
+//  ③ 若 stage0 裁剪读数存在，则不得有 bad/failMask。
+static bool nredTtlFacadeReady(void)
+{
+    static const UInt8 kAll[8] = {2, 3, 5, 6, 7, 8, 9, 14};
+    for (unsigned i = 0; i < 8; ++i) {
+        const UInt8 id = kAll[i];
+        if (gSwCntById[id] == 0 || gSwResById[id] != 0) { return false; }
+    }
+    if ((gSt1Try & (1U << 3)) == 0) { return false; }
+    if ((gSt1Ret0 & (1U << 3)) != 0) { return false; }
+    if (gTrimStat[0].seen != 0 && (gTrimStat[0].bad != 0 || gTrimStat[0].failMask != 0)) { return false; }
+    return true;
+}
+
 UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
 {
     {
@@ -2952,6 +3031,16 @@ UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
                      static_cast<unsigned long long>(reinterpret_cast<UInt64>(a1)),
                      static_cast<unsigned long long>(reinterpret_cast<UInt64>(a2)));
         if (nIn > 0) { nredTraceLine(lineIn, nIn); }
+    }
+    // 266：TTL 门面模式（默认关）。判据全部满足才写 `*a2` 并返回 0（等价 0x8b09f 的语义）；
+    //  判据不满足 ⇒ 不写、回落苹果原路径（保持现有失败形态，不引入新的失败源）。
+    if (gTtlFacade) {
+        if (nredTtlFacadeBuild() && nredTtlFacadeReady() && nredKernelPtrOk(a2)) {
+            *reinterpret_cast<UInt64*>(a2) = reinterpret_cast<UInt64>(gTtlFacadeRoot);
+            gTtlFacadeInst = 1;
+            return 0;
+        }
+        gTtlFacadeInst = 2;
     }
     const UInt32 ret = FunctionCast(wrapTtlInit, singleton().orgTtlInit)(a1, a2);
     {
@@ -6386,6 +6475,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gGSlot = checkKernelArgument("-NRedGSlot");
     // 265：client5 qq 四字段探针（默认关；只读一次）。
     gSt1Q = checkKernelArgument("-NRedSt1Q");
+    // 266：TTL 门面（默认关）。仅判据全满足时把静态 root 写入 m_hTtl 槽。
+    gTtlFacade = checkKernelArgument("-NRedTtlFacade");
     // 263：client5 IP 根提供者（默认关）。
     gIpR = checkKernelArgument("-NRedIpR");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
