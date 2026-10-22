@@ -1335,8 +1335,9 @@ bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
                static_cast<unsigned long long>(load64(f338, 0xA0)));
     }
 
-    if (singleton().orgInitializeTtl == 0) { return false; }
-    const bool orgRet = FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl)(self, gartParams);
+    const auto orgTtl = FunctionCast(wrapInitializeTtl, singleton().orgInitializeTtl);
+    if (orgTtl == nullptr) { return false; }
+    const bool orgRet = orgTtl(self, gartParams);
 
     UInt64 ttl568 = 0, ttl570 = 0, ttl578 = 0, ttl580 = 0, ttl588 = 0, ttl590 = 0, ttl598 = 0, ttl5a0 = 0;
     // 0x8b10e 的第一步 0x90d75 检查 `&TTL+0x50` 处的一个子结构（离线：`f0 >= 0x130`、
