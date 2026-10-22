@@ -202,7 +202,19 @@ static UInt64 gSt1B3P3  = 0;  // 258：client 3 分支读到的 P3（供 `[st1b3
 static UInt64 gSt1G2P = 0, gSt1G2Key = 0;
 static UInt64 gSt1G5P = 0, gSt1G5Ip = 0, gSt1G5Ipr = 0;
 static UInt64 gSt1G5P20 = 0, gSt1G5P21 = 0, gSt1G5P22 = 0, gSt1G5P23 = 0;   // 步20-23 四级指针
-// 265（`-NRedSt1Q`，默认关）：client5 的 qq 对象四字段（只读一次；用于分流 C1/C2）。
+// （265 的开关/ 观测变量见下方 gSt1Q 组）
+// 268（`-NRedQqProbe` / `-NRedQqHdl`，默认关）：client5 的 qq 句柄层（B1）。
+//  qq 实测是 0x8b969 构造的 0x228 表（q10==qq），而 0x8b4bf 期望 8B 句柄（*h=表）
+//  ⇒ 句柄层缺失导致步22。探针只读；安装只在 7 条判据全满足时改 *(p) 一处。
+static bool   gQqProbe = false;
+static bool   gQqProbeSeen = false;
+static bool   gQqHdl = false;
+static bool   gSt1G5Step24 = false;   // 步24 守卫已接入（安装判据 [9]）
+static UInt8  gQqHdlStore[8];         // 8B 句柄（static：无分配器可用，生命周期＝kext）
+static UInt64 gQqHdlOld = 0;
+static UInt32 gQqHdlRet = 0xFF;
+static UInt64 gQqP = 0, gQqQ = 0, gQqQ8 = 0, gQqS1 = 0;
+static UInt64 gQqV70 = 0, gQqV258 = 0, gQqV268 = 0, gQqV2B8 = 0;
 static bool   gSt1Q = false;
 static bool   gSt1QQSeen = false;
 static UInt64 gSt1QQ0 = 0, gSt1QQ8 = 0, gSt1QQ10 = 0, gSt1QQ18 = 0;
@@ -942,6 +954,40 @@ static void nredTtlFdStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 268：`[qqv]`/`[qqv2]`（探针）与 `[qqh]`/`[qqh2]`（句柄安装）——noinline、零解引用。
+//  行长约束：任务卡格式 8 字段约 190 字符 >128 ⇒ 拆两行（字段与含义不变）。
+__attribute__((noinline))
+static void nredQqStamp(char* const body, size_t& off, size_t cap, const bool probe, const bool hdl)
+{
+    size_t room = cap;
+    int n = 0;
+    if (probe) {
+        n = snprintf(body + off, room, "[qqv] p=%llx qq=%llx q8=%llx s1=%llx\n",
+                     static_cast<unsigned long long>(gQqP), static_cast<unsigned long long>(gQqQ),
+                     static_cast<unsigned long long>(gQqQ8), static_cast<unsigned long long>(gQqS1));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+        n = snprintf(body + off, room, "[qqv2] v70=%llx v258=%llx v268=%llx v2b8=%llx\n",
+                     static_cast<unsigned long long>(gQqV70), static_cast<unsigned long long>(gQqV258),
+                     static_cast<unsigned long long>(gQqV268), static_cast<unsigned long long>(gQqV2B8));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
+    if (hdl) {
+        n = snprintf(body + off, room, "[qqh] ret=%u p=%llx qq=%llx h=%llx old=%llx\n",
+                     static_cast<unsigned>(gQqHdlRet), static_cast<unsigned long long>(gQqP),
+                     static_cast<unsigned long long>(gQqQ),
+                     static_cast<unsigned long long>(reinterpret_cast<UInt64>(gQqHdlStore)),
+                     static_cast<unsigned long long>(gQqHdlOld));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+        n = snprintf(body + off, room, "[qqh2] v70=%llx v258=%llx v268=%llx v2b8=%llx\n",
+                     static_cast<unsigned long long>(gQqV70), static_cast<unsigned long long>(gQqV258),
+                     static_cast<unsigned long long>(gQqV268), static_cast<unsigned long long>(gQqV2B8));
+        if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+    }
+}
+
 // 260：`[st1gf]` 守卫首个失败步号（无失败时输出 c=65535 step=0；noinline、零解引用）。
 __attribute__((noinline))
 static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
@@ -1135,6 +1181,10 @@ int nredTraceFlush(int secTag)
     if (gSt1Q && off < sizeof(body)) { nredSt1QQStamp(body, off, sizeof(body) - off); }
     // 266：`[ttlfd]` TTL 门面状态（仅 -NRedTtlFacade）。
     if (gTtlFacade && off < sizeof(body)) { nredTtlFdStamp(body, off, sizeof(body) - off); }
+    // 268：qq 探针/句柄安装读数（仅对应开关开）。
+    if ((gQqProbe || gQqHdl) && off < sizeof(body)) {
+        nredQqStamp(body, off, sizeof(body) - off, gQqProbe, gQqHdl);
+    }
     // 260：`[st1gf]` 守卫首个失败步号（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
     // 261：`[gvm5]` client5 GVM type/注册表（仅 -NRedGvm5）。
@@ -5576,6 +5626,25 @@ static bool nredStage1Guard5(const void* const ctx)
         if (!nredKernelPtrOk(s)) { nredStage1GfMark(5, 23); return false; }
         gSt1G5P23 = reinterpret_cast<UInt64>(s);
     }
+    // 24（仅 -NRedQqHdl）：步23 的 slot1 三值＋服务函数（叶内 0x98ac6/叶主体调用点）。
+    //   0x98a42：*(slot1+0x268)==0 ⇒ 苹果失败返回（合法）；非 0 ⇒ 0x98ac6 callq 它 ⇒ 必须 KPtr。
+    //   *(slot1+0x70) 为断言函数：非 0 且 KPtr；*(slot1+0x2b8) 同理（0 允许）。
+    if (gQqHdl) {
+        const UInt8* const s1 = reinterpret_cast<const UInt8*>(gSt1G5P23);
+        if (!nredKernelPtrOk(s1)) { nredStage1GfMark(5, 24); return false; }
+        const UInt64 f70 = *reinterpret_cast<const UInt64*>(s1 + 0x70);
+        const UInt64 f268 = *reinterpret_cast<const UInt64*>(s1 + 0x268);
+        const UInt64 f2b8 = *reinterpret_cast<const UInt64*>(s1 + 0x2b8);
+        if (f70 == 0 || !nredKernelPtrOk(reinterpret_cast<const UInt8*>(f70))) {
+            nredStage1GfMark(5, 24); return false;
+        }
+        if (f268 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(f268))) {
+            nredStage1GfMark(5, 24); return false;
+        }
+        if (f2b8 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(f2b8))) {
+            nredStage1GfMark(5, 24); return false;
+        }
+    }
     return true;
 }
 
@@ -5956,8 +6025,74 @@ static void nredSt1QQProbe(const void* const ctx)
     gSt1QQF = 0;
 }
 
+// ─── 268：client5 的 qq 句柄层（`-NRedQqProbe` 只读；`-NRedQqHdl` 安装；均默认关）──────────
+//  只读探针：ctx→p=*(ctx)→qq=*(p)→q8=*(qq+8)→slot1=*(qq+0x28)→四值。零写入。
+__attribute__((noinline))
+static void nredQqProbe(const void* const ctx)
+{
+    gQqProbeSeen = true;
+    gQqP = 0; gQqQ = 0; gQqQ8 = 0; gQqS1 = 0;
+    gQqV70 = 0; gQqV258 = 0; gQqV268 = 0; gQqV2B8 = 0;
+    if (!nredKernelPtrOk(ctx)) { return; }
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx));
+    if (!nredKernelPtrOk(q)) { return; }
+    gQqP = reinterpret_cast<UInt64>(q);
+    q = *reinterpret_cast<const UInt8* const*>(q);
+    if (!nredKernelPtrOk(q)) { return; }
+    gQqQ = reinterpret_cast<UInt64>(q);
+    gQqQ8 = *reinterpret_cast<const UInt64*>(q + 8);
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);
+    if (!nredKernelPtrOk(q)) { return; }
+    gQqS1 = reinterpret_cast<UInt64>(q);
+    gQqV70 = *reinterpret_cast<const UInt64*>(q + 0x70);
+    gQqV258 = *reinterpret_cast<const UInt64*>(q + 0x258);
+    gQqV268 = *reinterpret_cast<const UInt64*>(q + 0x268);
+    gQqV2B8 = *reinterpret_cast<const UInt64*>(q + 0x2b8);
+}
+
+//  安装（决策 C）：7 条 fail-closed 全满足才建 8B 句柄（*h=qq）并改写 *(p) 一处。
+//  ⚠ 规格写的 `nredKernelMalloc` 在本仓库不存在 ⇒ 用 static 8B 对象（生命周期＝kext）。
+__attribute__((noinline))
+static bool nredQqHdlInstall(const void* const ctx)
+{
+    gQqHdlRet = 0xFF;
+    if (!nredKernelPtrOk(ctx)) { gQqHdlRet = 1; return false; }
+    const UInt8* const p = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx));
+    if (!nredKernelPtrOk(p)) { gQqHdlRet = 2; return false; }
+    const UInt8* qq = *reinterpret_cast<const UInt8* const*>(p);
+    if (!nredKernelPtrOk(qq)) { gQqHdlRet = 3; return false; }
+    gQqP = reinterpret_cast<UInt64>(p);
+    gQqQ = reinterpret_cast<UInt64>(qq);
+    if (*reinterpret_cast<const UInt64*>(qq + 0x10) != reinterpret_cast<UInt64>(qq)) {
+        gQqHdlRet = 4; return false;                                  // 非 C1 表
+    }
+    if (*reinterpret_cast<const UInt64*>(qq) != 0) { gQqHdlRet = 5; return false; }   // 已补过
+    const UInt8* const slot1 = *reinterpret_cast<const UInt8* const*>(qq + 0x28);
+    if (!nredKernelPtrOk(slot1)) { gQqHdlRet = 6; return false; }
+    gQqS1 = reinterpret_cast<UInt64>(slot1);
+    gQqQ8 = *reinterpret_cast<const UInt64*>(qq + 8);
+    gQqV70 = *reinterpret_cast<const UInt64*>(slot1 + 0x70);
+    gQqV258 = *reinterpret_cast<const UInt64*>(slot1 + 0x258);
+    gQqV268 = *reinterpret_cast<const UInt64*>(slot1 + 0x268);
+    gQqV2B8 = *reinterpret_cast<const UInt64*>(slot1 + 0x2b8);
+    if (!nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV70))) { gQqHdlRet = 7; return false; }
+    if (gQqV258 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV258))) { gQqHdlRet = 8; return false; }
+    if (gQqV268 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV268))) { gQqHdlRet = 8; return false; }
+    if (gQqV2B8 != 0 && !nredKernelPtrOk(reinterpret_cast<const UInt8*>(gQqV2B8))) { gQqHdlRet = 8; return false; }
+    if (!gSt1G5Step24) { gQqHdlRet = 9; return false; }
+    UInt8* const h = gQqHdlStore;
+    gQqHdlOld = *reinterpret_cast<const UInt64*>(p);
+    *reinterpret_cast<UInt64*>(h) = reinterpret_cast<UInt64>(qq);
+    *reinterpret_cast<UInt8**>(const_cast<UInt8*>(p)) = h;           // 唯一写入点：*(p)
+    gQqHdlRet = 0;
+    return true;
+}
+
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 268：qq 只读探针必须先于句柄安装（安装会改 *(p)）。
+    if (gQqProbe && !gQqProbeSeen && c == 1 && b == 5) { nredQqProbe(a); }
+    if (gQqHdl && c == 1 && b == 5) { (void)nredQqHdlInstall(a); }
     // 265：client5 的 qq 四字段探针（默认关；只读一次）。
     if (gSt1Q && !gSt1QQSeen && c == 1 && b == 5) { nredSt1QQProbe(a); }
     // 263：client5 的 IP 根提供者（默认关）。必须在守卫之前安装。
@@ -6482,6 +6617,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1Q = checkKernelArgument("-NRedSt1Q");
     // 266：TTL 门面（默认关）。仅判据全满足时把静态 root 写入 m_hTtl 槽。
     gTtlFacade = checkKernelArgument("-NRedTtlFacade");
+    // 268：client5 qq 句柄层（探针/安装均默认关；步24 守卫随安装开关接入）。
+    gQqProbe = checkKernelArgument("-NRedQqProbe");
+    gQqHdl = checkKernelArgument("-NRedQqHdl");
+    gSt1G5Step24 = gQqHdl;
     // 263：client5 IP 根提供者（默认关）。
     gIpR = checkKernelArgument("-NRedIpR");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
