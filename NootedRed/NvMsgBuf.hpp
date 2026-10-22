@@ -58,6 +58,7 @@
 #include <Headers/kern_util.hpp>   // SYSLOG（内部走 IOLog ⇒ 同时进内核 console 与 Lilu 日志）
 #include <Headers/kern_file.hpp>   // FileIO::writeBufferToFile（内核态写文件）
 #include <Headers/kern_nvram.hpp>  // NVStorage：证据探针的 NVRAM 独立键（见 ObsProbe）
+#include <libkern/OSAtomic.h>      // OSCompareAndSwap：探针的非阻塞互斥（见 ObsProbe::sBusy）
 
 // 内核消息环形缓冲（XNU bsd/kern/subr_log.c）。弱引用：未解析则为空，运行期判空。
 extern "C" {
@@ -278,9 +279,10 @@ namespace NvMsgBuf {
 	//
 	//  纪律（与需求文档 §3/§6 一致）：
 	//    · 关态第一行即 return ⇒ 零 NVRAM 写、零行为变化；
-	//    · 不写文件、不 SYSLOG、不加锁、不等待；写失败静默（不重试循环，留给下一调用点）；
-	//    · 缓冲在 BSS（`sBuf`）⇒ `markOnce` 局部帧 ≈ 0 B；
-	//    · 三处调用点（`NRed::init` 一次、`dumpTick` 首拍、`writeWithFingerprint` 失败）不并发；
+	//    · 不写文件、不 SYSLOG、不等待；写失败静默（不重试循环，留给下一调用点）；
+	//    · 缓冲在静态区（`sBuf`）⇒ `markOnce` 局部帧仅寄存器保存（实测 40 B，无局部数组）；
+	//    · P3（`dumpTick` 线程）与 P4（`dumpNow` 的调用线程）**可能**并发 ⇒ 用非阻塞原子
+	//      test-and-set（`sBusy`，与 `stFlushBusy` 同款）保护 `sBuf`/NVStorage；抢占失败即返回。
 	//    · 键与 `NRedStage` **分开**（避免 256 B 上限被阶段标记占满）。
 	//  ⚠️ 已知实测风险：`StageMark.hpp` 头部记录第 2 批次真机 `NVStorage::init` 成功但
 	//    `write` 失败（早期启动阶段 `IODTNVRAM::setProperty` 不生效）。若本轮仍如此，
@@ -300,6 +302,10 @@ namespace NvMsgBuf {
 		inline UInt32 &sWfErr()    { static UInt32 v = 0; return v; }                // P4：首次失败 err
 		inline bool   *sDone()     { static bool v[4] = {false, false, false, false}; return v; }
 		inline char   *sBuf()      { static char v[kBufSize]; return v; }
+		// 非阻塞互斥（与 `stFlushBusy` 同款原子 test-and-set）：P3 跑在 `dumpTick` 的 thread_call
+		//  线程、P4 可能跑在 `dumpNow()` 的调用线程（Apple 驱动上下文）⇒ 二者**可能**并发；
+		//  `sBuf`/NVStorage 不是并发安全的。抢占失败即返回（不等待），留给下一调用点重试。
+		inline UInt32 &sBusy()     { static UInt32 v = 0; return v; }
 		// 探针自己的 boot 指纹：**不复用** `stUptimeTicks()`（那个值被 L2 文件首行使用，
 		//  若探针在 init 阶段先取，会把 L2 的指纹冻结到更早时刻 ⇒ 改变 L2 行为）。
 		inline UInt64 &sBoot()     { static UInt64 v = 0; return v; }
@@ -339,25 +345,26 @@ namespace NvMsgBuf {
 		// idx: 0=obs:s 1=obs:k/a 2=obs:t0 3=obs:wf。只成功写一次；失败留待下一调用点重试。
 		inline void markOnce(int idx) {
 			if (!sOn() || idx < 0 || idx > 3 || sDone()[idx]) return;
+			if (!OSCompareAndSwap(0, 1, &sBusy())) return;   // 已被另一线程占用 ⇒ 不等待
+
 			auto nv = storage();
-			if (nv == nullptr) return;
-
-			char *buf = sBuf();
-			int n = 0;
-			if (sEntered()) n = append(buf, n, "obs:s|");
-			if (sSched() == 1) n = append(buf, n, "obs:k|");
-			else if (sSched() == 2) n = append(buf, n, "obs:a|");
-			if (sTickSeen()) n = appendHex(buf, n, "obs:t0=0x", sTick0(), "|");
-			if (sWfSeen()) n = appendHex(buf, n, "obs:wf=0x", sWfErr(), "|");
-			n = appendHex(buf, n, "boot=0x", bootTicks(), "");
-			if (n <= 0) return;
-
-			if (!nv->write(NVRAM_PREFIX(LILU_VENDOR_GUID, "NRedObs"),
-			               reinterpret_cast<const uint8_t *>(buf), static_cast<uint32_t>(n),
-			               NVStorage::OptRaw))
-				return;
-			nv->sync();
-			sDone()[idx] = true;
+			if (nv != nullptr) {
+				char *buf = sBuf();
+				int n = 0;
+				if (sEntered()) n = append(buf, n, "obs:s|");
+				if (sSched() == 1) n = append(buf, n, "obs:k|");
+				else if (sSched() == 2) n = append(buf, n, "obs:a|");
+				if (sTickSeen()) n = appendHex(buf, n, "obs:t0=0x", sTick0(), "|");
+				if (sWfSeen()) n = appendHex(buf, n, "obs:wf=0x", sWfErr(), "|");
+				n = appendHex(buf, n, "boot=0x", bootTicks(), "");
+				if (n > 0 && nv->write(NVRAM_PREFIX(LILU_VENDOR_GUID, "NRedObs"),
+				                       reinterpret_cast<const uint8_t *>(buf),
+				                       static_cast<uint32_t>(n), NVStorage::OptRaw)) {
+					nv->sync();
+					sDone()[idx] = true;
+				}
+			}
+			sBusy() = 0;
 		}
 	}
 
