@@ -5430,12 +5430,18 @@ static bool nredStage1Guard5(const void* const ctx)
         const UInt8* const c38 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x38);
         if (!nredKernelPtrOk(c38)) { nredStage1GfMark(5, 19); return false; }
     }
-    // 20：叶内 0x98a08 读 `0x8b4bf(*(*(ctx)))+0x258`；只复刻其前置两级指针（不调 0x8b4bf）
+    // 20：叶内 0x98a08 读 `0x8b4bf(*(*(ctx)))+0x258`（不判返回值）。复刻 0x8b4bf 的**全部**前置：
+    //   p=*(ctx) KPtr → qq=*(p) KPtr → r=*(qq) KPtr → s=*(r+0x28) KPtr（helper 返回 s；
+    //   叶随后读 s+0x258，s 为 0 即 trap）。不调用 0x8b4bf。
     {
         const UInt8* const p = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx));
         if (!nredKernelPtrOk(p)) { nredStage1GfMark(5, 20); return false; }
         const UInt8* const qq = *reinterpret_cast<const UInt8* const*>(p);
         if (!nredKernelPtrOk(qq)) { nredStage1GfMark(5, 20); return false; }
+        const UInt8* const r = *reinterpret_cast<const UInt8* const*>(qq);
+        if (!nredKernelPtrOk(r)) { nredStage1GfMark(5, 20); return false; }
+        const UInt8* const s = *reinterpret_cast<const UInt8* const*>(r + 0x28);
+        if (!nredKernelPtrOk(s)) { nredStage1GfMark(5, 20); return false; }
     }
     return true;
 }
