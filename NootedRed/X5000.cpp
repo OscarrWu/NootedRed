@@ -1244,6 +1244,12 @@ static IOReturn ttlStubCallback(void* ctx, void* in, void** out)
 
 bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
 {
+    // 276：相位只读标记（复用 `-NRedGvm5Phase`；只写 BSS，不改返回值、不写文件）。
+    {
+        extern int nredGvm5PhaseEnabled(void);
+        extern void nredGvm5PhMark(int phase);
+        if (nredGvm5PhaseEnabled()) { nredGvm5PhMark(1); }
+    }
     // B62：纳入门控 `-NRedAccelLog`（基线轮须让该链上我方打印/刷盘整体静默）；
     //  不改读值/控制流/返回值；落盘调用已按规矩 28 移除（本处只写内存环）。
     if (checkKernelArgument("-NRedAccelLog")) {

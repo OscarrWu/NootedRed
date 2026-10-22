@@ -264,6 +264,10 @@ static UInt64 gGvm5PhaseA = 0;           // 入参 a
 static UInt64 gGvm5PhaseP1 = 0;          // *(a+0x30)（KPtr 后）
 static UInt64 gGvm5PhaseRa = 0;          // 返回地址归零（ra - gHwlibsSlide）
 static UInt32 gGvm5PhaseRc = 0xFF;       // 探针不执行 D ⇒ 恒 0xFF（未执行）
+// 276（复用 `-NRedGvm5Phase`）：相位只读标记——把 `[gvm5p]` 的调用归属到 start / powerUp。
+//  start  = `X5000::wrapInitializeTtl` 入口；powerup = `X6000FB::wrapControllerPowerUp` 入口。
+static UInt32 gGvm5PhStart = 0;          // 1=start 相位到过
+static UInt32 gGvm5PhPower = 0;          // 1=powerup 相位到过
 // 275（`-NRedGvm5Early`，默认关；依赖 `-NRedGvm5D`）：M4′ 早期注入（start/kernel_task 执行 D）。
 //  幂等：只有**早期真实成功**才置 `gGvm5EarlyOk=1`，powerUp 阶段据此返回缓存的真实 rc。
 static bool   gGvm5Early = false;
@@ -1125,6 +1129,24 @@ static void nredGvm5PStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 276：`[gvm5ph]` 相位只读标记（noinline、零解引用、≤128 字符）。
+//  把 `[gvm5p]` 的调用归属到 start（wrapInitializeTtl）或 powerUp（wrapControllerPowerUp）。
+__attribute__((noinline))
+static void nredGvm5PhStamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    if (gGvm5PhStart != 0) {
+        const int n = snprintf(body + off, room, "[gvm5ph] phase=start\n");
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
+    if (room == 0) { return; }
+    if (gGvm5PhPower != 0) {
+        const int n = snprintf(body + off, room, "[gvm5ph] phase=powerup\n");
+        if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+    }
+}
+
 // 275：`[gvm5e]` M4′ 早期注入两阶段读数（noinline、零解引用、≤128 字符）。
 //  phase=start：早期（kernel_task）执行 D 的 rc；phase=powerup：powerUp 阶段是否幂等跳过。
 __attribute__((noinline))
@@ -1348,6 +1370,8 @@ int nredTraceFlush(int secTag)
     if (gGvm5D && off < sizeof(body)) { nredGvm5DStamp(body, off, sizeof(body) - off); }
     // 274：`[gvm5p]` client5 stage1 入口只读探针（仅 -NRedGvm5Phase）。
     if (gGvm5Phase && off < sizeof(body)) { nredGvm5PStamp(body, off, sizeof(body) - off); }
+    // 276：`[gvm5ph]` 相位只读标记（仅 -NRedGvm5Phase）。
+    if (gGvm5Phase && off < sizeof(body)) { nredGvm5PhStamp(body, off, sizeof(body) - off); }
     // 275：`[gvm5e]` M4′ 早期注入两阶段读数（仅 -NRedGvm5Early）。
     if (gGvm5Early && off < sizeof(body)) { nredGvm5EStamp(body, off, sizeof(body) - off); }
     // 263：`[ipr]` IP 根安装结果（仅 -NRedIpR）。
@@ -6516,6 +6540,20 @@ static UInt32 nredGvm5Stage1(void* const a, void* const d)
     gGvm5DRet = ret;
     return ret;
 }
+
+// ─── 276：相位只读标记（复用 `-NRedGvm5Phase`，默认关）──────────────────────────────────────
+//  由 `X5000::wrapInitializeTtl`（phase=1）与 `X6000FB::wrapControllerPowerUp`（phase=2）入口调用。
+//  只写 BSS；不执行 D、不改返回值、不写文件、不 SYSLOG、不写寄存器。
+void nredGvm5PhMark(int phase)
+{
+    if (!gGvm5Phase) { return; }
+    if (phase == 1) { gGvm5PhStart = 1; }
+    else if (phase == 2) { gGvm5PhPower = 1; }
+}
+
+// 276：相位开关查询（供 X5000/X6000FB 的 wrapper 入口做显式守卫；gGvm5Phase 是本 TU 的 static）。
+int nredGvm5PhaseEnabled(void) { return gGvm5Phase ? 1 : 0; }
+
 // ─── 275：M4′ 早期注入入口（`-NRedGvm5Early`，默认关；依赖 `-NRedGvm5D`）────────────────────
 //  由 `X5000::wrapInitializeTtl` 在 `orgTtl` **之前**调用（kernel_task 上下文）。
 //  返回：-1=未启用/不干预（继续原路径）；0=早期真实失败（**调用方必须 panic**）；

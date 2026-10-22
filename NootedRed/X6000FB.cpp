@@ -1948,6 +1948,12 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
 UInt32 X6000FB::wrapControllerPowerUp(void* const self)
 {
     StageMark::mark("powerUp-enter");
+    // 276：相位只读标记（复用 `-NRedGvm5Phase`；只写 BSS，不改返回值、不写文件）。
+    {
+        extern int nredGvm5PhaseEnabled(void);
+        extern void nredGvm5PhMark(int phase);
+        if (nredGvm5PhaseEnabled()) { nredGvm5PhMark(2); }
+    }
 
     // ─── 静默落盘（L2）───────────────────────────────────────────────────────────
     //  ⚠️ **调度点已移到 `NRed::init`（最早的安全位置，kext 加载时）** ——
