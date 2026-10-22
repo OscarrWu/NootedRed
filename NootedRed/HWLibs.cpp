@@ -3004,20 +3004,24 @@ static bool nredTtlFacadeBuild(void)
     return true;
 }
 
-// 安装判据（全部满足才返回 true）：
-//  ① 8 个模块的 stage0 均由我方实现真实执行且返回 0（gSwCntById>0 ∧ gSwResById==0）；
-//  ② client3 stage1 尝试过（gSt1Try bit3）且未返回 0（gSt1Ret0 bit3==0）；
-//  ③ 若 stage0 裁剪读数存在，则不得有 bad/failMask。
+// 安装判据（全部满足才返回 true；267 修正：苹果原生模块不再被误判）：
+//  ① stage0 主判据（真实返回值合成）：gTrimStat[0].seen ∧ r12==1 ∧ bad==0 ∧ failMask==0；
+//  ② 我方替换模块补充判据：对 {2,5,6,7,8,9,14}，仅当 gSwCntById>0 时才要求 gSwResById==0；
+//     gSwCntById==0（未经过我方分派，如苹果原生 client3）不参与判定；
+//  ③ client3 stage1：gSt1Try bit3 置位 且 gSt1Ret0 bit3 未置位。
 static bool nredTtlFacadeReady(void)
 {
-    static const UInt8 kAll[8] = {2, 3, 5, 6, 7, 8, 9, 14};
-    for (unsigned i = 0; i < 8; ++i) {
-        const UInt8 id = kAll[i];
-        if (gSwCntById[id] == 0 || gSwResById[id] != 0) { return false; }
+    if (gTrimStat[0].seen == 0) { return false; }
+    if (gTrimStat[0].r12 != 1) { return false; }
+    if (gTrimStat[0].bad != 0) { return false; }
+    if (gTrimStat[0].failMask != 0) { return false; }
+    static const UInt8 kIds[7] = {2, 5, 6, 7, 8, 9, 14};
+    for (unsigned i = 0; i < 7; ++i) {
+        const UInt8 id = kIds[i];
+        if (gSwCntById[id] != 0 && gSwResById[id] != 0) { return false; }
     }
     if ((gSt1Try & (1U << 3)) == 0) { return false; }
     if ((gSt1Ret0 & (1U << 3)) != 0) { return false; }
-    if (gTrimStat[0].seen != 0 && (gTrimStat[0].bad != 0 || gTrimStat[0].failMask != 0)) { return false; }
     return true;
 }
 
