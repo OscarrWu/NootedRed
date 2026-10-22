@@ -223,7 +223,7 @@ static UInt64       gGSlotH = 0, gGSlotT = 0, gGSlotA = 0;
 struct NRedIpEntry { UInt32 key; UInt32 pad; UInt64 provider; };
 static bool          gIpR = false;
 static bool          gIpRInit = false;
-static NRedIpEntry   gIpArr[4];
+static NRedIpEntry   gIpArr[5];   // 4 个有效键 + 1 个 key==0 哨兵（苹果扫描以 key==0 停止）
 static UInt8         gIpBlk[16];
 static UInt8         gIpHead[0x48];
 static UInt8         gIpRoot[0x240];
@@ -5730,6 +5730,9 @@ static bool nredIpRInit(void)
         gIpArr[i].pad = 0;
         gIpArr[i].provider = prov;
     }
+    gIpArr[4].key = 0;          // 哨兵：苹果扫描遇到 key==0 停止
+    gIpArr[4].pad = 0;
+    gIpArr[4].provider = 0;
     *reinterpret_cast<UInt64*>(gIpProvider + 0x38) = gHwlibsSlide + 0x91F32;
     *reinterpret_cast<UInt64*>(gIpProvider + 0x40) = gHwlibsSlide + 0x91EE8;
     *reinterpret_cast<UInt64*>(gIpProvider + 0x78) = gHwlibsSlide + 0x12280;
