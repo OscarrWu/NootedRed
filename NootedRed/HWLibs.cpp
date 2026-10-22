@@ -219,6 +219,17 @@ static bool         gGSlot = false;
 static bool         gGSlotSeen = false;
 static NRedGSlotRec gGSlotRec[6];
 static UInt64       gGSlotH = 0, gGSlotT = 0, gGSlotA = 0;
+// 263（`-NRedIpR`，默认关）：client5 的静态 IP 根/表/项（全部 BSS；不写 MMIO、不调苹果函数）。
+struct NRedIpEntry { UInt32 key; UInt32 pad; UInt64 provider; };
+static bool          gIpR = false;
+static bool          gIpRInit = false;
+static NRedIpEntry   gIpArr[4];
+static UInt8         gIpBlk[16];
+static UInt8         gIpHead[0x48];
+static UInt8         gIpRoot[0x240];
+static UInt8         gIpProvider[0x128];
+static UInt64        gIpRIp = 0;
+static UInt32        gIpRRet = 0xFF;   // 0=成功；1..6=失败跳；7=slide 为 0；8=区间重叠；0xFF=未执行
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -920,6 +931,17 @@ static void nredGSlotStamp(char* const body, size_t& off, const size_t cap)
     }
 }
 
+// 263：`[ipr]` IP 根安装结果（noinline、零解引用、≤96 字符）。
+__attribute__((noinline))
+static void nredIpRStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[ipr] ip=%llx root=%llx ret=%u\n",
+                           static_cast<unsigned long long>(gIpRIp),
+                           static_cast<unsigned long long>(reinterpret_cast<UInt64>(gIpRoot)),
+                           static_cast<unsigned>(gIpRRet));
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 253：`[mes]` MES stage0 真实路径观测行（noinline、零解引用）。
 __attribute__((noinline))
 static void nredMesStamp(char* const body, size_t& off, const size_t cap)
@@ -1058,6 +1080,8 @@ int nredTraceFlush(int secTag)
     if (gGvm5 && off < sizeof(body)) { nredGvm5Stamp(body, off, sizeof(body) - off); }
     // 262：`[gslot]` client5 6 槽（仅 -NRedGSlot）。
     if (gGSlot && off < sizeof(body)) { nredGSlotStamp(body, off, sizeof(body) - off); }
+    // 263：`[ipr]` IP 根安装结果（仅 -NRedIpR）。
+    if (gIpR && off < sizeof(body)) { nredIpRStamp(body, off, sizeof(body) - off); }
     // 246：`[st1w]` client 7 指针值行（仅 -NRedSt1W；关态一字不变）。
     if (gSt1W && off < sizeof(body)) { nredSt1WStamp(body, off, sizeof(body) - off); }
     // 248：槽值行独立开关（-NRedSt1W2）；W 开而 W2 关 ⇒ 不 deref svc、不输出这两行。
@@ -5689,8 +5713,65 @@ static void nredGSlotProbe(const void* const ctx)
 }
 
 
+// ─── 263：client5 的 IP 根静态提供者（`-NRedIpR`，默认关）─────────────────────────────
+//  契约：IP=*(A)；IPR=*(IP+0x58)；head=*(IPR+232)；C=*(head+64)；arr=*(C+8)；
+//  项 16B {u32 key, u32 pad, u64 provider}，key==0 停止。本实现把 IP+0x58 指向
+//  静态 gIpRoot，其 +0x232 → gIpHead → +0x40 → gIpBlk → +8 → gIpArr(4 项)；
+//  provider 槽只填真实函数地址（slide+0x91F32/0x91EE8/0x12280/0x124F0）。
+__attribute__((noinline))
+static bool nredIpRInit(void)
+{
+    if (gIpRInit) { return true; }
+    if (gHwlibsSlide == 0) { return false; }
+    static const UInt32 kKeys[4] = {70, 27, 34, 28};
+    const UInt64 prov = reinterpret_cast<UInt64>(gIpProvider);
+    for (unsigned i = 0; i < 4; ++i) {
+        gIpArr[i].key = kKeys[i];
+        gIpArr[i].pad = 0;
+        gIpArr[i].provider = prov;
+    }
+    *reinterpret_cast<UInt64*>(gIpProvider + 0x38) = gHwlibsSlide + 0x91F32;
+    *reinterpret_cast<UInt64*>(gIpProvider + 0x40) = gHwlibsSlide + 0x91EE8;
+    *reinterpret_cast<UInt64*>(gIpProvider + 0x78) = gHwlibsSlide + 0x12280;
+    *reinterpret_cast<UInt64*>(gIpProvider + 0x90) = gHwlibsSlide + 0x124F0;
+    *reinterpret_cast<UInt64*>(gIpBlk + 8) = reinterpret_cast<UInt64>(gIpArr);
+    *reinterpret_cast<UInt64*>(gIpHead + 0x40) = reinterpret_cast<UInt64>(gIpBlk);
+    const UInt64 head = reinterpret_cast<UInt64>(gIpHead);
+    __builtin_memcpy(gIpRoot + 0x232, &head, sizeof(head));   // packed 偏移 0x232
+    gIpRInit = true;
+    return true;
+}
+
+__attribute__((noinline))
+static void nredIpRInstall(const void* const ctx)
+{
+    gIpRIp = 0;
+    gIpRRet = 0xFF;
+    if (!nredKernelPtrOk(ctx)) { gIpRRet = 1; return; }
+    UInt8* q = *reinterpret_cast<UInt8* const*>(const_cast<UInt8*>(static_cast<const UInt8*>(ctx)) + 0x30);
+    if (!nredKernelPtrOk(q)) { gIpRRet = 2; return; }
+    q = *reinterpret_cast<UInt8* const*>(q + 0x28);                // H
+    if (!nredKernelPtrOk(q)) { gIpRRet = 3; return; }
+    q = *reinterpret_cast<UInt8* const*>(q + 0xE48);               // T
+    if (!nredKernelPtrOk(q)) { gIpRRet = 4; return; }
+    q = *reinterpret_cast<UInt8* const*>(q + 0x08);                // A
+    if (!nredKernelPtrOk(q)) { gIpRRet = 5; return; }
+    q = *reinterpret_cast<UInt8* const*>(q);                       // IP=*(A)
+    if (!nredKernelPtrOk(q)) { gIpRRet = 6; return; }
+    gIpRIp = reinterpret_cast<UInt64>(q);
+    if (!nredIpRInit()) { gIpRRet = 7; return; }
+    const UInt64 ip = gIpRIp;
+    const UInt64 root = reinterpret_cast<UInt64>(gIpRoot);
+    const UInt64 rootEnd = root + sizeof(gIpRoot);
+    if (ip + 0x60 > root && ip < rootEnd) { gIpRRet = 8; return; }   // 与静态区重叠 ⇒ 不写
+    *reinterpret_cast<UInt64*>(q + 0x58) = root;
+    gIpRRet = 0;
+}
+
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
 {
+    // 263：client5 的 IP 根提供者（默认关）。必须在守卫之前安装。
+    if (gIpR && c == 1 && b == 5) { nredIpRInstall(a); }
     // 262：client5 golden 6 槽探针（默认关；只读一次）。
     if (gGSlot && !gGSlotSeen && c == 1 && b == 5) { nredGSlotProbe(a); }
     // 261：client5 GVM type/注册表探针（默认关；只读一次）。
@@ -6207,6 +6288,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gGvm5 = checkKernelArgument("-NRedGvm5");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
+    // 263：client5 IP 根提供者（默认关）。
+    gIpR = checkKernelArgument("-NRedIpR");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
     gSt1P = nredExactBootArg("-NRedSt1P");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
