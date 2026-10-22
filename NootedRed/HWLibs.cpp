@@ -5489,9 +5489,9 @@ static bool nredStage1Guard9(const void* const ctx)
 }
 
 __attribute__((noinline))
-static bool nredStage1Guard14(const void* const ctx);   // 定义在后（暂缓，仅收集读数）
+static bool nredStage1Guard14(const void* const ctx);   // 定义在后（264：通过即放行）
 
-// ─── 259：各 client 的 guard 分派（白名单 {2,3,5,6,7,9}；8/14 暂缓 = 恒 false）──────────────
+// ─── 259/264：各 client 的 guard 分派（白名单 {2,3,5,6,7,9,14}；8 仍 fail-closed）────────────
 static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 {
     bool ok = false;
