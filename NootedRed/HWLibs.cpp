@@ -297,6 +297,8 @@ struct NredP7Window {
     ~NredP7Window() { if (active) { gP7Armed = false; } }
 };
 static UInt64 gP7Seen = 0;
+// 271：`wrapIpEntrySeq` 的 FunctionCast 结果为 0（org 未解出/被清）时置位，头部区打一行。
+static UInt32 gIpSeqCast0 = 0;
 static bool       gSt1B = false;
 static NRedSt1BRec gSt1BRec[8];
 static UInt32     gSt1BN = 0;     // 已记录条数（≤8）
@@ -1022,6 +1024,14 @@ static void nredP7hStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
+// 271：`[ipseq] cast=0` —— FunctionCast 结果为 0 时置位（头部区、零解引用、≤128）。
+__attribute__((noinline))
+static void nredIpSeqCastStamp(char* const body, size_t& off, const size_t cap)
+{
+    const int n = snprintf(body + off, cap, "[ipseq] cast=0\n");
+    if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
+}
+
 // 260：`[st1gf]` 守卫首个失败步号（无失败时输出 c=65535 step=0；noinline、零解引用）。
 __attribute__((noinline))
 static void nredSt1GfStamp(char* const body, size_t& off, const size_t cap)
@@ -1221,6 +1231,10 @@ int nredTraceFlush(int secTag)
     }
     // 270：`[p7h]` P7 保活状态（仅 -NRedP7Hold）。
     if (gP7Hold && off < sizeof(body)) { nredP7hStamp(body, off, sizeof(body) - off); }
+    // 271：`[ipseq] cast=0`（仅当真的发生过 cast==0）。
+    if (gIpSeqCast0 != 0 && off < sizeof(body)) {
+        nredIpSeqCastStamp(body, off, sizeof(body) - off);
+    }
     // 260：`[st1gf]` 守卫首个失败步号（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GfStamp(body, off, sizeof(body) - off); }
     // 261：`[gvm5]` client5 GVM type/注册表（仅 -NRedGvm5）。
@@ -2842,8 +2856,14 @@ UInt32 X5000HWLibs::wrapIpEntrySeq(void* const a, const UInt32 b, const UInt32 c
         else if (b == 2) { handled = trimRunStage2(a, b, static_cast<UInt64>(c), ret); }
     }
     if (!handled) {
-        ret = (singleton().orgIpEntrySeq != 0)
-                  ? FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq)(a, b, c) : 0;
+        // 271：先取 cast 结果并判空——org 为 0 时绝不 `callq *%rax`（r270 RIP=0 trap）。
+        const auto org = FunctionCast(wrapIpEntrySeq, singleton().orgIpEntrySeq);
+        if (org != nullptr) {
+            ret = org(a, b, c);
+        } else {
+            ret = 0;                 // 苹果极性：0＝失败（fail-closed）
+            gIpSeqCast0 = 1;
+        }
     }
     // P7f 包E″：**无条件记录前 3 次**（R6 证明"按假设过滤"全部落空 ⇒ 先看真实形态再谈过滤）。
     //  RA＝`__builtin_return_address(0)` − kcSlide ⇒ 归零 VM；kcSlide==0 时记原始 RA（供判读）。
@@ -3139,7 +3159,10 @@ UInt32 X5000HWLibs::wrapTtlInit(void* const a1, void* const a2)
         if (nIn > 0) { nredTraceLine(lineIn, nIn); }
     }
     // 先把参数逐字透传给原件（stage0/stage1 在原件内部运行）。
-    const UInt32 ret = FunctionCast(wrapTtlInit, singleton().orgTtlInit)(a1, a2);
+    // 271：cast 结果判空（org 为 0 时绝不间接调用；ttl_initialize 的 0＝成功 ⇒ fail-closed 返非 0）。
+    const auto orgTtlInit = FunctionCast(wrapTtlInit, singleton().orgTtlInit);
+    if (orgTtlInit == nullptr) { return 0xE00002BCU; }
+    const UInt32 ret = orgTtlInit(a1, a2);
     // 267：门面评估必须在原件返回之后（入口时 gTrimStat[0] 尚未产生 ⇒ 必然 inst=2）。
     //  判据全满足 ⇒ 用门面覆盖 `*a2` 并返回 0（覆盖原件失败）；否则原样返回 ret。
     if (gTtlFacade) {
@@ -7146,8 +7169,11 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         // 251（`-NRedGc7`）：client 7 双侧观测。模式已在离线核对为 __text 唯一；
         //  `resolveProbe` 先按**预期偏移**逐字节校验（等同 hook-check 的“期望偏移＝函数头”），
         //  回退扫描也要求命中偏移一致 ⇒ 绝不 patch 错位置；失败只记日志、不 panic。
-        // 270：`-NRedP7Hold` 也需要这两个 hook（安装侧开窗、注销侧拦截）。
-        if (gGc7 || gP7Hold) {
+        // 270/271：两个 hook 的安装条件分开写（不用 `||`）：
+        //  - gGc7：保持 run518 的只读观测行为（含 [gc7x] 注销侧观测）；
+        //  - gP7Hold：单独开启时也必须安装（安装侧开窗、注销侧拦截）。
+        //  P7 的“写路径拦截”本身在 wrapper 内由 gP7Hold 二次门控 ⇒ 仅 gGc7 时不可能拦截。
+        const auto installGc7Hooks = [&]() {
             if (const auto from = resolveProbe("gc7-inst", kGc7InstallPattern, nullptr,
                                                arrsize(kGc7InstallPattern), 0x93D18)) {
                 hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapGc7Install, this->orgGc7Install},
@@ -7158,6 +7184,12 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                 hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapGc7SetSlot, this->orgGc7SetSlot},
                           "gc7-set");
             }
+        };
+        if (gGc7) {
+            installGc7Hooks();
+        }
+        else if (gP7Hold) {
+            installGc7Hooks();
         }
         {
             static char lineBoot[192];
