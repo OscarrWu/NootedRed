@@ -271,6 +271,11 @@ static UInt32 gGvm5EarlyOk = 0;          // 0=未执行/失败；1=早期真实�
 static UInt32 gGvm5EarlyRc = 0;          // 早期真实成功时的返回值（原样缓存）
 static SInt32 gGvm5EarlyStartRc = -1;    // start 阶段 rc（-1=未跑）
 static SInt32 gGvm5EarlyPowerRc = -1;    // powerup 阶段 rc（-1=未跑）
+// R3a：幂等跳过前必须比较 p1（两次调用的 ctx/p1 可能不是同一对象）。
+static UInt64 gGvm5EarlyP1 = 0;          // 早期成功时的 p1 = *(ctx+0x30)
+static bool   gGvm5EarlyPowerSeen = false;  // powerUp 阶段是否已到过 b==5&&c==1
+static UInt32 gGvm5EarlyPowerIdem = 0;   // 1=p1 相同已跳过；0=p1 不同/非法未跳过
+static UInt64 gGvm5EarlyPowerP1 = 0;     // powerUp 阶段的 p1now（idem=0 时观测）
 struct NRedGvm5DBlocks {
     UInt8 desc[0x1c8];   // local_2a8：描述块（首 u32=0x1c8；+0xf0 起 0xd8 字节为待拷贝视图）
     UInt8 clk[0x68];     // local_d0：时钟/能力位块（首 u32=0x68；+4 为位域）
@@ -1138,11 +1143,18 @@ static void nredGvm5EStamp(char* const body, size_t& off, const size_t cap)
                      off += d; room -= d; }
     }
     if (room == 0) { return; }
-    if (gGvm5EarlyPowerRc >= 0) {
-        const int n = snprintf(body + off, room, "[gvm5e] phase=powerup rc=%d idem=%d\n",
-                               static_cast<int>(gGvm5EarlyPowerRc),
-                               static_cast<int>(gGvm5EarlyOk));
-        if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+    if (gGvm5EarlyPowerSeen) {
+        if (gGvm5EarlyPowerIdem != 0) {
+            const int n = snprintf(body + off, room, "[gvm5e] phase=powerup rc=%d idem=1\n",
+                                   static_cast<int>(gGvm5EarlyPowerRc));
+            if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+        } else {
+            // p1 不同/非法 ⇒ 未跳过（不得伪装成成功）
+            const int n = snprintf(body + off, room, "[gvm5e] phase=powerup idem=0 p1=%llx early=%llx\n",
+                                   static_cast<unsigned long long>(gGvm5EarlyPowerP1),
+                                   static_cast<unsigned long long>(gGvm5EarlyP1));
+            if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+        }
     }
 }
 
@@ -6516,14 +6528,19 @@ int nredGvm5EarlyInject(void* const self)
     gGvm5EarlyStartRc = 0;
     gGvm5EarlyOk = 0;
     gGvm5EarlyRc = 0;
+    gGvm5EarlyP1 = 0;
     if (!nredKernelPtrOk(self)) { return 0; }
     const UInt64 ctx = reinterpret_cast<UInt64>(self) + 0x50;
     if (!nredKernelPtrOk(reinterpret_cast<const void*>(ctx))) { return 0; }
+    // R3a：缓存本次 p1（幂等跳过前必须与 powerUp 的 p1 比较）
+    const UInt64 p1 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(ctx) + 0x30);
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1))) { return 0; }
     const UInt32 rc = nredGvm5Stage1(reinterpret_cast<void*>(ctx), nullptr);
     gGvm5EarlyStartRc = static_cast<SInt32>(rc);
     if (rc == 0) { return 0; }
     gGvm5EarlyOk = 1;
     gGvm5EarlyRc = rc;
+    gGvm5EarlyP1 = p1;
     return 1;
 }
 
@@ -6535,10 +6552,19 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  只写 BSS；不执行 D、不改返回值。`ra` 取本函数的调用者地址并归零（ra - slide）。
     if (gGvm5Phase && b == 5 && c == 1) { nredGvm5Phase(a, __builtin_return_address(0)); }
     // ── 275：M4′ 幂等（`-NRedGvm5Early` 早期已真实成功 ⇒ powerUp 阶段不再执行 D）──────────
-    //  只有 `gGvm5EarlyOk==1`（早期真实成功）才命中；未置位 ⇒ 落到下方 `-NRedGvm5D` 真实执行。
+    //  R3a：**必须比较 p1**——两次调用的 ctx/p1 可能不是同一对象；p1 不同/非法时不得跳过
+    //  （否则 powerUp 的 client5 未执行，失败仍可能落到 WindowServer）。
     if (gGvm5EarlyOk != 0 && b == 5 && c == 1) {
-        gGvm5EarlyPowerRc = static_cast<SInt32>(gGvm5EarlyRc);
-        return gGvm5EarlyRc;   // 原样返回早期真实成功的 rc（不伪造）
+        gGvm5EarlyPowerSeen = true;
+        const UInt64 p1now = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(a) + 0x30);
+        if (nredKernelPtrOk(reinterpret_cast<const void*>(p1now)) && p1now == gGvm5EarlyP1) {
+            gGvm5EarlyPowerIdem = 1;
+            gGvm5EarlyPowerRc = static_cast<SInt32>(gGvm5EarlyRc);
+            return gGvm5EarlyRc;   // 同一对象 ⇒ 原样返回早期真实成功的 rc（不伪造）
+        }
+        // p1 不同或非法 ⇒ 不跳过；落到下方 `-NRedGvm5D` 真实执行（未开 D 则原路径）。
+        gGvm5EarlyPowerIdem = 0;
+        gGvm5EarlyPowerP1 = p1now;
     }
     // ── 273：client5 stage1 叶替换（`-NRedGvm5D`，默认关）──────────────────────────────────
     //  与 `0x94831` 的尾跳等价：先 `p1 = *(a+0x30)`（在叶内），再执行我方 16 步复刻。
