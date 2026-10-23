@@ -280,6 +280,14 @@ static UInt64 gE3S1Ctx   = 0;     // ctx = a
 static UInt64 gE3S1P5    = 0;     // P5 = *(ctx+0x30)
 static UInt64 gE3S1Clone = 0;     // clone = *(P5+0x28)
 static UInt64 gE3S1T90   = 0;     // *(T+0x90)，T = *(clone+0xE48)（P5 可选）
+// ─── 批次 P6：四字段对象构造读数（`-NRedP6Obj`，默认关）──────────────────────────────────
+//  注：规格表 `kP6Specs` 放在 `kGvmRecBytes` 附近（只被构造函数使用）；读数标量必须在此处，
+//      因为 `[p6]` 观测行（`nredE3Stamp`）在文件前部。
+static bool   gP6On = false;                 // `-NRedP6Obj`（默认关）
+static UInt32 gP6Code = 0;                   // 0=未跑 1=成功 2=描述符缺失 3=分配失败 4=初始化失败
+static UInt32 gP6Mode[4] = {0,0,0,0};        // 0=Mode B 1=Mode A
+static UInt64 gP6ObjAddr[4] = {0,0,0,0};     // 四个对象地址
+static UInt32 gP6Key[4] = {0,0,0,0};         // 四个真实键
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -1150,6 +1158,23 @@ static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
                  static_cast<unsigned long long>(gE3S1T90));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
+    // 批次 P6：四字段对象构造读数（仅 -NRedP6Obj；关态一字不变）
+    if (gP6On) {
+        n = snprintf(body + off, room,
+                     "[p6] c=%u m=%u%u%u%u e80=%llx e88=%llx e90=%llx e98=%llx "
+                     "k46=%x kb=%x k22=%x k1c=%x\n",
+                     static_cast<unsigned>(gP6Code),
+                     static_cast<unsigned>(gP6Mode[0]), static_cast<unsigned>(gP6Mode[1]),
+                     static_cast<unsigned>(gP6Mode[2]), static_cast<unsigned>(gP6Mode[3]),
+                     static_cast<unsigned long long>(gP6ObjAddr[0]),
+                     static_cast<unsigned long long>(gP6ObjAddr[1]),
+                     static_cast<unsigned long long>(gP6ObjAddr[2]),
+                     static_cast<unsigned long long>(gP6ObjAddr[3]),
+                     static_cast<unsigned>(gP6Key[0]), static_cast<unsigned>(gP6Key[1]),
+                     static_cast<unsigned>(gP6Key[2]), static_cast<unsigned>(gP6Key[3]));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
 }
 // 265：`[st1qq]` client5 qq 对象四字段（noinline、零解引用、≤120 字符）。
 __attribute__((noinline))
@@ -4186,6 +4211,23 @@ static const UInt32 kGvmKeyMajor    = 11;
 static const UInt32 kGvmKeyMinorMax = 4;
 static const UInt32 kGvmGartSizeMB  = 512;
 
+// ─── 批次 P6：四字段对象构造规格（Mode A 苹果 handler／Mode B 通用壳；零 MMIO）──────────
+//  依据：0x1aaba/0x1dde1/0x1aef4/0x3d1b5 的消费者读法；0x19158 的查表签名。
+//  ⚠ 表地址为 **kext 相对偏移**（重建 macho 地址），运行时加 gHwlibsSlide。
+struct NRedP6Spec {
+    UInt32 fieldOff;   // clone+fieldOff
+    UInt32 type;       // 描述符 type
+    UInt32 tableOff;   // 表地址（kext 相对）
+    UInt32 count;      // 表项数
+};
+static const NRedP6Spec kP6Specs[4] = {
+    {0xE80, 0x46, 0x1044340, 0x12},   // DAT_01044340
+    {0xE88, 0x0B, 0x10448C0, 0x14},   // DAT_010448c0
+    {0xE90, 0x22, 0x1044660, 0x0D},   // DAT_01044660
+    {0xE98, 0x1C, 0x1045870, 0x0D},   // DAT_01045870
+};
+static const UInt32 kP6GenericShellBytes = 0x88;   // Mode B 通用壳大小
+
 // ── 页表表项位值（**逐位核对**；来源＝`kb/参考源码/Linux-7.2.0/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.h`，
 //    行号可能漂移，以实际内容为准）──
 enum : UInt64 {
@@ -4628,6 +4670,103 @@ static void nredSwInstallSlot(void* const obj, const UInt32 id, const UInt32 sta
 static const UInt32 kGvmHandleBytes = 3776;
 static UInt8 gGvmHandleReq[kGvmHandleBytes];
 
+// ─── 批次 P6：四字段对象构造（Mode A：苹果 create handler；Mode B：通用壳）──────────────
+//  返回 true＝四个字段全部非 0；false＝失败（gP6Code 给出原因）。
+//  ⚠ 键必须来自 clone 已拷贝的描述符；不得改键、不得用苹果表键替换。
+//  ⚠ Mode A 必须经 0x19158 查 handler（布局随键变）；不得硬编码某个 handler。
+//  ⚠ 第 2 实参传 `info`（＝苹果 0x191dc 链的同一实参，见 `1ddb9 movq %rbx,%rsi`）；
+//     实施文档 §3 的片段写作 `clone+8`，与 §4 的"与 0x191dc 同参"矛盾 —— 以反汇编为准。
+static bool nredP6BuildFourObjects(void* const clone, void* const info)
+{
+    if (!nredKernelPtrOk(clone) || gHwlibsSlide == 0) { gP6Code = 4; return false; }
+    using P6Lookup = UInt64 (*)(UInt32, UInt32, UInt32, UInt32, const void*, UInt32);
+    using P6Create = UInt64 (*)(void*, void*, void*, void*);
+    using P6GetOrCreate = int (*)(void*, UInt64, UInt32, void**);
+    const auto lookup = reinterpret_cast<P6Lookup>(gHwlibsSlide + 0x19158);
+    const auto getOrCreate = reinterpret_cast<P6GetOrCreate>(gHwlibsSlide + 0x19bfa);
+    for (unsigned i = 0; i < 4; ++i) {
+        const NRedP6Spec& s = kP6Specs[i];
+        // 1. 在 clone 的描述符区按 type 找描述符（6 个槽，步长 0x260）
+        const UInt8* desc = nullptr;
+        for (unsigned k = 0; k < 6; ++k) {
+            const UInt8* d = static_cast<const UInt8*>(clone) + 8 + k * 0x260;
+            if (*reinterpret_cast<const UInt32*>(d) == s.type) { desc = d; break; }
+        }
+        if (desc == nullptr) { gP6Code = 2; return false; }
+        // 键打包：与苹果 `0x1dcc9` 的 `1dd31..1dda5` 逐字一致。
+        //   ⚠ 苹果在打包前有一处**版本重映射**（`1dd3d-1dd58`）：
+        //     `if (desc[8]==8 && desc[12]==0) { type=8; ver=5; } else { type=desc[8]; ver=desc[12]; }`
+        //     实施文档 §3 的公式漏了这一步；本机三个已知描述符的 desc[8] ∈ {0xb,5,3} ⇒ 不触发，
+        //     但 type 0x46 的键未采（U-A）⇒ 按苹果原样实现，避免"恰好命中 (8,0)"时查错 handler。
+        const UInt32 d8    = *reinterpret_cast<const UInt32*>(desc + 0x08);
+        const UInt32 d12   = *reinterpret_cast<const UInt32*>(desc + 0x0C);
+        const UInt32 d16   = *reinterpret_cast<const UInt32*>(desc + 0x10);
+        const bool   remap = (d8 == 8 && d12 == 0);
+        const UInt32 kType = remap ? 8U : d8;
+        const UInt32 kVer  = remap ? 5U : d12;
+        const UInt32 kMaj  = d16;
+        const UInt32 key   = (kMaj << 24) | ((kVer & 0xFFU) << 16) | (kType & 0xFFFFU);
+        gP6Key[i] = key;
+        // 2. 查 create handler（slot 0）
+        const void* const table = reinterpret_cast<const void*>(gHwlibsSlide + s.tableOff);
+        const UInt64 h = lookup(kType, kVer, kMaj, 0, table, s.count);
+        if (h != 0) {
+            // Mode A：调苹果自己的 create handler（与 0x191dc 同参：clone, info, out, &key）
+            UInt8 outBuf[0x20] = {0};
+            UInt32 keyBuf = key;
+            const auto create = reinterpret_cast<P6Create>(h);
+            const UInt64 rc = create(clone, info, outBuf, &keyBuf);
+            if (rc != 0) { gP6Code = 4; return false; }
+            gP6Mode[i] = 1;
+        } else {
+            // Mode B：苹果没有该键的 handler ⇒ 通用壳（真实分配＋真实键，不猜布局）
+            void* A = nullptr;
+            if (getOrCreate(clone, kP6GenericShellBytes, 1, &A) != 0 || !nredKernelPtrOk(A)) {
+                gP6Code = 3; return false;
+            }
+            __builtin_memset(A, 0, kP6GenericShellBytes);
+            *reinterpret_cast<UInt64*>(A) = reinterpret_cast<UInt64>(clone);
+            *reinterpret_cast<UInt32*>(static_cast<UInt8*>(A) + 8) = key;
+            *reinterpret_cast<UInt64*>(static_cast<UInt8*>(clone) + s.fieldOff) =
+                reinterpret_cast<UInt64>(A);
+            gP6Mode[i] = 0;
+        }
+        // 3. 校验字段非 0
+        const UInt64 obj = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(clone) + s.fieldOff);
+        if (!nredKernelPtrOk(reinterpret_cast<const void*>(obj))) { gP6Code = 4; return false; }
+        gP6ObjAddr[i] = obj;
+    }
+    gP6Code = 1;
+    return true;
+}
+
+// 失败清理：Mode A 按键查 destroy handler（slot2）释放；Mode B 直接释放 0x88 壳；清字段。
+static void nredP6FreeBuilt(void* const clone)
+{
+    if (!nredKernelPtrOk(clone) || gHwlibsSlide == 0) { return; }
+    using P6Lookup = UInt64 (*)(UInt32, UInt32, UInt32, UInt32, const void*, UInt32);
+    using P6Destroy = void (*)(void*);
+    using P6Free = void (*)(void*, void*, UInt64);
+    const auto lookup = reinterpret_cast<P6Lookup>(gHwlibsSlide + 0x19158);
+    const auto freeFn = reinterpret_cast<P6Free>(gHwlibsSlide + 0x1a63a);   // 0x19c7d
+    for (unsigned i = 0; i < 4; ++i) {
+        const NRedP6Spec& s = kP6Specs[i];
+        UInt8* const slot = static_cast<UInt8*>(clone) + s.fieldOff;
+        void* const A = *reinterpret_cast<void* const*>(slot);
+        if (!nredKernelPtrOk(A)) { continue; }
+        const UInt32 key = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(A) + 8);
+        const void* const table = reinterpret_cast<const void*>(gHwlibsSlide + s.tableOff);
+        const UInt64 h = lookup(key & 0xFFFFU, (key >> 16) & 0xFFU, (key >> 24) & 0xFFU,
+                                2, table, s.count);
+        if (h != 0) {
+            reinterpret_cast<P6Destroy>(h)(clone);          // 苹果 destroy：先 B 后 A
+        } else {
+            freeFn(clone, A, kP6GenericShellBytes);         // Mode B：直接释放通用壳
+        }
+        *reinterpret_cast<UInt64*>(slot) = 0;
+    }
+}
+
 // ── 模块 5（GVM）本体：A1–A11（对照 `gmc_v11_0.c:744-866`）───────────────────────────────
 //  返回值由本函数给出（错误码见 `kSwRes*`）；**计数、日志与戳记由统一入口负责**（单点）。
 //  ⚠ 契约：只读 `info` 三处（+3656／+3664／+4..+3651）；**只写 `out+8`**；
@@ -4696,6 +4835,20 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     *reinterpret_cast<UInt64*>(static_cast<UInt8*>(handle) + 3656) =
         *reinterpret_cast<const UInt64*>(I + 3656);                           // ⑦（`19293/1929a`）
     __builtin_memcpy(static_cast<UInt8*>(handle) + 8, I + 4, kGvmRecBytes);   // ⑧记录区 3648 B（`192a1..ae`）
+
+    // ── P6：四字段对象构造（`-NRedP6Obj`，默认关；零 MMIO；不释放第 14 步）──────────────────
+    //  依据：需求文档 §3/§4；Mode A＝苹果 create handler，Mode B＝通用壳。
+    //  ⚠ 失败 ⇒ 按键释放已建对象＋清字段＋0x19324(clone)；不得留半成品。
+    if (gP6On) {
+        if (!nredP6BuildFourObjects(handle, info)) {
+            nredP6FreeBuilt(handle);
+            using P6Cleanup = void (*)(void*);
+            const auto cleanup = reinterpret_cast<P6Cleanup>(gHwlibsSlide + 0x19324);
+            cleanup(handle);
+            nredSwFini();
+            return (gP6Code == 2) ? kSwResParseFail : kSwResAllocFail;
+        }
+    }
 
     // ── A1 记录区解析（真实数据；对照 R57 A1）────────────────────────────────────────────
     //  条目布局＝{u32 键0, u32 键1, …}；本机世代键取自上游**本驱动自身的版本列表**
@@ -7561,6 +7714,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // GVM 软件初始化替换门控（**默认全关**）：解析一次存标量；判定处只读标量。
     //  ⚠ 关态：不安装、不介入、零新增日志、零新增解引用 ⇒ 与现状逐字一致。
     gGvmSwInstall  = checkKernelArgument("-NRedGvmSwInstall");
+    gP6On          = checkKernelArgument("-NRedP6Obj");   // P6：四字段对象构造（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
     //  ⚠ **放行开关语义**（R70 §3／需求 R3）：本开关**保留**，但语义改为"**仅当全部步骤均达可用层**时，
     //    才允许把成功报给苹果"⇒ 当前（A8 未达可用层、失败位恒非 0）它**单独无法导致成功**。
