@@ -307,6 +307,10 @@ static bool      gP7On = false;                 // `-NRedP7Probe`（默认关）
 static NRedP7Rec gP7Rec[4] = {};
 static const UInt32 kP7Types[4] = {0x46, 0x0B, 0x22, 0x1C};
 static const UInt32 kP7Limit = 4096;            // 硬上限（项）
+// P7b：逐级指针（ctx/p5/clone/T/pair/device/p/q/r/s/t）＋首个失败级号
+static UInt64 gP7Chain[11] = {0};   // [0]=ctx [1]=p5 [2]=clone [3]=T [4]=pair
+                                    // [5]=device [6]=p [7]=q [8]=r [9]=s [10]=t
+static UInt32 gP7Level = 0;         // 0=无失败；1..11=首个失败级
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -1208,6 +1212,29 @@ static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
             if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                          off += d; room -= d; }
         }
+    }
+    // 批次 P7b：逐级指针与首个失败级号（仅 -NRedP7Probe；关态一字不变）
+    if (gP7On) {
+        n = snprintf(body + off, room,
+                     "[p7b0] l=%u c=%llx p5=%llx cl=%llx T=%llx pr=%llx dv=%llx\n",
+                     static_cast<unsigned>(gP7Level),
+                     static_cast<unsigned long long>(gP7Chain[0]),
+                     static_cast<unsigned long long>(gP7Chain[1]),
+                     static_cast<unsigned long long>(gP7Chain[2]),
+                     static_cast<unsigned long long>(gP7Chain[3]),
+                     static_cast<unsigned long long>(gP7Chain[4]),
+                     static_cast<unsigned long long>(gP7Chain[5]));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+        n = snprintf(body + off, room,
+                     "[p7b1] p=%llx q=%llx r=%llx s=%llx t=%llx\n",
+                     static_cast<unsigned long long>(gP7Chain[6]),
+                     static_cast<unsigned long long>(gP7Chain[7]),
+                     static_cast<unsigned long long>(gP7Chain[8]),
+                     static_cast<unsigned long long>(gP7Chain[9]),
+                     static_cast<unsigned long long>(gP7Chain[10]));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
     }
 }
 // 265：`[st1qq]` client5 qq 对象四字段（noinline、零解引用、≤120 字符）。
@@ -6927,29 +6954,53 @@ static void nredP7Probe(const void* const ctx)
         gP7Rec[i] = NRedP7Rec{};
         gP7Rec[i].type = kP7Types[i];
     }
-    if (!nredKernelPtrOk(ctx)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    for (unsigned i = 0; i < 11; ++i) { gP7Chain[i] = 0; }
+    gP7Level = 0;
+    // ⚠ P7b：每级**先写值再 KPtr** ⇒ 失败级的原始值（即使为 0/非法）也能看到。
+    // 级 1：ctx
+    gP7Chain[0] = reinterpret_cast<UInt64>(ctx);
+    if (!nredKernelPtrOk(ctx)) { gP7Level = 1; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 2：p5
     const UInt8* const p5 = *reinterpret_cast<const UInt8* const*>(
         static_cast<const UInt8*>(ctx) + 0x30);
-    if (!nredKernelPtrOk(p5)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[1] = reinterpret_cast<UInt64>(p5);
+    if (!nredKernelPtrOk(p5)) { gP7Level = 2; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 3：clone
     const UInt8* const clone = *reinterpret_cast<const UInt8* const*>(p5 + 0x28);
-    if (!nredKernelPtrOk(clone)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
-    // 0xa31f6 的纯内存读链（不调 0x8b8e7/0x9233d/0x1a538）
+    gP7Chain[2] = reinterpret_cast<UInt64>(clone);
+    if (!nredKernelPtrOk(clone)) { gP7Level = 3; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 4：T（0xa31f6 的纯内存读链；不调 0x8b8e7/0x9233d/0x1a538）
     const UInt8* const T = *reinterpret_cast<const UInt8* const*>(clone + 0xE48);
-    if (!nredKernelPtrOk(T)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[3] = reinterpret_cast<UInt64>(T);
+    if (!nredKernelPtrOk(T)) { gP7Level = 4; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 5：pair
     const UInt8* const pair = *reinterpret_cast<const UInt8* const*>(T + 8);
-    if (!nredKernelPtrOk(pair)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[4] = reinterpret_cast<UInt64>(pair);
+    if (!nredKernelPtrOk(pair)) { gP7Level = 5; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 6：device
     const UInt8* const device = *reinterpret_cast<const UInt8* const*>(pair);
-    if (!nredKernelPtrOk(device)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[5] = reinterpret_cast<UInt64>(device);
+    if (!nredKernelPtrOk(device)) { gP7Level = 6; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 7：p
     const UInt8* const p = *reinterpret_cast<const UInt8* const*>(device);
-    if (!nredKernelPtrOk(p)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[6] = reinterpret_cast<UInt64>(p);
+    if (!nredKernelPtrOk(p)) { gP7Level = 7; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 8：q（iproot）
     const UInt8* const q = *reinterpret_cast<const UInt8* const*>(p + 0x58);
-    if (!nredKernelPtrOk(q)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[7] = reinterpret_cast<UInt64>(q);
+    if (!nredKernelPtrOk(q)) { gP7Level = 8; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 9：r（head）
     const UInt8* const r = *reinterpret_cast<const UInt8* const*>(q + 0xE8);
-    if (!nredKernelPtrOk(r)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[8] = reinterpret_cast<UInt64>(r);
+    if (!nredKernelPtrOk(r)) { gP7Level = 9; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 10：s（blk）
     const UInt8* const s = *reinterpret_cast<const UInt8* const*>(r + 0x40);
-    if (!nredKernelPtrOk(s)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[9] = reinterpret_cast<UInt64>(s);
+    if (!nredKernelPtrOk(s)) { gP7Level = 10; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 级 11：t（arr）
     const UInt8* const t = *reinterpret_cast<const UInt8* const*>(s + 8);
-    if (!nredKernelPtrOk(t)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    gP7Chain[10] = reinterpret_cast<UInt64>(t);
+    if (!nredKernelPtrOk(t)) { gP7Level = 11; for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
 
     for (unsigned i = 0; i < 4; ++i) {
         NRedP7Rec& out = gP7Rec[i];
