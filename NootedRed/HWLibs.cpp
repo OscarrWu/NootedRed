@@ -288,6 +288,32 @@ static UInt32 gP6Code = 0;                   // 0=未跑 1=成功 2=描述符缺
 static UInt32 gP6Mode[4] = {0,0,0,0};        // 0=Mode B 1=Mode A
 static UInt64 gP6ObjAddr[4] = {0,0,0,0};     // 四个对象地址
 static UInt32 gP6Key[4] = {0,0,0,0};         // 四个真实键
+// ─── 批次 R0：client5 只读探针（`-NRedR0Probe`／`-NRedR0Deep`，默认全关）────────────────
+//  目的：为 M2 的 U2/U3/U5/U6/U7/U8 提供"当前真实值"；零写、零 MMIO、零行为改变。
+//  ⚠ 越界纪律：e88 当前是 P6 的 0x88 B 通用壳 ⇒ +0x210/+0x528/+0x570 在对象**之外**，
+//    默认**不读**；仅 `-NRedR0Deep` 且"同页判定"通过时读一次（值无对象语义）。
+//  ⚠ 读数标量必须在此处声明（`[r0*]` 行在 `nredTraceFlush`，文件前部）。
+static bool   gR0On   = false;   // `-NRedR0Probe`（默认关）
+static bool   gR0Deep = false;   // `-NRedR0Deep`（默认关；仅深读越界项）
+static UInt64 gR0E88  = 0;       // *(H+0xE88)
+static UInt32 gR0V    = 0;       // 1=e88 通过 nredKernelPtrOk（否则 sz/key/c 无意义）
+static UInt32 gR0Sz   = 0;       // e88 的**已知**尺寸（0x88=Mode B 壳；0=未知）
+static UInt32 gR0Key  = 0;       // *(u32*)(e88+0x08)
+static UInt32 gR0C    = 0;       // *(u32*)(e88+0x0C)
+static UInt64 gR0M528 = 0;       // *(u64*)(e88+0x528)（仅 deep＋同页）
+static UInt64 gR0M570 = 0;       // *(u64*)(e88+0x570)（仅 deep＋同页）
+static UInt64 gR0A210 = 0;       // *(u64*)(e88+0x210)（仅 deep＋同页）
+static UInt32 gR0Pg   = 0;       // 同页判定：1=e88..e88+0x5FF 同 4 KB 页
+static UInt32 gR0Dp   = 0;       // 1=本次真的深读了越界三项
+static UInt64 gR0F2B8 = 0;       // *(u64*)(slot1+0x2b8)
+static UInt32 gR0F108 = 0;       // *(u8*)(P5+0x108) & 1
+static UInt64 gR0B0   = 0;       // *(u64*)(e88+0x10)
+static UInt64 gR0B1   = 0;       // *(u64*)(e88+0x18)
+static UInt32 gR0Nz   = 0;       // e88+0x10..+0x4F 的非零字节数
+static UInt32 gR0Blk  = 0;       // 1=信息块已读（sz>=0x50）
+static UInt32 gR0Qp   = 0;       // 1=Q′ 已到第 14 步（t0/d10 有值）
+static UInt32 gR0T0   = 0;       // clk+0x20（type[0]）
+static UInt32 gR0D10  = 0;       // desc+0x10
 // ─── 批次 P7：golden 表有界性只读探针（`-NRedP7Probe`，默认关）──────────────────────────
 //  数据链：ctx→P5→clone→T→pair→device→p→q→r→s→t→recs（逐级 KPtr）。
 //  遍历：复刻 0x18f7c 的 recs 遍历；0x1a99e 只做算术，不 deref 结果地址。
@@ -1164,6 +1190,34 @@ static void nredQpStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
 }
+// 批次 R0：只读探针读数（仅 -NRedR0Probe；关态一字不变）。三行，各 ≤191 B。
+__attribute__((noinline))
+static void nredR0Stamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room, "[r0] e88=%llx v=%u sz=%x key=%x c=%x f108=%x f2b8=%llx\n",
+                     static_cast<unsigned long long>(gR0E88), static_cast<unsigned>(gR0V),
+                     static_cast<unsigned>(gR0Sz),
+                     static_cast<unsigned>(gR0Key), static_cast<unsigned>(gR0C),
+                     static_cast<unsigned>(gR0F108),
+                     static_cast<unsigned long long>(gR0F2B8));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[r0b] pg=%u dp=%u m528=%llx m570=%llx a210=%llx\n",
+                 static_cast<unsigned>(gR0Pg), static_cast<unsigned>(gR0Dp),
+                 static_cast<unsigned long long>(gR0M528),
+                 static_cast<unsigned long long>(gR0M570),
+                 static_cast<unsigned long long>(gR0A210));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[r0c] qp=%u t0=%x d10=%x blk=%u b0=%llx b1=%llx nz=%u\n",
+                 static_cast<unsigned>(gR0Qp), static_cast<unsigned>(gR0T0),
+                 static_cast<unsigned>(gR0D10), static_cast<unsigned>(gR0Blk),
+                 static_cast<unsigned long long>(gR0B0),
+                 static_cast<unsigned long long>(gR0B1), static_cast<unsigned>(gR0Nz));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+}
 // 批次 P5：E3 定因探针读数（仅 -NRedE3Probe；关态一字不变）
 __attribute__((noinline))
 static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
@@ -1579,6 +1633,10 @@ int nredTraceFlush(int secTag)
                                 static_cast<unsigned long long>(gMHttl));
         if (n3 > 0) { off += (static_cast<size_t>(n3) < cap) ? static_cast<size_t>(n3) : cap; }
     }
+    // 批次 R0：client5 只读探针读数（仅 -NRedR0Probe；关态一字不变）。
+    //  **为什么放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束 ⇒ 判别读数必须落头部区才每片必现。
+    //  ⚠ 只读：只读 `gR0*` 标量（由护栏／Q′ 钩子写入），本处**零解引用**、零 SYSLOG、零 panic 文本。
+    if (gR0On && off < sizeof(body)) { nredR0Stamp(body, off, sizeof(body) - off); }
     // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
     //  ab＝allocB 返回值（由既有 wrapTtlAllocB 写入）；n＝`0x929ac` 调用总计数；
     //  k=RA/sub/al＝第 k 次调用的三值（三槽按到达顺序、不覆盖；第 4 次起只计数）。
@@ -6384,6 +6442,51 @@ static bool nredStage1Guard5(const void* const ctx)
         const UInt64 e90 = *reinterpret_cast<const UInt64*>(H + 0xE90);
         const UInt64 e98 = *reinterpret_cast<const UInt64*>(H + 0xE98);
         gSt1G5E88 = e88; gSt1G5E90 = e90; gSt1G5E98 = e98;
+        // 批次 R0：只读探针（仅 -NRedR0Probe；关态零写、零解引用）。
+        //  ⚠ 越界纪律：e88 当前是 P6 的 0x88 B 壳 ⇒ +0x210/+0x528/+0x570 在对象之外。
+        //    默认不读；仅 -NRedR0Deep 且"同页"（e88..e88+0x5FF 同 4 KB 页）时读一次。
+        if (gR0On) {
+            gR0E88 = e88; gR0V = 0; gR0Sz = 0; gR0Key = 0; gR0C = 0;
+            gR0M528 = 0; gR0M570 = 0; gR0A210 = 0; gR0Pg = 0; gR0Dp = 0;
+            gR0F2B8 = 0; gR0F108 = 0; gR0B0 = 0; gR0B1 = 0; gR0Nz = 0; gR0Blk = 0;
+            if (nredKernelPtrOk(reinterpret_cast<const void*>(e88))) {
+                gR0V = 1;
+                const UInt8* const e = reinterpret_cast<const UInt8*>(e88);
+                // 已知尺寸：仅 P6 Mode B（0x88 壳）可证；Mode A／未建 ⇒ 0（未知）
+                if (gP6On && gP6ObjAddr[1] == e88 && gP6Mode[1] == 0) { gR0Sz = 0x88U; }
+                // +0x08/+0x0C：Apple 自己的分派器也读 +8（0x1dde1 首句）⇒ 同等的安全级别
+                gR0Key = *reinterpret_cast<const UInt32*>(e + 0x08);
+                gR0C   = *reinterpret_cast<const UInt32*>(e + 0x0C);
+                // 同页判定：e88+0x5F8 是否与 e88 同 4 KB 页（同页 ⇒ 该页已映射，读不 fault）
+                gR0Pg = ((e88 & 0xFFFULL) + 0x600ULL <= 0x1000ULL) ? 1U : 0U;
+                // 信息块：仅当尺寸可证 >=0x50（Mode B 0x88）时读前 0x40 B
+                if (gR0Sz >= 0x50U) {
+                    gR0B0 = *reinterpret_cast<const UInt64*>(e + 0x10);
+                    gR0B1 = *reinterpret_cast<const UInt64*>(e + 0x18);
+                    UInt32 nz = 0;
+                    for (unsigned i = 0; i < 0x40; ++i) { if (e[0x10 + i] != 0) { ++nz; } }
+                    gR0Nz = nz; gR0Blk = 1;
+                }
+                // 越界三项：仅 deep＋同页（值**无对象语义**，只用于量化"若放行会调到什么"）
+                if (gR0Deep && gR0Pg != 0) {
+                    gR0M528 = *reinterpret_cast<const UInt64*>(e + 0x528);
+                    gR0M570 = *reinterpret_cast<const UInt64*>(e + 0x570);
+                    gR0A210 = *reinterpret_cast<const UInt64*>(e + 0x210);
+                    gR0Dp = 1;
+                }
+            }
+            // slot1+0x2b8：slot1 已在步 23 校验；与步 24 同一读点（安全）
+            if (nredKernelPtrOk(reinterpret_cast<const void*>(gSt1G5P23))) {
+                gR0F2B8 = *reinterpret_cast<const UInt64*>(
+                    reinterpret_cast<const UInt8*>(gSt1G5P23) + 0x2B8);
+            }
+            // P5+0x108 bit0：P5 已在步 2 校验；P5 为 272 B（0x110）⇒ +0x108 在对象内
+            if (nredKernelPtrOk(reinterpret_cast<const void*>(gSt1G5P))) {
+                gR0F108 = static_cast<UInt32>(
+                    *reinterpret_cast<const UInt8*>(
+                        reinterpret_cast<const UInt8*>(gSt1G5P) + 0x108)) & 1U;
+            }
+        }
         // 批次 P2／P2-2b：`-NRedQp` 开 ⇒ 第 14 步被截断 ⇒ 0x1aef4/0x1dde1/0x3d1b5
         //   三个分派器**不执行** ⇒ 这三个字段永不被使用 ⇒ 只观测。
         //   （本机是否非空未测：R278 U1；若为 0 而此处仍强制，会白废一轮 Q′。）
@@ -7818,6 +7921,14 @@ SInt32 X5000HWLibs::wrapQpGvm5Init(void* const obj, void* const clk, void* const
             (static_cast<const UInt8*>(clk) - static_cast<const UInt8*>(desc)) == 0x1D8) {
             gQpL68   = *reinterpret_cast<const UInt32*>(c + 0x68);
             gQpL68Ok = 1;
+            // 批次 R0：type[0] 与 desc+0x10（仅 -NRedR0Probe；关态零写）。
+            //  自证已成立（clk-desc==0x1D8）⇒ 两个栈缓冲的布局与离线模型一致。
+            if (gR0On) {
+                gR0Qp  = 1;
+                gR0T0  = gQpT20;   // clk+0x20（type[0]），复用既有读数，不新增解引用
+                gR0D10 = *reinterpret_cast<const UInt32*>(
+                    static_cast<const UInt8*>(desc) + 0x10);
+            }
         }
     }
     return 1;   // ★ 恒非 0 ⇒ 叶子返回 0（失败）
@@ -7954,6 +8065,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  ⚠ 关态：不安装、不介入、零新增日志、零新增解引用 ⇒ 与现状逐字一致。
     gGvmSwInstall  = checkKernelArgument("-NRedGvmSwInstall");
     gP6On          = checkKernelArgument("-NRedP6Obj");   // P6：四字段对象构造（默认关）
+    // 批次 R0（**默认关**）：client5 只读探针。用**精确 token** 匹配（`-NRedR0Probe` 是
+    //  `-NRedR0ProbeX` 的前缀；若底层解析器做前缀匹配会误开 ⇒ 破坏关态零行为）。
+    gR0On          = nredExactBootArg("-NRedR0Probe");
+    gR0Deep        = nredExactBootArg("-NRedR0Deep");
     gP7On          = checkKernelArgument("-NRedP7Probe");   // P7：golden 表有界性（默认关）
     gP8On          = checkKernelArgument("-NRedP8Probe");   // P8：iproot/head 根因（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
