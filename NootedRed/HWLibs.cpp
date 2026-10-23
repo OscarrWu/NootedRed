@@ -261,6 +261,25 @@ static UInt64 gSt1G8F18 = 0;          // *(P8+0x18)（静态回调 0x6463f）
 static UInt64 gSt1G8F28 = 0;          // *(P8+0x28)（SMU ctx）
 static UInt64 gSt1G8V6C8 = 0;         // *(SMU+0x6c8)（观测）
 static UInt64 gSt1G8V6D8 = 0;         // *(SMU+0x6d8)（观测）
+// ─── 批次 P5：E3 定因只读探针（`-NRedE3Probe`，默认关）──────────────────────────────────
+static bool   gE3Probe = false;   // `-NRedE3Probe`（默认关）
+// P1／P2：stage0（b==5 && c==0）返回后
+static UInt64 gE3S0Ctx   = 0;     // ctx = a
+static UInt64 gE3S0P5    = 0;     // P5 = *(ctx+0x30)
+static UInt32 gE3S0Ret   = 0;     // stage0 的返回值
+static UInt64 gE3S0Clone = 0;     // clone = *(P5+0x28)
+static UInt64 gE3S0E80   = 0;     // *(clone+0xE80)
+static UInt64 gE3S0E88   = 0;     // *(clone+0xE88)
+static UInt64 gE3S0E90   = 0;     // *(clone+0xE90)
+static UInt64 gE3S0E98   = 0;     // *(clone+0xE98)
+// P3：四个描述符的查找键（type 0xB／0x1B／0x22／0x1C）
+struct NRedE3Key { UInt32 t, a, b, c; };
+static NRedE3Key gE3K[4] = {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}};
+// P4／P5：stage1（b==5 && c==1）入口
+static UInt64 gE3S1Ctx   = 0;     // ctx = a
+static UInt64 gE3S1P5    = 0;     // P5 = *(ctx+0x30)
+static UInt64 gE3S1Clone = 0;     // clone = *(P5+0x28)
+static UInt64 gE3S1T90   = 0;     // *(T+0x90)，T = *(clone+0xE48)（P5 可选）
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -1097,6 +1116,41 @@ static void nredQpStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
 }
+// 批次 P5：E3 定因探针读数（仅 -NRedE3Probe；关态一字不变）
+__attribute__((noinline))
+static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room,
+                     "[e3s0] ctx=%llx p5=%llx ret=%u clone=%llx e80=%llx e88=%llx e90=%llx e98=%llx\n",
+                     static_cast<unsigned long long>(gE3S0Ctx),
+                     static_cast<unsigned long long>(gE3S0P5),
+                     static_cast<unsigned>(gE3S0Ret),
+                     static_cast<unsigned long long>(gE3S0Clone),
+                     static_cast<unsigned long long>(gE3S0E80),
+                     static_cast<unsigned long long>(gE3S0E88),
+                     static_cast<unsigned long long>(gE3S0E90),
+                     static_cast<unsigned long long>(gE3S0E98));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    for (unsigned w = 0; w < 4; ++w) {
+        n = snprintf(body + off, room, "[e3k%u] t=%x a=%x b=%x c=%x\n",
+                     w,
+                     static_cast<unsigned>(gE3K[w].t),
+                     static_cast<unsigned>(gE3K[w].a),
+                     static_cast<unsigned>(gE3K[w].b),
+                     static_cast<unsigned>(gE3K[w].c));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
+    n = snprintf(body + off, room, "[e3s1] ctx=%llx p5=%llx clone=%llx t90=%llx\n",
+                 static_cast<unsigned long long>(gE3S1Ctx),
+                 static_cast<unsigned long long>(gE3S1P5),
+                 static_cast<unsigned long long>(gE3S1Clone),
+                 static_cast<unsigned long long>(gE3S1T90));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+}
 // 265：`[st1qq]` client5 qq 对象四字段（noinline、零解引用、≤120 字符）。
 __attribute__((noinline))
 static void nredSt1QQStamp(char* const body, size_t& off, const size_t cap)
@@ -1456,6 +1510,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
     // 批次 Q′：截断器读数（仅 -NRedQp；关态一字不变）
     if (gQp && off < sizeof(body)) { nredQpStamp(body, off, sizeof(body) - off); }
+    // 批次 P5：E3 定因探针读数（仅 -NRedE3Probe；关态一字不变）
+    if (gE3Probe && off < sizeof(body)) { nredE3Stamp(body, off, sizeof(body) - off); }
     // 265：`[st1qq]` client5 qq 四字段（仅 -NRedSt1Q）。
     if (gSt1Q && off < sizeof(body)) { nredSt1QQStamp(body, off, sizeof(body) - off); }
     // 266：`[ttlfd]` TTL 门面状态（仅 -NRedTtlFacade）。
@@ -6606,6 +6662,70 @@ static void nredGvm5Phase(const void* const a, const void* const ra)
     if (nredKernelPtrOk(reinterpret_cast<const void*>(p1))) { gGvm5PhaseP1 = p1; }
 }
 
+// ─── 批次 P5／P1-P3：stage0（b==5 && c==0）返回后的只读探针（`-NRedE3Probe`，默认关）──────
+//  读数：ctx、P5=*(ctx+0x30)、ret、clone=*(P5+0x28)、*(clone+0xE80/E88/E90/E98)、
+//        四个描述符（type 0xB/0x1B/0x22/0x1C）的 +8/+0xC/+0x10。
+//  ⚠ **越界安全**：clone 由 `0x191dc` 的 `0x19253 CALL 0x19bfa(local, 0xEC0, 1, &out)`
+//     分配 ⇒ **对象大小 0xEC0**；最大读偏移 `0xE98+8 = 0xEA0 < 0xEC0`（余 0x20 B）✓
+//     描述符最大偏移 `8+5*0x260+0x10 = 0xBF8 < 0xEC0` ✓
+//  ⚠ 只写 BSS；不调用任何函数指针；不写任何对象。
+__attribute__((noinline))
+static void nredE3S0Probe(const void* const ctx, const UInt32 ret)
+{
+    gE3S0Ctx = 0; gE3S0P5 = 0; gE3S0Ret = ret; gE3S0Clone = 0;
+    gE3S0E80 = 0; gE3S0E88 = 0; gE3S0E90 = 0; gE3S0E98 = 0;
+    for (unsigned w = 0; w < 4; ++w) { gE3K[w].t = 0; gE3K[w].a = 0; gE3K[w].b = 0; gE3K[w].c = 0; }
+    if (!nredKernelPtrOk(ctx)) { return; }
+    gE3S0Ctx = reinterpret_cast<UInt64>(ctx);
+    const UInt8* const p5 = *reinterpret_cast<const UInt8* const*>(
+        static_cast<const UInt8*>(ctx) + 0x30);
+    if (!nredKernelPtrOk(p5)) { return; }
+    gE3S0P5 = reinterpret_cast<UInt64>(p5);
+    const UInt8* const clone = *reinterpret_cast<const UInt8* const*>(p5 + 0x28);
+    if (!nredKernelPtrOk(clone)) { return; }
+    gE3S0Clone = reinterpret_cast<UInt64>(clone);
+    gE3S0E80 = *reinterpret_cast<const UInt64*>(clone + 0xE80);
+    gE3S0E88 = *reinterpret_cast<const UInt64*>(clone + 0xE88);
+    gE3S0E90 = *reinterpret_cast<const UInt64*>(clone + 0xE90);
+    gE3S0E98 = *reinterpret_cast<const UInt64*>(clone + 0xE98);
+    // P3：四个描述符的查找键（`0x8df8` 的 switch 会处理的 IP type）
+    static const UInt32 kWant[4] = {0xB, 0x1B, 0x22, 0x1C};
+    for (unsigned w = 0; w < 4; ++w) {
+        for (unsigned k = 0; k < 6; ++k) {
+            const UInt8* const slot = clone + 8 + k * 0x260;
+            const UInt32 t = *reinterpret_cast<const UInt32*>(slot);
+            if (t != kWant[w]) { continue; }
+            gE3K[w].t = t;
+            gE3K[w].a = *reinterpret_cast<const UInt32*>(slot + 0x08);
+            gE3K[w].b = *reinterpret_cast<const UInt32*>(slot + 0x0C);
+            gE3K[w].c = *reinterpret_cast<const UInt32*>(slot + 0x10);
+            break;
+        }
+    }
+}
+
+// ─── 批次 P5／P4-P5：stage1（b==5 && c==1）入口的只读探针（`-NRedE3Probe`，默认关）────────
+//  读数：ctx、P5=*(ctx+0x30)、clone=*(P5+0x28)、*(T+0x90)（T=*(clone+0xE48)）。
+//  ⚠ P5 的 `*(T+0x90)`：**T 的边界未离线证明**（【未解出】）⇒ 只在 T 通过 KPtr 时读。
+//  ⚠ 只写 BSS；**只读 `*(T+0x90)` 的值，不调用它**。
+__attribute__((noinline))
+static void nredE3S1Probe(const void* const ctx)
+{
+    gE3S1Ctx = 0; gE3S1P5 = 0; gE3S1Clone = 0; gE3S1T90 = 0;
+    if (!nredKernelPtrOk(ctx)) { return; }
+    gE3S1Ctx = reinterpret_cast<UInt64>(ctx);
+    const UInt8* const p5 = *reinterpret_cast<const UInt8* const*>(
+        static_cast<const UInt8*>(ctx) + 0x30);
+    if (!nredKernelPtrOk(p5)) { return; }
+    gE3S1P5 = reinterpret_cast<UInt64>(p5);
+    const UInt8* const clone = *reinterpret_cast<const UInt8* const*>(p5 + 0x28);
+    if (!nredKernelPtrOk(clone)) { return; }
+    gE3S1Clone = reinterpret_cast<UInt64>(clone);
+    const UInt8* const t = *reinterpret_cast<const UInt8* const*>(clone + 0xE48);
+    if (!nredKernelPtrOk(t)) { return; }
+    gE3S1T90 = *reinterpret_cast<const UInt64*>(t + 0x90);
+}
+
 // ─── 273：client5 stage1 叶（`0x985d0`）的我方完整复刻（`-NRedGvm5D`，默认关）──────────────
 //  依据：`kb/序列数据/反汇编/证据/HWLibs全量反编译/fn/985d0.c` 与 `HWLibs_full.asm` 的
 //        `985d0..989a4` 段（逐字核对；16 步对照见交付件）。
@@ -6848,6 +6968,9 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     // ── 274：client5 stage1 入口只读探针（`-NRedGvm5Phase`，默认关；**在 D 之前**）──────────
     //  只写 BSS；不执行 D、不改返回值。`ra` 取本函数的调用者地址并归零（ra - slide）。
     if (gGvm5Phase && b == 5 && c == 1) { nredGvm5Phase(a, __builtin_return_address(0)); }
+    // 批次 P5／P4-P5：stage1 入口只读探针（`-NRedE3Probe`，默认关）。
+    //   与 `-NRedGvm5Phase` 独立：后者记 `(a, p1, ra)`，本探针记 `(ctx, P5, clone, *(T+0x90))`。
+    if (gE3Probe && b == 5 && c == 1) { nredE3S1Probe(a); }
     // ── 275：M4′ 幂等（`-NRedGvm5Early` 早期已真实成功 ⇒ powerUp 阶段不再执行 D）──────────
     //  R3a：**必须比较 p1**——两次调用的 ctx/p1 可能不是同一对象；p1 不同/非法时不得跳过
     //  （否则 powerUp 的 client5 未执行，失败仍可能落到 WindowServer）。
@@ -6967,6 +7090,14 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     }
     if (singleton().orgMode9440f == 0) { return 0; }
     const UInt32 ret = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
+    // 批次 P5／P1-P3：E3 定因只读探针（`-NRedE3Probe`，默认关）。
+    //   ⚠ 位置依据：`b==5 && c==0` 的出口只有两个——
+    //     上方 `if (gStage1 && c == 1)`（c==0 ⇒ 不进）
+    //     上方 `if ((b == 10 && c == 0) || (c >= 1) || …)`（b=5,c=0 ⇒ 不进）
+    //     本行之前 `if (orgMode9440f == 0) return 0;`（不会发生）
+    //     ⇒ **本行之后是唯一能拿到 stage0 `ret` 的地方**。
+    //   ⚠ 只写 BSS；不 deref 未验证指针；不调用任何函数指针。
+    if (gE3Probe && b == 5 && c == 0) { nredE3S0Probe(a, ret); }
     // H1 观测集 N-4（2026-10-18）：记**前三次** `(client, stage, ret)`（**零解引用**，只写标量）。
     //  ⚠️ 门控关 ⇒ 本块整段不执行（零写入、零成本）—— 本回调曾在 B25 的 double-fault 栈上
     //  （`wrapMode9440f+0x67`）⇒ 关态绝不能增加任何栈/时间开销（规格 §2.4 硬要求）。
@@ -7499,6 +7630,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1P = nredExactBootArg("-NRedSt1P");
     // 批次 P4（**默认关**）：client 8 观测护栏。关态 ⇒ `case 8` 不可达 ⇒ 逐字不变。
     gSt1G8 = checkKernelArgument("-NRedSt1G8");
+    // 批次 P5（**默认关**）：E3 定因只读探针。关态 ⇒ 两处调用都不成立 ⇒ 逐字不变。
+    gE3Probe = checkKernelArgument("-NRedE3Probe");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
     gMesReal = checkKernelArgument("-NRedMesReal");
     // 254：MES b 系列提供者（默认关）。仅构造静态描述符并挂到 +0x790；不调 0x441ad、不写 MMIO。
