@@ -211,8 +211,6 @@ static UInt64 gSt1G5Arr   = 0;   // 步 18（观测）：arr = *(blk+8)
 static UInt64 gSt1G5F70   = 0;   // 步 24：*(slot1+0x70)
 static UInt64 gSt1G5F268  = 0;   // 步 24：*(slot1+0x268)
 static UInt64 gSt1G5F2B8  = 0;   // 步 24：*(slot1+0x2b8)
-static UInt64 gSt1G5F78   = 0;   // 步 25：*(P5+0x78)
-static UInt64 gSt1G5FE0   = 0;   // 步 26：*(P5+0xE0)
 static UInt64 gSt1G5E88   = 0;   // 步 27：*(H+0xE88)
 static UInt64 gSt1G5E90   = 0;   // 步 27：*(H+0xE90)
 static UInt64 gSt1G5E98   = 0;   // 步 27：*(H+0xE98)
@@ -331,17 +329,13 @@ static bool         gGSlot = false;
 static bool         gGSlotSeen = false;
 static NRedGSlotRec gGSlotRec[6];
 static UInt64       gGSlotH = 0, gGSlotT = 0, gGSlotA = 0;
-// 263（`-NRedIpR`，默认关）：client5 的静态 IP 根/表/项（全部 BSS；不写 MMIO、不调苹果函数）。
-struct NRedIpEntry { UInt32 key; UInt32 pad; UInt64 provider; };
+static UInt32       gGSlotGolden = 0;   // 批次 P2：golden armed 位掩码（bit0=70／bit1=27／bit2=34／bit3=28）
+// 263／批次 P2（`-NRedIpR`，默认关）：client5 的 IP 根**只读**探针（不写 MMIO、不调苹果函数）。
+//  ⚠ 批次 P2／P2-1：原"静态假根"（gIpRoot/gIpProvider/gIpArr/gIpHead/gIpBlk/gIpRInit）已整块删除。
 static bool          gIpR = false;
-static bool          gIpRInit = false;
-static NRedIpEntry   gIpArr[5];   // 4 个有效键 + 1 个 key==0 哨兵（苹果扫描以 key==0 停止）
-static UInt8         gIpBlk[16];
-static UInt8         gIpHead[0x48];
-static UInt8         gIpRoot[0xF0];    // ≥ 0xE8+8：head 指针写在 +0xE8（232 十进制）
-static UInt8         gIpProvider[0x128];
 static UInt64        gIpRIp = 0;
-static UInt32        gIpRRet = 0xFF;   // 0=成功；1..6=失败跳；7=slide 为 0；8=区间重叠；0xFF=未执行
+static UInt32        gIpRRet = 0xFF;   // 批次 P2：0=只读探针成功；1..6=链上第 1..6 级非法；7=root 非法；8=iproot 非法；0xFF=未执行
+static UInt64        gIpRRoot = 0;     // 批次 P2：真实 iproot ＝ *(*(IP)+0x58)（原为 gIpRoot 我方静态）
 static UInt64 gSt1H    = 0;   // *(P7+0x28)（GC handle）
 static UInt64 gSt1Svc  = 0;   // *(handle+8)（运行期服务对象）
 static UInt64 gSt1S[9] = {0}; // svc+0x10/0x18/0x20/0x38/0x40/0x90/0x100/0x118/0x120
@@ -1024,12 +1018,10 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
                  static_cast<unsigned>(gSt1G5Verdict));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
-    n = snprintf(body + off, room, "[st1g5y] f70=%llx f268=%llx f2b8=%llx f78=%llx fe0=%llx\n",
+    n = snprintf(body + off, room, "[st1g5y] f70=%llx f268=%llx f2b8=%llx\n",
                  static_cast<unsigned long long>(gSt1G5F70),
                  static_cast<unsigned long long>(gSt1G5F268),
-                 static_cast<unsigned long long>(gSt1G5F2B8),
-                 static_cast<unsigned long long>(gSt1G5F78),
-                 static_cast<unsigned long long>(gSt1G5FE0));
+                 static_cast<unsigned long long>(gSt1G5F2B8));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
     n = snprintf(body + off, room, "[st1g5z] e88=%llx e90=%llx e98=%llx\n",
@@ -1269,15 +1261,16 @@ static void nredGvm5EStamp(char* const body, size_t& off, const size_t cap)
     }
 }
 
-// 262：`[gslot]` client5 6 槽读数（头行 h/t/a + 每槽一行；noinline、零解引用）。
+// 262：`[gslot]` client5 6 槽读数（头行 h/t/a/g + 每槽一行；noinline、零解引用）。
 __attribute__((noinline))
 static void nredGSlotStamp(char* const body, size_t& off, const size_t cap)
 {
     size_t room = cap;
-    int n = snprintf(body + off, room, "[gslot] h=%llx t=%llx a=%llx\n",
+    int n = snprintf(body + off, room, "[gslot] h=%llx t=%llx a=%llx g=%x\n",
                      static_cast<unsigned long long>(gGSlotH),
                      static_cast<unsigned long long>(gGSlotT),
-                     static_cast<unsigned long long>(gGSlotA));
+                     static_cast<unsigned long long>(gGSlotA),
+                     static_cast<unsigned>(gGSlotGolden));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
     for (unsigned k = 0; k < 6; ++k) {
@@ -1298,7 +1291,7 @@ static void nredIpRStamp(char* const body, size_t& off, const size_t cap)
 {
     const int n = snprintf(body + off, cap, "[ipr] ip=%llx root=%llx ret=%u\n",
                            static_cast<unsigned long long>(gIpRIp),
-                           static_cast<unsigned long long>(reinterpret_cast<UInt64>(gIpRoot)),
+                           static_cast<unsigned long long>(gIpRRoot),   // 批次 P2：真实 iproot
                            static_cast<unsigned>(gIpRRet));
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
@@ -5889,7 +5882,7 @@ static bool nredStage1Guard5(const void* const ctx)
     gSt1G5P20 = 0; gSt1G5P21 = 0; gSt1G5P22 = 0; gSt1G5P23 = 0;
     // 批次 P：新增中间量同样逐次清零（沿用本函数"每次重算"的既有纪律，避免跨次残留读数）。
     gSt1G5H = 0; gSt1G5Root = 0; gSt1G5Head = 0; gSt1G5Blk = 0; gSt1G5Arr = 0;
-    gSt1G5F70 = 0; gSt1G5F268 = 0; gSt1G5F2B8 = 0; gSt1G5F78 = 0; gSt1G5FE0 = 0;
+    gSt1G5F70 = 0; gSt1G5F268 = 0; gSt1G5F2B8 = 0;
     gSt1G5E88 = 0; gSt1G5E90 = 0; gSt1G5E98 = 0;
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(5, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
@@ -5951,13 +5944,13 @@ static bool nredStage1Guard5(const void* const ctx)
             }
         }
     }
-    // 19（批次 P／P-4）：叶内 0x98a28 是 `callq *0x38(%r13)`，R13 = P5（0x989bc MOV R13,RDI）
-    //   ⇒ 锚点必须是 P5，不是 ctx。
-    {
-        const UInt8* const c38 = *reinterpret_cast<const UInt8* const*>(
-            reinterpret_cast<const UInt8*>(gSt1G5P) + 0x38);
-        if (!nredKernelPtrOk(c38)) { nredStage1GfMark(5, 19); return false; }
-    }
+    // 19（批次 P2／P2-2 **已删除**）：原查 `*(P5+0x38)`。
+    //   ⚠ 该字段由**叶子自己的第 15 步**填入：`0x9880c memcpy(P5+0x30, desc+0xf0, 0xd8)`
+    //     ⇒ `P5+0x38 ← desc+0xf8`，而 `desc+0xf8` 由第 14 步的 `0x1936e` 写为 `FUN_0001965c`
+    //     （仅在 `0x1936e` 的 `return 0` 分支）。⇒ 叶子运行前必为 0，叶子跑到 `0x98a28` 时必非 0。
+    //   ⚠ 且若第 14 步失败，叶子在 `0x987e6` 提前返回 ⇒ `0x98a28` 不执行。
+    //   ⇒ 该判据既过严（拦掉合法首次调用）又冗余（真实路径上不可能为 0）。
+    //   ⇒ 步号 19 保留为空号，不重编号（历史读数可比）。
     // 20-23（批次 P／P-4）：叶内 0x989fd 是 `mov (%rdi),%rax`，rdi = P5（0x989bc）
     //   ⇒ p = *(P5) = ctx（不是 *(ctx) = h8）。逐级复刻并分别编号，便于用 [st1gf] 定位哪一级为空。
     {
@@ -5999,30 +5992,26 @@ static bool nredStage1Guard5(const void* const ctx)
         const UInt64 f268 = *reinterpret_cast<const UInt64*>(s1 + 0x268);
         const UInt64 f2b8 = *reinterpret_cast<const UInt64*>(s1 + 0x2b8);
         gSt1G5F70 = f70; gSt1G5F268 = f268; gSt1G5F2B8 = f2b8;
-        if (f70  != 0 && !nredTextPrologue(f70))  { nredStage1GfMark(5, 24); return false; }
-        if (f268 != 0 && !nredTextPrologue(f268)) { nredStage1GfMark(5, 24); return false; }
-        // f2b8 **无条件**：叶 0x988fa MOV R12,[RAX+0x2b8] → 0x9894f CALL R12，
-        //   中间（0x98901-0x9894c）只做缓冲区清零与两次判空（*(P5+0x28)、*(P5+0x78)），
-        //   **不判 R12** ⇒ f2b8==0 时叶子会 call *0（trap）⇒ 为 0 也必须失败。
-        //   （nredTextPrologue(0) 本身返回 false，故这一行同时覆盖"为 0"与"非入口"。）
-        if (!nredTextPrologue(f2b8)) { nredStage1GfMark(5, 24); return false; }
+        // 批次 P2／P2-2b：`-NRedQp` 开 ⇒ 叶子在第 14 步被截断 ⇒ 步 15 及之后不执行
+        //   ⇒ 这三个指针**永不被叶子使用** ⇒ 只观测、不 fail-closed。
+        //   Q′ 关 ⇒ 叶子本就不放行（`case 5` 的 `ok = (gQp && gQpArmed) ? v : false`）
+        //   ⇒ 此处仍强制，以保留真信号。
+        if (!gQp) {
+            if (f70  != 0 && !nredTextPrologue(f70))  { nredStage1GfMark(5, 24); return false; }
+            if (f268 != 0 && !nredTextPrologue(f268)) { nredStage1GfMark(5, 24); return false; }
+            // f2b8 **无条件**：叶 0x988fa MOV R12,[RAX+0x2b8] → 0x9894f CALL R12，
+            //   中间（0x98901-0x9894c）只做缓冲区清零与两次判空（*(P5+0x28)、*(P5+0x78)），
+            //   **不判 R12** ⇒ f2b8==0 时叶子会 call *0（trap）⇒ 为 0 也必须失败。
+            //   （nredTextPrologue(0) 本身返回 false，故这一行同时覆盖"为 0"与"非入口"。）
+            if (!nredTextPrologue(f2b8)) { nredStage1GfMark(5, 24); return false; }
+        }
     }
-    // 25（批次 P 新增）：叶 0x98925 MOV RAX,[R14+0x78] → 0x98932 CALL RAX。
-    //   叶子自带判空（0x98929 TEST RAX,RAX ; 0x9892c JZ 0x98959 走断言通道）
-    //   ⇒ 为 0 合法，非 0 才需是 __text 入口。
-    {
-        const UInt64 f78 = *reinterpret_cast<const UInt64*>(p5 + 0x78);
-        gSt1G5F78 = f78;
-        if (f78 != 0 && !nredTextPrologue(f78)) { nredStage1GfMark(5, 25); return false; }
-    }
-    // 26（批次 P 新增）：叶 0x988b2 MOV RAX,[R14+0xE0] → 0x988c2 CALL RAX。
-    //   同样自带判空（0x988b9 TEST RAX,RAX ; 0x988bc JZ 0x988cc）。
-    {
-        const UInt64 fE0 = *reinterpret_cast<const UInt64*>(p5 + 0xE0);
-        gSt1G5FE0 = fE0;
-        if (fE0 != 0 && !nredTextPrologue(fE0)) { nredStage1GfMark(5, 26); return false; }
-    }
-    // 27（批次 P 新增，**必须**）：0x1aef4/0x1dde1/0x3d1b5 的首句直接读
+    // 25／26（批次 P2／P2-2 **已删除**）：原查 `*(P5+0x78)`／`*(P5+0xE0)`。
+    //   ⚠ 与步 19 同源：两者都由叶第 15 步的 memcpy 填入
+    //     （`P5+0x78 ← desc+0x138`＝`&LAB_000197ee`；`P5+0xE0 ← desc+0x1a0`＝`FUN_000199ac`）
+    //     ⇒ 叶子运行前必为 0 ⇒ 假前置。
+    //   ⇒ 步号 25／26 保留为空号。
+    // 27（批次 P 新增；批次 P2 起：Q′ 关时强制、Q′ 开时只观测）：0x1aef4/0x1dde1/0x3d1b5 的首句直接读
     //   *(H+0xE90)+8 / *(H+0xE88)+8 / *(H+0xE98)+8，**不判空**
     //   （0x1af08 MOV RAX,[RDI+0xe90] ; 0x1af0f MOV EAX,[RAX+0x8]；
     //     0x1ddf8 MOV R13,[RDI+0xe88]；0x3d1c9 MOV RAX,[RDI+0xe98] ; 0x3d1d0 MOV EAX,[RAX+0x8]）
@@ -6033,10 +6022,15 @@ static bool nredStage1Guard5(const void* const ctx)
         const UInt64 e90 = *reinterpret_cast<const UInt64*>(H + 0xE90);
         const UInt64 e98 = *reinterpret_cast<const UInt64*>(H + 0xE98);
         gSt1G5E88 = e88; gSt1G5E90 = e90; gSt1G5E98 = e98;
-        if (!nredKernelPtrOk(reinterpret_cast<const void*>(e88)) ||
-            !nredKernelPtrOk(reinterpret_cast<const void*>(e90)) ||
-            !nredKernelPtrOk(reinterpret_cast<const void*>(e98))) {
-            nredStage1GfMark(5, 27); return false;
+        // 批次 P2／P2-2b：`-NRedQp` 开 ⇒ 第 14 步被截断 ⇒ 0x1aef4/0x1dde1/0x3d1b5
+        //   三个分派器**不执行** ⇒ 这三个字段永不被使用 ⇒ 只观测。
+        //   （本机是否非空未测：R278 U1；若为 0 而此处仍强制，会白废一轮 Q′。）
+        if (!gQp) {
+            if (!nredKernelPtrOk(reinterpret_cast<const void*>(e88)) ||
+                !nredKernelPtrOk(reinterpret_cast<const void*>(e90)) ||
+                !nredKernelPtrOk(reinterpret_cast<const void*>(e98))) {
+                nredStage1GfMark(5, 27); return false;
+            }
         }
     }
     return true;
@@ -6270,7 +6264,7 @@ static void nredStage1PRecord(const void* const ctx)
 // ─── 261：client5 GVM provider type / 注册表探针（`-NRedGvm5`，默认关；只读一次）──────────
 //  链：ctx → P5 → H=*(P5+0x28) → T=*(H+0xE48) → A=*(T+0x08)；逐级 KPtr。
 //  reg 复刻 0xa31f6（不调用 0x8b8e7）：
-//    IP=*(A)；iproot=*(IP+0x58)（＝0x8b8e7(A) 的语义）；
+//    IP=*(A)；iproot=*(*(IP)+0x58)（＝0x8b8e7(IP)）；
 //    head=*(void**)(iproot+232) → blk=*(void**)(head+64) → arr=*(void**)(blk+8)；
 //    固定最多 82 项（0xa3228: rdx=8..0x518 步长 16），键=*(u32*)(arr+i*16)；
 //    键==0 ⇒ 停止（未命中）；键==type ⇒ 命中。
@@ -6292,12 +6286,20 @@ static void nredGvm5Probe(const void* const ctx)
     gGvm5Type = *reinterpret_cast<const UInt32*>(q);
     gGvm5A0 = *reinterpret_cast<const UInt64*>(q);
     gGvm5A58 = *reinterpret_cast<const UInt64*>(q + 0x58);
-    q = reinterpret_cast<const UInt8*>(gGvm5A0);                   // IP=*(A)
+    q = reinterpret_cast<const UInt8*>(gGvm5A0);                   // IP=*(A)（＝h8）
     if (q == nullptr) { gGvm5Reg = 0; return; }
     if (!nredKernelPtrOk(q)) { return; }
-    q = *reinterpret_cast<const UInt8* const*>(q + 0x58);          // iproot=*(IP+0x58)
-    if (q == nullptr) { gGvm5Reg = 0; return; }
-    if (!nredKernelPtrOk(q)) { return; }
+    // 批次 P2／P2-3：iproot = *(*(IP)+0x58)（＝0x8b8e7(IP)），与护栏步 14 统一。
+    //   ⚠ 原写法 `*(IP+0x58)` 是**越界读**：IP 是 8 B 句柄（0x8b5de 经 0x90ddc(…,8,…)），
+    //     `+0x58` 在对象外 88 B。r271 实测读到 `ffffff801155cc00`（内核镜像区）；
+    //     r278 读到 `ffffff800f55fda0`——那是 `nredIpRInstall` 越界写进去的 `&gIpRoot`（自证伪）。
+    {
+        const UInt8* const root = *reinterpret_cast<const UInt8* const*>(q);   // root=*(IP)
+        if (!nredKernelPtrOk(root)) { return; }
+        q = *reinterpret_cast<const UInt8* const*>(root + 0x58);   // iproot=*(root+0x58)
+        if (q == nullptr) { gGvm5Reg = 0; return; }
+        if (!nredKernelPtrOk(q)) { return; }
+    }
     gGvm5Iproot = reinterpret_cast<UInt64>(q);
     q = *reinterpret_cast<const UInt8* const*>(q + 232);           // head
     if (!nredKernelPtrOk(q)) { return; }
@@ -6349,65 +6351,55 @@ static void nredGSlotProbe(const void* const ctx)
         if (cap > 1) { gGSlotRec[k].b1 = *reinterpret_cast<const UInt32*>(q + 8 + k * 0x260 + 0x30); }
         if (cap > 2) { gGSlotRec[k].b2 = *reinterpret_cast<const UInt32*>(q + 8 + k * 0x260 + 0x34); }
     }
-}
-
-
-// ─── 263：client5 的 IP 根静态提供者（`-NRedIpR`，默认关）─────────────────────────────
-//  契约：IP=*(A)；IPR=*(IP+0x58)；head=*(IPR+232)；C=*(head+64)；arr=*(C+8)；
-//  项 16B {u32 key, u32 pad, u64 provider}，key==0 停止。本实现把 IP+0x58 指向
-//  静态 gIpRoot，其 +0xE8（232 十进制）→ gIpHead → +0x40 → gIpBlk → +8 → gIpArr(4 项+哨兵)；
-//  provider 槽只填真实函数地址（slide+0x91F32/0x91EE8/0x12280/0x124F0）。
-__attribute__((noinline))
-static bool nredIpRInit(void)
-{
-    if (gIpRInit) { return true; }
-    if (gHwlibsSlide == 0) { return false; }
-    static const UInt32 kKeys[4] = {70, 27, 34, 28};
-    const UInt64 prov = reinterpret_cast<UInt64>(gIpProvider);
-    for (unsigned i = 0; i < 4; ++i) {
-        gIpArr[i].key = kKeys[i];
-        gIpArr[i].pad = 0;
-        gIpArr[i].provider = prov;
+    // 批次 P2／P2-4：golden armed 位掩码。`0x18f7c` 依次查 type 70／27／34／28（W3 §2）；
+    //   四位全置 ⇒ golden 路径已 armed（`0x18f7c` 一定会进 MMIO 循环）。
+    //   纯 BSS 计算，零解引用。
+    {
+        static const UInt32 kGolden[4] = {70, 27, 34, 28};
+        UInt32 mask = 0;
+        for (unsigned g = 0; g < 4; ++g) {
+            for (unsigned k = 0; k < 6; ++k) {
+                if (gGSlotRec[k].type == kGolden[g]) { mask |= (1U << g); break; }
+            }
+        }
+        gGSlotGolden = mask;
     }
-    gIpArr[4].key = 0;          // 哨兵：苹果扫描遇到 key==0 停止
-    gIpArr[4].pad = 0;
-    gIpArr[4].provider = 0;
-    *reinterpret_cast<UInt64*>(gIpProvider + 0x38) = gHwlibsSlide + 0x91F32;
-    *reinterpret_cast<UInt64*>(gIpProvider + 0x40) = gHwlibsSlide + 0x91EE8;
-    *reinterpret_cast<UInt64*>(gIpProvider + 0x78) = gHwlibsSlide + 0x12280;
-    *reinterpret_cast<UInt64*>(gIpProvider + 0x90) = gHwlibsSlide + 0x124F0;
-    *reinterpret_cast<UInt64*>(gIpBlk + 8) = reinterpret_cast<UInt64>(gIpArr);
-    *reinterpret_cast<UInt64*>(gIpHead + 0x40) = reinterpret_cast<UInt64>(gIpBlk);
-    const UInt64 head = reinterpret_cast<UInt64>(gIpHead);
-    __builtin_memcpy(gIpRoot + 0xE8, &head, sizeof(head));   // 契约偏移 232 十进制＝0xE8
-    gIpRInit = true;
-    return true;
 }
 
+// ─── 263／批次 P2：client5 的 IP 根**只读**探针（`-NRedIpR`，默认关）────────────────────
+//  链：ctx → P5=*(ctx+0x30) → H=*(P5+0x28) → T=*(H+0xE48) → A=*(T+8) → IP=*(A)（＝h8）
+//      → root=*(IP) → iproot=*(root+0x58)（＝0x8b8e7(IP)）
+//  ⚠ 批次 P2／P2-1：**已删除**原 `*(q+0x58) = &gIpRoot` 写入。理由：
+//     q ＝ IP ＝ h8 是 `0x8b5de` 经 `0x90ddc(…, 8, …)` 分配的 **8 B 句柄**，
+//     `+0x58` 在对象外 88 B ⇒ 越界写，覆盖相邻分配（与方案 C 同类，W2 §6.3 已判必须撤回）。
+//     r278 实测 `[ipr] ret=0` ⇒ 该写已真实发生。
+//  ⚠ 批次 P2／P2-3：iproot 表达式从 `*(IP+0x58)`（越界读）改为 `*(*(IP)+0x58)`，
+//     与批次 P 修正后的护栏步 14 统一。
+//  ⚠ 本函数**不写任何内存**（除自身 BSS）。
 __attribute__((noinline))
 static void nredIpRInstall(const void* const ctx)
 {
     gIpRIp = 0;
+    gIpRRoot = 0;
     gIpRRet = 0xFF;
     if (!nredKernelPtrOk(ctx)) { gIpRRet = 1; return; }
-    UInt8* q = *reinterpret_cast<UInt8* const*>(const_cast<UInt8*>(static_cast<const UInt8*>(ctx)) + 0x30);
+    const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
     if (!nredKernelPtrOk(q)) { gIpRRet = 2; return; }
-    q = *reinterpret_cast<UInt8* const*>(q + 0x28);                // H
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x28);          // H
     if (!nredKernelPtrOk(q)) { gIpRRet = 3; return; }
-    q = *reinterpret_cast<UInt8* const*>(q + 0xE48);               // T
+    q = *reinterpret_cast<const UInt8* const*>(q + 0xE48);         // T
     if (!nredKernelPtrOk(q)) { gIpRRet = 4; return; }
-    q = *reinterpret_cast<UInt8* const*>(q + 0x08);                // A
+    q = *reinterpret_cast<const UInt8* const*>(q + 0x08);          // A
     if (!nredKernelPtrOk(q)) { gIpRRet = 5; return; }
-    q = *reinterpret_cast<UInt8* const*>(q);                       // IP=*(A)
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // IP=*(A)（＝h8）
     if (!nredKernelPtrOk(q)) { gIpRRet = 6; return; }
     gIpRIp = reinterpret_cast<UInt64>(q);
-    if (!nredIpRInit()) { gIpRRet = 7; return; }
-    const UInt64 ip = gIpRIp;
-    const UInt64 root = reinterpret_cast<UInt64>(gIpRoot);
-    const UInt64 rootEnd = root + sizeof(gIpRoot);
-    if (ip + 0x60 > root && ip < rootEnd) { gIpRRet = 8; return; }   // 与静态区重叠 ⇒ 不写
-    *reinterpret_cast<UInt64*>(q + 0x58) = root;
-    gIpRRet = 0;
+    const UInt8* const root = *reinterpret_cast<const UInt8* const*>(q);   // root=*(IP)
+    if (!nredKernelPtrOk(root)) { gIpRRet = 7; return; }
+    const UInt8* const iproot = *reinterpret_cast<const UInt8* const*>(root + 0x58);
+    if (!nredKernelPtrOk(iproot)) { gIpRRet = 8; return; }
+    gIpRRoot = reinterpret_cast<UInt64>(iproot);
+    gIpRRet = 0;   // 只读探针成功（批次 P2 起不再表示"写入成功"）
 }
 
 // ─── 265：client5 的 qq 对象四字段探针（`-NRedSt1Q`，默认关；只读一次）──────────────────
