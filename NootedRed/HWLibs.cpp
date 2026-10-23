@@ -281,6 +281,8 @@ static bool   gGvm5EarlyPowerSeen = false;  // powerUp 阶段是否已到过 b==
 static UInt32 gGvm5EarlyPowerIdem = 0;   // 1=p1 相同已跳过；0=p1 不同/非法未跳过
 static UInt64 gGvm5EarlyPowerP1 = 0;     // powerUp 阶段的 p1now（idem=0 时观测）
 static UInt32 gGvm5EarlyPowerPanic = 0;  // 1=late path D 失败已 panic（观测 `panic=1`）
+// 277：late path panic 文本缓冲（BSS，≤200 B；panic 前用 snprintf 填入读数）。
+static char   gGvm5PanicBuf[200];
 struct NRedGvm5DBlocks {
     UInt8 desc[0x1c8];   // local_2a8：描述块（首 u32=0x1c8；+0xf0 起 0xd8 字节为待拷贝视图）
     UInt8 clk[0x68];     // local_d0：时钟/能力位块（首 u32=0x68；+4 为位域）
@@ -6561,32 +6563,18 @@ void nredGvm5PhMark(int phase)
 // 276：相位开关查询（供 X5000/X6000FB 的 wrapper 入口做显式守卫；gGvm5Phase 是本 TU 的 static）。
 int nredGvm5PhaseEnabled(void) { return gGvm5Phase ? 1 : 0; }
 
-// ─── 275：M4′ 早期注入入口（`-NRedGvm5Early`，默认关；依赖 `-NRedGvm5D`）────────────────────
-//  由 `X5000::wrapInitializeTtl` 在 `orgTtl` **之前**调用（kernel_task 上下文）。
-//  返回：-1=未启用/不干预（继续原路径）；0=早期真实失败（**调用方必须 panic**）；
-//        1=早期真实成功（已置 `gGvm5EarlyOk` 并缓存 rc；调用方继续调 orgTtl）。
-//  ⚠ 本函数**不 panic**（panic 在调用方，便于反汇编验收"失败分支存在 panic 调用"）。
-//  ⚠ `d=nullptr`：`nredGvm5Stage1` 内部 `(void)d`，不使用 out（苹果叶同样只用 `param_1`）。
+// ─── 275／277：早期注入入口（**已废止**；保留函数与 X5000 调用点，避免大改）──────────────────
+//  第 276 判读：`wrapInitializeTtl` 入口的 `self+0x50` **不是 client5 的 ctx**（真正的 ctx 是
+//  `*(AMDRTHardware+0x338)+0x50`，且 client5 的 slot-4 对象在 `ttl_initialize` 内部、紧邻
+//  `0x928f4` 之前才创建）⇒ **入口注入结构性失败**，不能用。
+//  同一判读确认：`wrapMode9440f` 的 client5 stage1 调用本就在 start 相位/kernel_task、ctx 正确
+//  ⇒ M4′ 不需要入口注入，只需保留 late-path panic（见 `wrapMode9440f`）。
+//  ⇒ 本函数**恒返回 -1**（不执行 D、不 panic、不干预）；`-NRedGvm5Early` 现在只表示
+//    "D 失败即 panic（late path）"。
 int nredGvm5EarlyInject(void* const self)
 {
-    if (!gGvm5Early || !gGvm5D) { return -1; }
-    gGvm5EarlyStartRc = 0;
-    gGvm5EarlyOk = 0;
-    gGvm5EarlyRc = 0;
-    gGvm5EarlyP1 = 0;
-    if (!nredKernelPtrOk(self)) { return 0; }
-    const UInt64 ctx = reinterpret_cast<UInt64>(self) + 0x50;
-    if (!nredKernelPtrOk(reinterpret_cast<const void*>(ctx))) { return 0; }
-    // R3a：缓存本次 p1（幂等跳过前必须与 powerUp 的 p1 比较）
-    const UInt64 p1 = *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(ctx) + 0x30);
-    if (!nredKernelPtrOk(reinterpret_cast<const void*>(p1))) { return 0; }
-    const UInt32 rc = nredGvm5Stage1(reinterpret_cast<void*>(ctx), nullptr);
-    gGvm5EarlyStartRc = static_cast<SInt32>(rc);
-    if (rc == 0) { return 0; }
-    gGvm5EarlyOk = 1;
-    gGvm5EarlyRc = rc;
-    gGvm5EarlyP1 = p1;
-    return 1;
+    (void)self;
+    return -1;
 }
 
 UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c, void* const d)
@@ -6626,7 +6614,13 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
             gGvm5EarlyPowerIdem = 0;
             gGvm5EarlyPowerRc = 0;
             gGvm5EarlyPowerPanic = 1;
-            panic("NRed: gvm5 client5 stage1 failed (late path)");
+            // 277：panic 文本带 D 读数（为下一轮定因）；缓冲在 BSS（≤200 B）。
+            const int pn = snprintf(gGvm5PanicBuf, sizeof(gGvm5PanicBuf),
+                "NRed: gvm5 client5 stage1 failed (late path) ret=%d step=%u p1=%llx local68=%x startRc=%d",
+                static_cast<int>(gGvm5DRet), static_cast<unsigned>(gGvm5DStep),
+                static_cast<unsigned long long>(gGvm5DP1), static_cast<unsigned>(gGvm5DLocal68),
+                static_cast<int>(gGvm5EarlyStartRc));
+            panic("%s", (pn > 0) ? gGvm5PanicBuf : "NRed: gvm5 client5 stage1 failed (late path)");
         }
         return rc;
     }
