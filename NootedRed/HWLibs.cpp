@@ -311,6 +311,23 @@ static const UInt32 kP7Limit = 4096;            // 硬上限（项）
 static UInt64 gP7Chain[11] = {0};   // [0]=ctx [1]=p5 [2]=clone [3]=T [4]=pair
                                     // [5]=device [6]=p [7]=q [8]=r [9]=s [10]=t
 static UInt32 gP7Level = 0;         // 0=无失败；1..11=首个失败级
+// ─── 批次 P8：iproot/head 根因只读探针（`-NRedP8Probe`，默认关）──────────────────────────
+//  P1/P2：查找表首项与 value base（kext 段内偏移，运行时加 gHwlibsSlide）。
+//  P4：0xa25de 入口参数（device,key0,key1,key2）。
+//  P5：0x8b5de 输入 0x130 B 的前 0x40 B（复用 wrapTtlCollect）。
+//  ⚠ 不调用任何函数指针；不写非 BSS；观测行 ≤191 B、放头部区。
+//  ⚠ 偏移以反汇编为准（实施文档写的 0xdf8180/0xdf9008 是 RIP 位移，不是目标地址）：
+//     `a2695 leaq 0x3d5ae4(%rip)` → **0x478180**（__const）；`a26f6 addq 0x3d290b(%rip)` → **0x475008**（__got）。
+static bool   gP8On = false;                 // `-NRedP8Probe`（默认关）
+static UInt64 gP8Tbl = 0;                    // P1：[gHwlibsSlide+0x478180]
+static UInt64 gP8Vb  = 0;                    // P2：*(gHwlibsSlide+0x475008)
+static UInt64 gP8Dev = 0;                    // P4：0xa25de 的 rdi
+static UInt64 gP8Key[3] = {0,0,0};           // P4：0xa25de 的 rsi/rdx/rcx
+static UInt8  gP8In[0x40] = {0};             // P5：0x8b5de 输入前 0x40 B
+static UInt32 gP8InOk = 0;                   // P5：1＝已采
+// 0xa25de 前 16 B（resolveProbe 的 expected-offset 校验用）
+static const UInt8 kP8HeadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                                       0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x49, 0x89};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -1233,6 +1250,28 @@ static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
                      static_cast<unsigned long long>(gP7Chain[8]),
                      static_cast<unsigned long long>(gP7Chain[9]),
                      static_cast<unsigned long long>(gP7Chain[10]));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
+    // 批次 P8：iproot/head 根因读数（仅 -NRedP8Probe；关态一字不变）
+    if (gP8On) {
+        n = snprintf(body + off, room, "[p8a] tbl=%llx vb=%llx\n",
+                     static_cast<unsigned long long>(gP8Tbl),
+                     static_cast<unsigned long long>(gP8Vb));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+        n = snprintf(body + off, room, "[p8b] dev=%llx k0=%llx k1=%llx k2=%llx\n",
+                     static_cast<unsigned long long>(gP8Dev),
+                     static_cast<unsigned long long>(gP8Key[0]),
+                     static_cast<unsigned long long>(gP8Key[1]),
+                     static_cast<unsigned long long>(gP8Key[2]));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+        // hex 缓冲用 static（避免给 nredE3Stamp 再加 129 B 栈；与本文件既有 `static char grdLine[80]` 同型）
+        static char hex[0x40 * 2 + 1];
+        for (unsigned k = 0; k < 0x40; ++k) { snprintf(hex + k * 2, 3, "%02x", gP8In[k]); }
+        n = snprintf(body + off, room, "[p8c] ok=%u in=%s\n",
+                     static_cast<unsigned>(gP8InOk), hex);
         if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                      off += d; room -= d; }
     }
@@ -2972,6 +3011,12 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
 {
     if (singleton().orgTtlCollect == 0) { return nullptr; }
     void* const ret = FunctionCast(wrapTtlCollect, singleton().orgTtlCollect)(ctx);
+    // 批次 P8／P5：记录 0x8b5de 的输入前 0x40 B（只读；gP8On 关 ⇒ 零行为）
+    if (gP8On && nredKernelPtrOk(ctx)) {
+        const UInt8* const p = static_cast<const UInt8*>(ctx);
+        for (unsigned k = 0; k < 0x40; ++k) { gP8In[k] = p[k]; }
+        gP8InOk = 1;
+    }
     if (checkKernelArgument("-NRedAccelLog")) {
         NRED_TRACE("ttl-coll: ctx=%llx ret=%llx (NULL would fail 0x8b10e)",
                static_cast<unsigned long long>(reinterpret_cast<UInt64>(ctx)),
@@ -3032,6 +3077,17 @@ void* X5000HWLibs::wrapTtlCollect(void* const ctx)
         }
     }
     return ret;
+}
+
+// ─── 批次 P8：0xa25de 只读 hook（记录 device/key0/key1/key2；原样透传返回值）──────────────
+UInt8 X5000HWLibs::wrapP8Head(void* const a, UInt64 b, UInt64 c, UInt64 d)
+{
+    if (gP8On) {
+        gP8Dev = reinterpret_cast<UInt64>(a);
+        gP8Key[0] = b; gP8Key[1] = c; gP8Key[2] = d;
+    }
+    if (singleton().orgP8Head == 0) { return 0; }
+    return FunctionCast(wrapP8Head, singleton().orgP8Head)(a, b, c, d);
 }
 
 void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
@@ -7048,6 +7104,18 @@ static void nredP7Probe(const void* const ctx)
     }
 }
 
+// ─── 批次 P8：P1/P2 只读探针（stage1 入口；零 MMIO、零函数指针）──────────────────────────
+static void nredP8Probe(const void* const ctx)
+{
+    (void)ctx;
+    gP8Tbl = 0; gP8Vb = 0;
+    if (gHwlibsSlide == 0) { return; }
+    const UInt8* const tbl = reinterpret_cast<const UInt8*>(gHwlibsSlide + 0x478180);
+    const UInt8* const vb  = reinterpret_cast<const UInt8*>(gHwlibsSlide + 0x475008);
+    if (nredKernelPtrOk(tbl)) { gP8Tbl = *reinterpret_cast<const UInt64*>(tbl); }
+    if (nredKernelPtrOk(vb))  { gP8Vb  = *reinterpret_cast<const UInt64*>(vb); }
+}
+
 // ─── 273：client5 stage1 叶（`0x985d0`）的我方完整复刻（`-NRedGvm5D`，默认关）──────────────
 //  依据：`kb/序列数据/反汇编/证据/HWLibs全量反编译/fn/985d0.c` 与 `HWLibs_full.asm` 的
 //        `985d0..989a4` 段（逐字核对；16 步对照见交付件）。
@@ -7294,6 +7362,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //   与 `-NRedGvm5Phase` 独立：后者记 `(a, p1, ra)`，本探针记 `(ctx, P5, clone, *(T+0x90))`。
     if (gE3Probe && b == 5 && c == 1) { nredE3S1Probe(a); }
     if (gP7On && b == 5 && c == 1) { nredP7Probe(a); }   // P7：golden 表有界性只读探针
+    if (gP8On && b == 5 && c == 1) { nredP8Probe(a); }   // P8：P1/P2 只读探针
     // ── 275：M4′ 幂等（`-NRedGvm5Early` 早期已真实成功 ⇒ powerUp 阶段不再执行 D）──────────
     //  R3a：**必须比较 p1**——两次调用的 ctx/p1 可能不是同一对象；p1 不同/非法时不得跳过
     //  （否则 powerUp 的 client5 未执行，失败仍可能落到 WindowServer）。
@@ -7886,6 +7955,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gGvmSwInstall  = checkKernelArgument("-NRedGvmSwInstall");
     gP6On          = checkKernelArgument("-NRedP6Obj");   // P6：四字段对象构造（默认关）
     gP7On          = checkKernelArgument("-NRedP7Probe");   // P7：golden 表有界性（默认关）
+    gP8On          = checkKernelArgument("-NRedP8Probe");   // P8：iproot/head 根因（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
     //  ⚠ **放行开关语义**（R70 §3／需求 R3）：本开关**保留**，但语义改为"**仅当全部步骤均达可用层**时，
     //    才允许把成功报给苹果"⇒ 当前（A8 未达可用层、失败位恒非 0）它**单独无法导致成功**。
@@ -8251,6 +8321,15 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("ttl-coll", kTtlInitCollectPattern, nullptr,
                                            arrsize(kTtlInitCollectPattern), 0x8B5DE)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapTtlCollect, this->orgTtlCollect}, "ttl-coll");
+        }
+        // 批次 P8：0xa25de 入口只读 hook（记录 device/key0/key1/key2；原样透传）。
+        //   ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        if (gP8On) {
+            if (const auto from = resolveProbe("p8-head", kP8HeadPattern, nullptr,
+                                               arrsize(kP8HeadPattern), 0xA25DE)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapP8Head, this->orgP8Head},
+                          "p8-head");
+            }
         }
         if (const auto from = resolveProbe("ttl-allocA", kTtlInitAllocAPattern, kTtlInitAllocAPatternMask,
                                            arrsize(kTtlInitAllocAPattern), 0x93880)) {
