@@ -8058,21 +8058,21 @@ static UInt32 nredM1Run(void* const H, void* const clk, void* const desc)
             const UInt32 cm = 0xFFFFFFFCU, cv = cur & cm;
             if (apply(kM1OffL2Cntl2, cm, cv, wr, 8) == 3) { gM1Step[3] = 2; return 1; }
         }
-        // U3：本机 translate_further=1（BANK_SELECT=12）⇒ 只跳过 CNTL3（值未知，避免破坏现有配置）；
-        //     CNTL4／CNTL5 与 translate_further 无关，照常写。
-        const bool tf1 = (gM1Probe[5] & 0x3FU) == 12U;
-        if (!tf1) {
+        // U3：本机 translate_further=1（BANK_SELECT=12）⇒ 不写 CNTL3（值未知，避免破坏现有配置）。
+        if ((gM1Probe[5] & 0x3FU) == 12U) {
+            gM1Step[3] = 4;
+        } else {
             if (apply(kM1OffL2Cntl3, 0xFFFFFFFFU, 0x80130009U, 0x80130009U, 9) == 3) {
                 gM1Step[3] = 2; return 1;
             }
+            if (apply(kM1OffL2Cntl4, 0xFFFFFFFFU, 0x000000C1U, 0x000000C1U, 10) == 3) {
+                gM1Step[3] = 2; return 1;
+            }
+            if (apply(kM1OffL2Cntl5, 0xFFFFFFFFU, 0x00003FE0U, 0x00003FE0U, 11) == 3) {
+                gM1Step[3] = 2; return 1;
+            }
+            gM1Step[3] = 1;
         }
-        if (apply(kM1OffL2Cntl4, 0xFFFFFFFFU, 0x000000C1U, 0x000000C1U, 10) == 3) {
-            gM1Step[3] = 2; return 1;
-        }
-        if (apply(kM1OffL2Cntl5, 0xFFFFFFFFU, 0x00003FE0U, 0x00003FE0U, 11) == 3) {
-            gM1Step[3] = 2; return 1;
-        }
-        gM1Step[3] = tf1 ? 4 : 1;
     }
     // S6：关 identity aperture（6 常量写）
     {
