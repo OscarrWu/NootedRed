@@ -232,6 +232,33 @@ static UInt32 gQpA50    = 0;       // clk+0x50：0x90da8()（恒 0x1000）
 static UInt64 gQpA58    = 0;       // clk+0x58：0x94ff7(ctx) + 0xa2b51(h8)
 static UInt32 gQpL68    = 0;       // local_68（ZFB mode；由 clk+0x68 派生）
 static UInt8  gQpL68Ok  = 0;       // 派生自证是否成立（0＝不读，1＝已读）
+// ─── 批次 M1：GVM 初始化（仅初始化，返非 0；叶不进 14–22 步）──────────────────────────────────
+//  接缝：0x1936e 函数入口（与 Q′ 同一 hook 点）；M1 开时优先于 Q′ 截断。
+//  ⚠ 关态：不注册 hook、零 BSS 写、零日志 ⇒ 与 HEAD 逐字一致。
+static bool   gM1On       = false;   // `-NRedGvmM1`（默认关）
+static bool   gM1Write    = false;   // `-NRedGvmM1Write`（写授权；默认关）
+static bool   gM1Cleanup  = false;   // `-NRedGvmM1Cleanup`（调 0x19a56；默认关）
+static bool   gM1Armed    = false;   // hook 是否真的注册成功
+static UInt32 gM1N        = 0;       // 进入次数
+static UInt32 gM1Err      = 0;       // 入口错误码（0=无 1=入参 2=未武装 3=slide）
+static UInt32 gM1Gate     = 0;       // G1..G6 位掩码（bit0=G1 … bit5=G6）
+static UInt32 gM1SlotType = 0;       // 命中的槽 type
+static UInt32 gM1Base     = 0;       // base[0][1]（dword）
+static UInt64 gM1FbStart  = 0;
+static UInt64 gM1FbEnd    = 0;
+static UInt32 gM1Step[11] = {0};     // s1..s11：0=skip 1=ok 2=fail 3=rbmiss 4=blocked 5=same
+static UInt32 gM1Writes   = 0;       // 实际写次数
+static UInt32 gM1Same     = 0;       // Compare 命中（未写）
+static UInt32 gM1RbOk     = 0;       // 读回相符
+static UInt32 gM1Bad      = 0;       // 读回不符
+static UInt32 gM1FirstIdx = 0xFFFFFFFFU;
+static UInt32 gM1FirstAddr= 0, gM1FirstExp = 0, gM1FirstGot = 0;
+static UInt32 gM1Probe[25] = {0};    // P1..P25
+static UInt32 gM1ProbeBad = 0xFFFFFFFFU;  // 首个 0xFFFFFFFF 的编号（1-based）
+static UInt32 gM1Diff     = 0;       // 只读轮的差异项数
+static UInt32 gM1DiffIdx  = 0xFFFFFFFFU;
+static UInt32 gM1DiffAddr = 0, gM1DiffExp = 0, gM1DiffGot = 0;
+static UInt32 gM1CleanupDone = 0;
 // （265 的开关/ 观测变量见下方 gSt1Q 组）
 // 268（`-NRedQqProbe` / `-NRedQqHdl`，默认关）：client5 的 qq 句柄层（B1）。
 //  qq 实测是 0x8b969 构造的 0x228 表（q10==qq），而 0x8b4bf 期望 8B 句柄（*h=表）
@@ -1164,6 +1191,50 @@ static void nredQpStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
 }
+// 批次 M1：GVM 初始化读数（四行，各 ≤191 B；只读 BSS 标量，零解引用）
+__attribute__((noinline))
+static void nredM1Stamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room,
+                     "[m1] n=%u arm=%u err=%u gate=%02x slot=%x base=%x fb=%llx-%llx cl=%u\n",
+                     static_cast<unsigned>(gM1N),
+                     static_cast<unsigned>(gM1Armed ? 1U : 0U),
+                     static_cast<unsigned>(gM1Err),
+                     static_cast<unsigned>(gM1Gate),
+                     static_cast<unsigned>(gM1SlotType),
+                     static_cast<unsigned>(gM1Base),
+                     static_cast<unsigned long long>(gM1FbStart),
+                     static_cast<unsigned long long>(gM1FbEnd),
+                     static_cast<unsigned>(gM1CleanupDone));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room,
+                 "[m1s] s1=%u s2=%u s3=%u s4=%u s5=%u s6=%u s7=%u s8=%u s9=%u s10=%u s11=%u\n",
+                 static_cast<unsigned>(gM1Step[0]), static_cast<unsigned>(gM1Step[1]),
+                 static_cast<unsigned>(gM1Step[2]), static_cast<unsigned>(gM1Step[3]),
+                 static_cast<unsigned>(gM1Step[4]), static_cast<unsigned>(gM1Step[5]),
+                 static_cast<unsigned>(gM1Step[6]), static_cast<unsigned>(gM1Step[7]),
+                 static_cast<unsigned>(gM1Step[8]), static_cast<unsigned>(gM1Step[9]),
+                 static_cast<unsigned>(gM1Step[10]));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room,
+                 "[m1r] w=%u same=%u rb=%u bad=%u first=%u a=%x e=%x g=%x\n",
+                 static_cast<unsigned>(gM1Writes), static_cast<unsigned>(gM1Same),
+                 static_cast<unsigned>(gM1RbOk), static_cast<unsigned>(gM1Bad),
+                 static_cast<unsigned>(gM1FirstIdx), static_cast<unsigned>(gM1FirstAddr),
+                 static_cast<unsigned>(gM1FirstExp), static_cast<unsigned>(gM1FirstGot));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room,
+                 "[m1d] diff=%u first=%u a=%x e=%x g=%x pbad=%u\n",
+                 static_cast<unsigned>(gM1Diff), static_cast<unsigned>(gM1DiffIdx),
+                 static_cast<unsigned>(gM1DiffAddr), static_cast<unsigned>(gM1DiffExp),
+                 static_cast<unsigned>(gM1DiffGot), static_cast<unsigned>(gM1ProbeBad));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+}
 // 批次 P5：E3 定因探针读数（仅 -NRedE3Probe；关态一字不变）
 __attribute__((noinline))
 static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
@@ -1635,6 +1706,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
     // 批次 Q′：截断器读数（仅 -NRedQp；关态一字不变）
     if (gQp && off < sizeof(body)) { nredQpStamp(body, off, sizeof(body) - off); }
+    // 批次 M1：GVM 初始化读数（仅 -NRedGvmM1；关态一字不变）
+    if (gM1On && off < sizeof(body)) { nredM1Stamp(body, off, sizeof(body) - off); }
     // 批次 P5：E3 定因探针读数（仅 -NRedE3Probe；关态一字不变）
     if (gE3Probe && off < sizeof(body)) { nredE3Stamp(body, off, sizeof(body) - off); }
     // 265：`[st1qq]` client5 qq 四字段（仅 -NRedSt1Q）。
@@ -6518,13 +6591,15 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
             // 批次 P／P-7：判定与放行解耦——照常跑完全部检查并记录读数。
             // 批次 Q′：`-NRedQp` 开 **且截断器已武装** ⇒ 放行叶子（第 14 步由 0x1936e 截断器
             //          拦下，零 MMIO）；否则恒不放行（批次 P 的零行为形态）。
-            //   ⚠ `gQpArmed` 不可省：若 hook 注册失败而仍放行，叶子第 14 步会执行**真实的**
-            //     0x1936e（真实 MMIO）——那正是 Q′ 要避免的形态。
+            // 批次 M1：`-NRedGvmM1` 开且 hook 已武装 ⇒ 同样放行；wrapper 内 M1 分支优先于 Q′，
+            //          仍由同一 hook 拦下第 13 步（叶第 14 步的被调者）。
+            //   ⚠ `gQpArmed`／`gM1Armed` 不可省：若 hook 注册失败而仍放行，叶子第 14 步会执行
+            //     **真实的** 0x1936e（真实 MMIO）——那正是 Q′／M1 要避免的形态。
             //  背景：nredStage1Guard 返回 true ⇒ 本文件下方的 `if (gStage1 && c == 1)` 分支
             //  立即调用 orgMode9440f ⇒ 苹果叶执行 ⇒ 叶内 0x1936e 做真实 MMIO（M1 §2.3）。
             const bool v = nredStage1Guard5(ctx);
             gSt1G5Verdict = v ? 1U : 0U;
-            ok = (gQp && gQpArmed) ? v : false;
+            ok = ((gQp && gQpArmed) || (gM1On && gM1Armed)) ? v : false;
             break;
         }
         case 6: ok = nredStage1Guard6(ctx); break;
@@ -7768,6 +7843,316 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     return ret;
 }
 
+// ─── 批次 M1：GVM 初始化（仅初始化，返非 0；叶不进 14–22 步）──────────────────────────────────
+//  依据：tmp/tech/R-批次M1-需求文档-2026-10-24.md §2–§5；
+//        tmp/tech/R-批次M1-实施文档-2026-10-24.md §3。
+//  接缝：0x1936e 函数入口（与 Q′ 同一 hook 点）；M1 开时由 wrapper 调用本函数。
+//  ⚠ **恒返回非 0**：返回 0 会让叶进入第 14 步 memcpy（desc 全 0 ⇒ P5 全 0 ⇒ call *0）。
+//  ⚠ **写入门**：只有 `-NRedGvmM1Write` 且 G1–G6 全过才写；否则零 MMIO 写（只读＋差异表）。
+//  ⚠ **有界**：仅 S11 的 SEM／ACK 两处等待，各 100000×IODelay(1)（100 ms 上界）。
+using M1SlotFn  = void*  (*)(void*, UInt32);                  // 0x1a974
+using M1AddrFn  = UInt32 (*)(void*, UInt32, UInt32, UInt32);  // 0x1a99e
+using M1ReadFn  = UInt32 (*)(void*, UInt32, UInt32);          // 0x1a6a7 → 0x1a24f
+using M1WriteFn = void   (*)(void*, UInt32, UInt32, UInt32);  // 0x1a765 → 0x1a210（第 4 参＝space）
+using M1CleanFn = UInt32 (*)(void*);                          // 0x19a56
+
+// MMHUB 段内 dword 偏移（mmhub_3_0_1_offset.h）
+enum : UInt32 {
+    kM1OffL2Cntl      = 0x0700, kM1OffL2Cntl2 = 0x0701, kM1OffL2Cntl3 = 0x0702,
+    kM1OffL2Cntl4     = 0x0718, kM1OffL2Cntl5 = 0x071E,
+    kM1OffFaultCntl   = 0x0708,
+    kM1OffIdAptLo     = 0x0712, kM1OffIdAptLoHi = 0x0713,
+    kM1OffIdAptHi     = 0x0714, kM1OffIdAptHiHi = 0x0715,
+    kM1OffIdPhysLo    = 0x0716, kM1OffIdPhysHi = 0x0717,
+    kM1OffBankSelCid2 = 0x071B,
+    kM1OffInvEng0Sem  = 0x0751, kM1OffInvEng0Req = 0x0763, kM1OffInvEng0Ack = 0x0775,
+    kM1OffInvEng0RngLo= 0x0787, kM1OffInvEng0RngHi = 0x0788,
+    kM1OffAgpTop      = 0x08EE, kM1OffAgpBot = 0x08EF, kM1OffAgpBase = 0x08F0,
+    kM1OffSysAptLo    = 0x08F1, kM1OffSysAptHi = 0x08F2, kM1OffL1TlbCntl = 0x08F3,
+};
+// 只读探针表 P1–P25（P12–P14 是 eng=17 的 SEM/REQ/ACK：0x751+17、0x763+17、0x775+17）
+static const UInt32 kM1ProbeOff[25] = {
+    0x08EC, 0x08ED, 0x08D7, 0x0700, 0x0701, 0x0702, 0x0718, 0x071E,
+    0x08F3, 0x0740, 0x0741, 0x0762, 0x0774, 0x0786, 0x0708, 0x0709,
+    0x071B, 0x07AB, 0x07AC, 0x08F0, 0x08EF, 0x08EE, 0x08F1, 0x08F2, 0x070F,
+};
+
+static UInt32 nredM1Run(void* const H, void* const clk, void* const desc)
+{
+    if (gM1N < 0xFFFFFFFFU) { ++gM1N; }
+    for (UInt32 s = 0; s < 11; ++s) { gM1Step[s] = 0; }
+    gM1ProbeBad = 0xFFFFFFFFU;
+    if (!nredKernelPtrOk(H) || !nredKernelPtrOk(clk) || !nredKernelPtrOk(desc)) {
+        gM1Err = 1; return 1;
+    }
+    if (gHwlibsSlide == 0) { gM1Err = 3; return 1; }
+
+    const auto slotFn  = reinterpret_cast<M1SlotFn>(gHwlibsSlide + 0x1A974);
+    const auto addrFn  = reinterpret_cast<M1AddrFn>(gHwlibsSlide + 0x1A99E);
+    const auto readFn  = reinterpret_cast<M1ReadFn>(gHwlibsSlide + 0x1A6A7);
+    const auto writeFn = reinterpret_cast<M1WriteFn>(gHwlibsSlide + 0x1A765);
+
+    // W1–W6：与 0x1936e 的 6 个字段写逐字一致（在硬件之前，无条件）。
+    //  依据：接缝蓝图 §2.3 副作用 1／§4.2 W1–W6；反汇编 0x193a3–0x193f5。
+    UInt8* const h = static_cast<UInt8*>(H);
+    const UInt8* const c = static_cast<const UInt8*>(clk);
+    *reinterpret_cast<UInt32*>(h + 0xE58) = *reinterpret_cast<const UInt32*>(c + 0x10);
+    *reinterpret_cast<UInt64*>(h + 0xE60) = *reinterpret_cast<const UInt64*>(c + 0x18);
+    const UInt32 c4 = *reinterpret_cast<const UInt32*>(c + 0x04);
+    const UInt32 e68 = (c4 >> 1) & 3U;
+    *reinterpret_cast<UInt32*>(h + 0xE68) = e68;
+    if (e68 != 0) {
+        *reinterpret_cast<UInt32*>(h + 0xE6C) = (c4 >> 16) & 1U;
+        *reinterpret_cast<UInt32*>(h + 0xE70) = (c4 >> 17) & 1U;
+    }
+    const UInt64 c8 = *reinterpret_cast<const UInt64*>(c + 0x08);
+    if (c8 != 0 && nredKernelPtrOk(reinterpret_cast<const void*>(c8))) {
+        *reinterpret_cast<UInt64*>(h + 0xE78) =
+            *reinterpret_cast<const UInt64*>(reinterpret_cast<const void*>(c8));
+    }
+
+    // slot：先试 type=34（MMHUB hw_id），再扫 6 个槽找 base[0][1]==0x1A000。
+    //  槽布局：H+8+k*0x260；+0=type、+4=nInstance、+0x2C+60*inst+4*idx=base[]。
+    void* slot = nullptr;
+    UInt32 slotType = 0;
+    const UInt32 kWantBase = 0x1A000U;   // IP Discovery: MMHUB base[1]
+    {
+        void* const s = slotFn(H, 34);
+        if (nredKernelPtrOk(s) &&
+            *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(s) + 0x2C + 4) == kWantBase) {
+            slot = s; slotType = 34;
+        } else {
+            for (UInt32 k = 0; k < 6; ++k) {
+                UInt8* const d = h + 8 + k * 0x260;
+                if (*reinterpret_cast<const UInt32*>(d + 0x2C + 4) == kWantBase) {
+                    slot = d;
+                    slotType = *reinterpret_cast<const UInt32*>(d);
+                    break;
+                }
+            }
+        }
+    }
+    gM1SlotType = slotType;
+    gM1Base = nredKernelPtrOk(slot)
+        ? *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(slot) + 0x2C + 4) : 0;
+    const bool slotOk = nredKernelPtrOk(slot)
+        && *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(slot) + 4) > 0
+        && gM1Base != 0 && gM1Base != 0xFFFFFFFFU;
+
+    // 通道：T = *(H+0xE48)；写回调在 +0x38、读回调在 +0x40（0x1a210／0x1a24f）。
+    const UInt8* const T = *reinterpret_cast<const UInt8* const*>(h + 0xE48);
+    const bool chOk = nredKernelPtrOk(T)
+        && nredKernelPtrOk(*reinterpret_cast<const void* const*>(T + 0x38))
+        && nredKernelPtrOk(*reinterpret_cast<const void* const*>(T + 0x40));
+    const UInt32 space = slotType;   // 读/写回调第 3/4 参＝*(u32*)slot（与苹果 golden 应用器同款）
+
+    // 探针：单次读，不轮询、不重试、不写。
+    //  ⚠ slot 不合法时**不调** addrFn/readFn（否则会用 0xFFFFFFFF 当地址）。
+    for (UInt32 i = 0; i < 25; ++i) {
+        if (!chOk || !slotOk) { gM1Probe[i] = 0xFFFFFFFFU; continue; }
+        const UInt32 a = addrFn(slot, 0, 1, kM1ProbeOff[i]);
+        gM1Probe[i] = (a == 0xFFFFFFFFU) ? 0xFFFFFFFFU : readFn(H, a, space);
+        if (gM1Probe[i] == 0xFFFFFFFFU && gM1ProbeBad == 0xFFFFFFFFU) { gM1ProbeBad = i + 1; }
+    }
+
+    // 门：bit0=G1 通道 / bit1=G2 slot+base / bit2=G3 探针 / bit3=G4 页表基址
+    //     bit4=G5 CONTEXT0 使能 / bit5=G6 FB 窗口
+    UInt32 gate = 0;
+    if (chOk) { gate |= 1U << 0; }
+    if (slotOk) { gate |= 1U << 1; }
+    if (gM1ProbeBad == 0xFFFFFFFFU) { gate |= 1U << 2; }
+
+    const UInt32 ptLo = gM1Probe[17];   // P18 = 0x7AB（CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32）
+    if (ptLo != 0 && ptLo != 0xFFFFFFFFU && (ptLo & 0xFFEU) == 0 && (ptLo & 1U) == 1U) {
+        gate |= 1U << 3;
+    }
+    if ((gM1Probe[9] & 1U) == 1U) { gate |= 1U << 4; }   // P10 = 0x740（CONTEXT0_CNTL.ENABLE_CONTEXT）
+
+    gM1FbStart = (static_cast<UInt64>(gM1Probe[0] & 0xFFFFFFU)) << 24;
+    gM1FbEnd   = (static_cast<UInt64>(gM1Probe[1] & 0xFFFFFFU) << 24) | 0xFFFFFFULL;
+    if (gM1FbStart != 0 && gM1FbEnd >= gM1FbStart &&
+        gM1Probe[0] != 0xFFFFFFFFU && gM1Probe[1] != 0xFFFFFFFFU) {
+        gate |= 1U << 5;
+    }
+    gM1Gate = gate;
+
+    // 写应用器：Compare → 写 → 读回。
+    //  返回：1=ok 3=读回不符 5=same/未写；失败时置 gM1Bad/gM1First*。
+    auto apply = [&](UInt32 off, UInt32 cmpMask, UInt32 cmpVal, UInt32 wrVal, UInt32 idx) -> UInt32 {
+        const UInt32 a = addrFn(slot, 0, 1, off);
+        if (a == 0xFFFFFFFFU) {
+            ++gM1Bad; gM1FirstIdx = idx; gM1FirstAddr = a;
+            gM1FirstExp = cmpVal; gM1FirstGot = a; return 3;
+        }
+        const UInt32 cur = readFn(H, a, space);
+        // 0xFFFFFFFF 只在"期望值不是全 1"时视为通道异常（S8 的 LO 期望就是 0xFFFFFFFF）。
+        if (cur == 0xFFFFFFFFU && (cmpVal & cmpMask) != 0xFFFFFFFFU) {
+            ++gM1Bad; gM1FirstIdx = idx; gM1FirstAddr = a;
+            gM1FirstExp = cmpVal; gM1FirstGot = cur; return 3;
+        }
+        if ((cur & cmpMask) == (cmpVal & cmpMask)) { ++gM1Same; return 5; }
+        if (!gM1Write) {
+            ++gM1Diff;
+            if (gM1DiffIdx == 0xFFFFFFFFU) {
+                gM1DiffIdx = idx; gM1DiffAddr = a;
+                gM1DiffExp = cmpVal; gM1DiffGot = cur;
+            }
+            return 5;
+        }
+        writeFn(H, a, wrVal, space);
+        ++gM1Writes;
+        const UInt32 rb = readFn(H, a, space);
+        if ((rb & cmpMask) != (cmpVal & cmpMask)) {
+            ++gM1Bad; gM1FirstIdx = idx; gM1FirstAddr = a;
+            gM1FirstExp = cmpVal; gM1FirstGot = rb; return 3;
+        }
+        ++gM1RbOk; return 1;
+    };
+    auto rmw = [&](UInt32 off, UInt32 mask, UInt32 set, UInt32 idx) -> UInt32 {
+        const UInt32 a = addrFn(slot, 0, 1, off);
+        if (a == 0xFFFFFFFFU) {
+            ++gM1Bad; gM1FirstIdx = idx; gM1FirstAddr = a;
+            gM1FirstExp = set; gM1FirstGot = a; return 3;
+        }
+        const UInt32 cur = readFn(H, a, space);
+        const UInt32 exp = (cur & ~mask) | (set & mask);
+        return apply(off, mask, exp, exp, idx);
+    };
+
+    if (gate != 0x3FU) {
+        // 门不过 ⇒ 可写步骤记 blocked(4)；S1/S5/S7/S9 恒 skip(0)。零写。
+        gM1Step[1] = gM1Step[2] = gM1Step[3] = gM1Step[5] = 4;   // S2a/S3/S4/S6
+        gM1Step[7] = gM1Step[9] = gM1Step[10] = 4;               // S8/S10/S11
+        return 1;
+    }
+
+    // S2a：系统 aperture 可算部分（5 写）
+    {
+        const UInt32 lo = static_cast<UInt32>(gM1FbStart >> 18);
+        const UInt32 hi = static_cast<UInt32>(gM1FbEnd >> 18);
+        if (apply(kM1OffAgpBase, 0xFFFFFFFFU, 0, 0, 1) == 3 ||
+            apply(kM1OffAgpBot, 0xFFFFFFFFU, 0xFFFFFFU, 0xFFFFFFU, 2) == 3 ||
+            apply(kM1OffAgpTop, 0xFFFFFFFFU, 0, 0, 3) == 3 ||
+            apply(kM1OffSysAptLo, 0xFFFFFFFFU, lo, lo, 4) == 3 ||
+            apply(kM1OffSysAptHi, 0xFFFFFFFFU, hi, hi, 5) == 3) {
+            gM1Step[1] = 2; return 1;
+        }
+        gM1Step[1] = 1;
+    }
+    // S3：L1 TLB（RMW：置 0x1859，清 bit5／bit7–10）
+    if (rmw(kM1OffL1TlbCntl, 0x3FF9U, 0x1859U, 6) == 3) { gM1Step[2] = 2; return 1; }
+    gM1Step[2] = 1;
+    // S4：L2 cache（5 写）
+    {
+        // L2_CNTL：置 bit0/11/19、清 bit1/8/18/21–25（字段并集掩码 0x3FC0903）。
+        if (rmw(kM1OffL2Cntl, 0x3FC0903U, 0x80801U, 7) == 3) { gM1Step[3] = 2; return 1; }
+        // L2_CNTL2：bit0/1 自清 ⇒ 写 cur|3，比较屏蔽 bit0/1
+        {
+            const UInt32 a = addrFn(slot, 0, 1, kM1OffL2Cntl2);
+            if (a == 0xFFFFFFFFU) {
+                ++gM1Bad; gM1FirstIdx = 8; gM1FirstAddr = a;
+                gM1FirstExp = 0; gM1FirstGot = a; gM1Step[3] = 2; return 1;
+            }
+            const UInt32 cur = readFn(H, a, space);
+            const UInt32 wr = cur | 0x3U;
+            const UInt32 cm = 0xFFFFFFFCU, cv = cur & cm;
+            if (apply(kM1OffL2Cntl2, cm, cv, wr, 8) == 3) { gM1Step[3] = 2; return 1; }
+        }
+        // U3：本机 translate_further=1（BANK_SELECT=12）⇒ 不写 CNTL3（值未知，避免破坏现有配置）。
+        if ((gM1Probe[5] & 0x3FU) == 12U) {
+            gM1Step[3] = 4;
+        } else {
+            if (apply(kM1OffL2Cntl3, 0xFFFFFFFFU, 0x80130009U, 0x80130009U, 9) == 3) {
+                gM1Step[3] = 2; return 1;
+            }
+            if (apply(kM1OffL2Cntl4, 0xFFFFFFFFU, 0x000000C1U, 0x000000C1U, 10) == 3) {
+                gM1Step[3] = 2; return 1;
+            }
+            if (apply(kM1OffL2Cntl5, 0xFFFFFFFFU, 0x00003FE0U, 0x00003FE0U, 11) == 3) {
+                gM1Step[3] = 2; return 1;
+            }
+            gM1Step[3] = 1;
+        }
+    }
+    // S6：关 identity aperture（6 常量写）
+    {
+        const UInt32 offs[6] = {kM1OffIdAptLo, kM1OffIdAptLoHi, kM1OffIdAptHi,
+                                kM1OffIdAptHiHi, kM1OffIdPhysLo, kM1OffIdPhysHi};
+        const UInt32 vals[6] = {0xFFFFFFFFU, 0x0000000FU, 0, 0, 0, 0};
+        for (UInt32 i = 0; i < 6; ++i) {
+            if (apply(offs[i], 0xFFFFFFFFU, vals[i], vals[i], 12 + i) == 3) {
+                gM1Step[5] = 2; return 1;
+            }
+        }
+        gM1Step[5] = 1;
+    }
+    // S8：18 个失效引擎地址范围（36 写；eng_addr_distance=2）
+    {
+        for (UInt32 i = 0; i < 18; ++i) {
+            const UInt32 lo = kM1OffInvEng0RngLo + i * 2;
+            const UInt32 hi = kM1OffInvEng0RngHi + i * 2;
+            if (apply(lo, 0xFFFFFFFFU, 0xFFFFFFFFU, 0xFFFFFFFFU, 18 + i * 2) == 3 ||
+                apply(hi, 0xFFFFFFFFU, 0x1FU, 0x1FU, 19 + i * 2) == 3) {
+                gM1Step[7] = 2; return 1;
+            }
+        }
+        gM1Step[7] = 1;
+    }
+    // S10：故障默认值（仅当 FAULT_DEFAULT_ADDR 非 0；否则置 fault 使能会把 fault 重定向到 0）
+    if (gM1Probe[24] != 0 && gM1Probe[24] != 0xFFFFFFFFU) {
+        if (rmw(kM1OffFaultCntl, 0x1FFCU, 0x1FFCU, 54) == 3) { gM1Step[9] = 2; return 1; }
+        gM1Step[9] = 1;
+    } else {
+        gM1Step[9] = 4;
+    }
+
+    // S11：TLB 失效（vmid=0，eng=17）。SEM/ACK 各 100 ms 上界；私有失效写＋读回。
+    //  ⚠ 只读轮（无写授权）不执行：S11 含 3 次写。
+    if (!gM1Write) {
+        gM1Step[10] = 4;
+    } else {
+        const UInt32 sem  = addrFn(slot, 0, 1, kM1OffInvEng0Sem + 17);
+        const UInt32 req  = addrFn(slot, 0, 1, kM1OffInvEng0Req + 17);
+        const UInt32 ack  = addrFn(slot, 0, 1, kM1OffInvEng0Ack + 17);
+        const UInt32 cid2 = addrFn(slot, 0, 1, kM1OffBankSelCid2);
+        if (sem == 0xFFFFFFFFU || req == 0xFFFFFFFFU ||
+            ack == 0xFFFFFFFFU || cid2 == 0xFFFFFFFFU) {
+            gM1Step[10] = 2; return 1;
+        }
+        bool ok = false;
+        for (UInt32 i = 0; i < 100000U; ++i) {          // W1：等信号量（100 ms 上界）
+            if ((readFn(H, sem, space) & 1U) == 1U) { ok = true; break; }
+            IODelay(1);
+        }
+        if (!ok) { gM1Step[10] = 2; return 1; }
+        writeFn(H, req, 0xF80001U, space);              // vmid0 + L2 PTES/PDE0/PDE1/PDE2 + L1 PTES
+        ++gM1Writes;
+        ok = false;
+        for (UInt32 i = 0; i < 100000U; ++i) {          // W2：等 ACK（100 ms 上界）
+            if ((readFn(H, ack, space) & 1U) == 1U) { ok = true; break; }
+            IODelay(1);
+        }
+        writeFn(H, sem, 0, space);                      // 释放信号量
+        ++gM1Writes;
+        if (!ok) { gM1Step[10] = 2; return 1; }
+        // W3：私有失效（读 → 置 bit25 → 写 → 读回；不轮询）
+        const UInt32 v = readFn(H, cid2, space);
+        if (v == 0xFFFFFFFFU) { gM1Step[10] = 3; return 1; }
+        writeFn(H, cid2, v | (1U << 25), space);
+        ++gM1Writes;
+        if (readFn(H, cid2, space) == 0xFFFFFFFFU) { gM1Step[10] = 3; return 1; }
+        gM1Step[10] = 1;
+    }
+
+    // S1/S2b/S5/S7/S9 恒 skip(0)：需 GART BO／scratch／VMID 空闲证明／HDP remap，本批不做。
+    if (gM1Cleanup) {
+        const auto cleanFn = reinterpret_cast<M1CleanFn>(gHwlibsSlide + 0x19A56);
+        (void)cleanFn(H);
+        gM1CleanupDone = 1;
+    }
+    return 1;   // ★ 恒非 0 ⇒ 叶返 0（失败），14–22 步不执行
+}
+
 // ─── 批次 Q′：client5 stage1 叶第 14 步的截断器（`-NRedQp`，默认关）────────────────────────
 //  目的：让苹果叶 0x985d0 真实执行第 1–13 步（纯对象/字段操作，**零 MMIO**），
 //        在第 14 步（0x987e0 CALL RCX，RCX = *(P5+0x18) = 0x1936e）之前截断并返回失败。
@@ -7786,7 +8171,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
 SInt32 X5000HWLibs::wrapQpGvm5Init(void* const obj, void* const clk, void* const desc)
 {
     const mach_vm_address_t org = singleton().orgQpGvm5Init;
-    if (org == 0) { return 1; }   // hook 未成功 ⇒ 也返回失败（绝不调原件、绝不返回 0）
+    if (org == 0) { if (gM1On) { gM1Err = 2; } return 1; }   // 未武装 ⇒ 失败（不改 Q′ 语义）
 
     // RA 守卫：只有"从叶子 0x987e0 的下一条指令返回"才截断
     const UInt64 ra = reinterpret_cast<UInt64>(__builtin_return_address(0));
@@ -7794,6 +8179,12 @@ SInt32 X5000HWLibs::wrapQpGvm5Init(void* const obj, void* const clk, void* const
     if (raOff != 0x987E2ULL) {
         // 非叶子路径 ⇒ 原样调回原件（保证"只影响 client5 stage1 的第 14 步"）
         return FunctionCast(wrapQpGvm5Init, org)(obj, clk, desc);
+    }
+
+    // 批次 M1：优先于 Q′ 截断（同一 hook 点；M1 开时走实现模式）。
+    //  ⚠ 必须在 Q′ 的 gQpN++／读数之前，否则 M1 会污染 `[qp]` 读数。
+    if (gM1On) {
+        return static_cast<SInt32>(nredM1Run(obj, clk, desc));
     }
 
     if (gQpN < 0xFFFFFFFFU) { ++gQpN; }
@@ -8009,6 +8400,13 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 批次 Q′（**默认关**）：client5 stage1 叶第 14 步的截断器。
     //  关态 ⇒ 不注册 hook、不写读数 BSS、不输出 [qp] ⇒ 与现状逐字一致（本行只写 gQp 自身）。
     gQp = checkKernelArgument("-NRedQp");
+    // 批次 M1（**默认全关**）：GVM 初始化（仅初始化，返非 0）。
+    //  ⚠ 关态：不注册 hook、零 BSS 写、零日志 ⇒ 与 HEAD 逐字一致。
+    //  ⚠ 用**精确 token** 匹配：`-NRedGvmM1` 是 `-NRedGvmM1Write`／`-NRedGvmM1Cleanup` 的前缀，
+    //    若底层解析器做前缀匹配，任一写开关都会连带打开 M1（破坏"写需单独授权"）。
+    gM1On      = nredExactBootArg("-NRedGvmM1");
+    gM1Write   = nredExactBootArg("-NRedGvmM1Write");
+    gM1Cleanup = nredExactBootArg("-NRedGvmM1Cleanup");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
     // 265：client5 qq 四字段探针（默认关；只读一次）。
@@ -8443,16 +8841,17 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                            0x9440F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9440f, this->orgMode9440f}, "mode9440f");
         }
-        // 批次 Q′：route 0x1936e（client5 stage1 叶第 14 步的被调者；函数入口型）。
-        //   ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        // 批次 Q′／M1：route 0x1936e（client5 stage1 叶第 14 步的被调者；函数入口型）。
+        //   ⚠ 两者都关 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
         //   ⚠ resolveProbe 失败只打一行不 panic（沿用既有纪律）。
-        if (gQp) {
+        if (gQp || gM1On) {
             if (const auto from = resolveProbe("gvm5-init", kQpGvm5InitPattern, nullptr,
                                                arrsize(kQpGvm5InitPattern), 0x1936E)) {
                 if (hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapQpGvm5Init,
                                                                 this->orgQpGvm5Init},
                               "gvm5-init")) {
                     gQpArmed = true;   // 只有真的挂上才允许放行叶子（见 nredStage1Guard 的 case 5）
+                    if (gM1On) { gM1Armed = true; }
                 }
             }
         }
