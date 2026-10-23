@@ -7395,7 +7395,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  它只在 D 的失败分支里被读，D 已不可启用 ⇒ 保留解析只会误导判读。
     gGvm5Early = false;
     // 批次 Q′（**默认关**）：client5 stage1 叶第 14 步的截断器。
-    //  关态 ⇒ 不注册 hook、不写 BSS、不输出 [qp] ⇒ 与现状逐字一致。
+    //  关态 ⇒ 不注册 hook、不写读数 BSS、不输出 [qp] ⇒ 与现状逐字一致（本行只写 gQp 自身）。
     gQp = checkKernelArgument("-NRedQp");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
