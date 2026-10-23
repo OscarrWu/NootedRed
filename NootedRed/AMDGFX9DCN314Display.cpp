@@ -53,6 +53,19 @@ static bool   sStageInit = false;
 // 寄存器通道构造函数，而它的定义在本文件后部的「update_odm / resync_fifo 寄存器级直译」一节。
 static void makeDcnChannel(AMDRadeonX5000_AMDHWRegisters& regs, display::RegChannel* const out);
 
+// 显示 P0（configureDisplay 槽 0x138）：转发指针与入口，定义在文件末尾。
+//   槽位依据：R206 §4.1（vptr+0x138 = configureDisplay，13.6 已核）。
+//   用 vft.get<T>(0x138/8) 直接取槽，而不是在 HWDisplay.hpp 增 ObjectField ——
+//   本批的改动范围限定为单文件（见实施文档 §0）。
+static constexpr UInt32 kDispP0SlotConfigureDisplay = 0x138;
+static constexpr UInt32 kDispP0IdxConfigureDisplay  = kDispP0SlotConfigureDisplay / sizeof(void*);  // 39
+
+using DispP0ConfigureDisplayFn = bool(AMDRadeonX5000_AMDHWDisplay*, UInt32, UInt32, void*, void*);
+static DispP0ConfigureDisplayFn* superConfigureDisplay = nullptr;
+
+static bool dispP0ConfigureDisplay(AMDRadeonX5000_AMDHWDisplay* self, UInt32 a, UInt32 b, void* fbInfo,
+                                   void* resource);
+
 PWDefineRuntimeMC(AMDRadeonX5000_AMDGFX9DCN314Display, Constructor)
 
 AMDRadeonX5000_AMDGFX9DCNDisplay::VFT AMDRadeonX5000_AMDGFX9DCN314Display::vft;
@@ -70,6 +83,17 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::Constructor(AMDRadeonX5000_AMDGFX9DCN3
 void AMDRadeonX5000_AMDGFX9DCN314Display::resolve(const char* const kext)
 {
     AMDRadeonX5000_AMDGFX9DCNDisplay::populateVFT(vft);
+    // 显示 P0：包裹 configureDisplay（槽 0x138）。默认关（开关在 dispP0ConfigureDisplay 内判）。
+    //   槽为空时不安装（vtable 布局与预期不符时宁可不动，也不装一个会跳空指针的 hook）。
+    {
+        auto& slot = vft.get<DispP0ConfigureDisplayFn>(kDispP0IdxConfigureDisplay);
+        if (slot != nullptr) {
+            superConfigureDisplay = slot;
+            slot                  = dispP0ConfigureDisplay;
+        } else {
+            SYSLOG("GFX9DCN314Display", "dispP0: configureDisplay 槽为空，hook 未安装");
+        }
+    }
     PWPopulateRuntimeMCGetMetaClassVFTEntry();
     vft.getExpanded<decltype(initDCNRegOffs)>(0) = initDCNRegOffs;
     vft.getExpanded<decltype(updateDisplayClocks)>(1) = updateDisplayClocks;
@@ -638,4 +662,272 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::resync_fifo_dccg_dio_direct(AMDRadeonX
     if (rdiv != 0) {
         dcn314RegSet(regs, addr, DENTIST_DISPCLK_WDIVIDER_MASK, DENTIST_DISPCLK_WDIVIDER_SHIFT, rdiv);
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 显示 P0：像素时钟源（DP DTO）与 OTG 时序编程
+//
+// 依据：tmp/tech/R-显示P0规格草案-2026-10-23.md
+//   §8.2（OTG 取值表 O4–O20c）、§8.3（DP DTO 取值表 D4–D6）、
+//   §3.2（O1/O2 OTG 时钟）、§3.3（层 1 disable_crtc）、§8.4（移位区无条件重写）。
+// 需求：tmp/tech/R-显示P0-需求文档-2026-10-23.md
+// 接缝：configureDisplay（槽 0x138）super 之后；init 不做时序编程。
+// 开关：-NRedDispP0Off（只读探针）／-NRedDispP0（写）；两者默认关。
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── 面板原生模式（AUO B140QAN04.0，EDID DTD#1；U1 取证 §8.3【客观观测】）──
+static constexpr UInt32 kDispP0HTotal    = 3040;
+static constexpr UInt32 kDispP0HFP       = 48;
+static constexpr UInt32 kDispP0HSW       = 32;
+static constexpr UInt32 kDispP0HActive   = 2880;
+static constexpr UInt32 kDispP0VTotal    = 1884;
+static constexpr UInt32 kDispP0VFP       = 3;
+static constexpr UInt32 kDispP0VSW       = 5;
+static constexpr UInt32 kDispP0VActive   = 1800;
+static constexpr UInt32 kDispP0PixHz     = 515500000;    // 515.5 MHz
+static constexpr UInt32 kDispP0RefKhz    = 600000;       // Linux dcn314_clk_mgr.c:862（真机值未读，U-2）
+// VSTARTUP/VUPDATE/VREADY 是 DML 计算值，不是 dc.c 的"无 DML 缺省值"（需求文档 §4.7）。
+//   来源：kb/序列数据/linux-dcn314-init.json seq 9614–9616 的写事件【客观观测】。
+static constexpr UInt32 kDispP0VStartup  = 83;      // 0x53（DML get_vstartup；10 位字段，最大 1023）
+static constexpr UInt32 kDispP0VUpdate   = 0x00F602F8u;  // offset=760、width=246（DML get_vupdate_*）
+static constexpr UInt32 kDispP0VReady    = 328;     // 0x148（DML get_vready_offset）
+static constexpr UInt32 kDispP0VBlankEnd = kDispP0VTotal - kDispP0VFP - kDispP0VActive;  // 81
+// FP2 = max(0, −(blank_end − vstartup_start + 1))；本机 = 1（Linux dcn10_optc.c:369-372）
+static constexpr UInt32 kDispP0FP2 =
+    (kDispP0VBlankEnd + 1 < kDispP0VStartup) ? (kDispP0VStartup - kDispP0VBlankEnd - 1) : 0;
+// 一帧（µs）＝ v_total × h_total / pixclk ＝ 11110
+static constexpr UInt32 kDispP0FrameUs =
+    static_cast<UInt32>((static_cast<UInt64>(kDispP0VTotal) * kDispP0HTotal * 1000000ULL) / kDispP0PixHz);
+
+// ── 绝对地址（dword 索引；段基址已加，见规格草案 §1.3）──
+//   只给"在多处出现"或"有特殊语义"的地址命名；时序表内每个地址只出现一次，直接写字面量，
+//   便于与规格草案 §8.2 逐行对照。
+static constexpr UInt32 kDispP0RegPixelRateCntl = 0x140;  // SEG1 + 0x0080
+static constexpr UInt32 kDispP0RegDtoPhase      = 0x141;  // SEG1 + 0x0081
+static constexpr UInt32 kDispP0RegDtoModulo     = 0x142;  // SEG1 + 0x0082
+static constexpr UInt32 kDispP0RegPixelRateDiv  = 0x12F;  // SEG1 + 0x006F（只读诊断）
+static constexpr UInt32 kDispP0RegOdm0InputClk  = 0x4F8F; // SEG2 + 0x1ACF
+static constexpr UInt32 kDispP0RegOdm0SrcSel    = 0x4F8B; // SEG2 + 0x1ACB
+static constexpr UInt32 kDispP0RegOtgClock      = 0x5045; // SEG2 + 0x1B85
+static constexpr UInt32 kDispP0RegVtg0Control   = 0x39ED; // SEG2 + 0x052D
+static constexpr UInt32 kDispP0RegOtgControl    = 0x5001; // SEG2 + 0x1B41
+static constexpr UInt32 kDispP0RegFrameCount    = 0x500C; // SEG2 + 0x1B4C
+static constexpr UInt32 kDispP0RegHTotal        = 0x4FEA; // SEG2 + 0x1B2A
+static constexpr UInt32 kDispP0RegVTotal        = 0x4FEF; // SEG2 + 0x1B2F
+static constexpr UInt32 kDispP0RegVStartup      = 0x5046; // SEG2 + 0x1B86
+static constexpr UInt32 kDispP0RegVUpdate       = 0x5047; // SEG2 + 0x1B87
+static constexpr UInt32 kDispP0RegVReady        = 0x5048; // SEG2 + 0x1B88
+
+// ── 开关（首次进入时解析一次并缓存；显式守卫，不用带副作用的静态初始化）──
+struct DispP0Flags {
+    bool init;
+    bool probe;
+    bool write;
+};
+static DispP0Flags sDispP0Flags{};
+
+static void dispP0LoadFlags()
+{
+    if (sDispP0Flags.init) { return; }
+    sDispP0Flags.init  = true;
+    sDispP0Flags.probe = checkKernelArgument("-NRedDispP0Off");
+    sDispP0Flags.write = checkKernelArgument("-NRedDispP0");
+}
+
+// ── 写项与三档策略（需求文档 §4.3）──
+enum class DispP0Policy : UInt8 {
+    Compare,        // 读回按字段掩码比对，相同则不写
+    Force,          // 不比对，直接 RMW 重写（移位区）
+    KeepIfNonZero,  // 读回非 0 则不覆盖（仅 D5）
+};
+
+struct DispP0Reg {
+    UInt32       addr;
+    UInt32       mask;
+    UInt32       value;
+    DispP0Policy policy;
+    const char*  name;
+};
+
+// O1/O2：OTG 时钟（规格草案 §3.2）
+static const DispP0Reg kDispP0Clocks[] = {
+    {kDispP0RegOdm0InputClk, 0x00000003u, 0x00000003u, DispP0Policy::Compare, "OPTC_INPUT_CLOCK"},
+    {kDispP0RegOtgClock,     0x00000003u, 0x00000003u, DispP0Policy::Force,   "OTG_CLOCK_CONTROL"},
+};
+
+// D4–D6：像素时钟源（规格草案 §8.3）
+static const DispP0Reg kDispP0Dto[] = {
+    {kDispP0RegDtoPhase,      0xFFFFFFFFu, kDispP0PixHz,          DispP0Policy::Compare,       "DP_DTO0_PHASE"},
+    {kDispP0RegDtoModulo,     0xFFFFFFFFu, kDispP0RefKhz * 1000u, DispP0Policy::KeepIfNonZero, "DP_DTO0_MODULO"},
+    {kDispP0RegPixelRateCntl, 0x00003010u, 0x00001010u,          DispP0Policy::Compare,       "PIXEL_RATE_CNTL"},
+};
+
+// O4–O19：时序（规格草案 §8.2）
+static const DispP0Reg kDispP0Timing[] = {
+    {kDispP0RegHTotal, 0x00007FFFu, kDispP0HTotal - 1, DispP0Policy::Compare, "OTG_H_TOTAL"},
+    {0x4FEC, 0x7FFF7FFFu, kDispP0HSW << 16, DispP0Policy::Compare, "OTG_H_SYNC_A"},
+    {0x4FEB, 0x7FFF7FFFu,
+     ((kDispP0HTotal - kDispP0HFP - kDispP0HActive) << 16) | (kDispP0HTotal - kDispP0HFP), DispP0Policy::Compare,
+     "OTG_H_BLANK"},
+    {0x4FED, 0x00000001u, 0x00000001u, DispP0Policy::Compare, "OTG_H_SYNC_A_CNTL"},
+    {kDispP0RegVTotal, 0x00007FFFu, kDispP0VTotal - 1, DispP0Policy::Compare, "OTG_V_TOTAL"},
+    {0x4FF0, 0x00007FFFu, kDispP0VTotal - 1, DispP0Policy::Compare, "OTG_V_TOTAL_MIN"},
+    {0x4FF1, 0x00007FFFu, kDispP0VTotal - 1, DispP0Policy::Compare, "OTG_V_TOTAL_MAX"},
+    {0x4FF7, 0x7FFF7FFFu, kDispP0VSW << 16, DispP0Policy::Compare, "OTG_V_SYNC_A"},
+    {0x4FF6, 0x7FFF7FFFu,
+     ((kDispP0VTotal - kDispP0VFP - kDispP0VActive) << 16) | (kDispP0VTotal - kDispP0VFP), DispP0Policy::Compare,
+     "OTG_V_BLANK"},
+    {0x4FF8, 0x00000001u, 0x00000001u, DispP0Policy::Compare, "OTG_V_SYNC_A_CNTL"},
+    {0x5004, 0x00000001u, 0x00000000u, DispP0Policy::Compare, "OTG_INTERLACE_CONTROL"},
+    {kDispP0RegOtgControl, 0x00003000u, 0x00001000u, DispP0Policy::Compare, "OTG_CONTROL.START_POINT"},
+    {kDispP0RegVStartup, 0x000003FFu, kDispP0VStartup, DispP0Policy::Force, "OTG_VSTARTUP_PARAM"},
+    {kDispP0RegVUpdate, 0x03FFFFFFu, kDispP0VUpdate, DispP0Policy::Force, "OTG_VUPDATE_PARAM"},
+    {kDispP0RegVReady, 0x0000FFFFu, kDispP0VReady, DispP0Policy::Force, "OTG_VREADY_PARAM"},
+    {kDispP0RegVtg0Control, 0x7FFF7FFFu, ((kDispP0VTotal - kDispP0VFP) << 16) | kDispP0FP2, DispP0Policy::Force,
+     "VTG0_CONTROL"},
+    {0x4FEE, 0x00000103u, 0x00000000u, DispP0Policy::Compare, "OTG_H_TIMING_CNTL"},
+};
+
+// O20a–O20c：使能（规格草案 §8.2）
+static const DispP0Reg kDispP0Enable[] = {
+    {kDispP0RegOdm0SrcSel, 0x000F0000u, 0x00000000u, DispP0Policy::Compare, "OPTC_DATA_SOURCE_SELECT"},
+    {kDispP0RegVtg0Control, 0x80000000u, 0x80000000u, DispP0Policy::Force, "VTG0_CONTROL.ENABLE"},
+    {kDispP0RegOtgControl, 0x00000301u, 0x00000201u, DispP0Policy::Compare, "OTG_CONTROL.MASTER_EN"},
+};
+
+// 有界轮询：读到 (v & mask) == want 即成功；最多 maxUs 次、每次 1 µs。
+static bool dispP0Wait(AMDRadeonX5000_AMDHWRegisters& regs, const UInt32 addr, const UInt32 mask, const UInt32 want,
+                       const UInt32 maxUs)
+{
+    for (UInt32 i = 0; i < maxUs; i += 1) {
+        if ((regs.read(addr) & mask) == want) { return true; }
+        IODelay(1);
+    }
+    return false;
+}
+
+// 按策略执行一张表；写后必读回校验，不符即 panic（断言型，可自动重启）。
+static void dispP0Apply(AMDRadeonX5000_AMDHWRegisters& regs, const DispP0Reg* const tbl, const size_t n,
+                        UInt32& written)
+{
+    for (size_t i = 0; i < n; i += 1) {
+        const DispP0Reg& e   = tbl[i];
+        const UInt32     cur = regs.read(e.addr);
+
+        if (e.policy == DispP0Policy::KeepIfNonZero && cur != 0) {
+            if (cur != e.value) {
+                SYSLOG("GFX9DCN314Display", "[dispp0] %s: 保留既有 0x%08x（期望 0x%08x，不覆盖）", e.name, cur,
+                       e.value);
+            }
+            continue;
+        }
+        if (e.policy != DispP0Policy::Force && (cur & e.mask) == (e.value & e.mask)) { continue; }
+
+        const UInt32 nv = (cur & ~e.mask) | (e.value & e.mask);
+        regs.write(e.addr, nv);
+        written += 1;
+
+        const UInt32 rb = regs.read(e.addr);
+        if ((rb & e.mask) != (e.value & e.mask)) {
+            panic("NootedRed: dispP0 %s failed (reg=0x%x exp=0x%x got=0x%x)", e.name, e.addr, e.value & e.mask,
+                  rb & e.mask);
+        }
+        DBGLOG("GFX9DCN314Display", "[dispp0] wr %s 0x%x: 0x%08x -> 0x%08x", e.name, e.addr, cur, nv);
+    }
+}
+
+// 主序列（顺序见需求文档 §4.2；不可交换）
+static void dispP0Program(AMDRadeonX5000_AMDHWRegisters& regs, const UInt32 a)
+{
+    UInt32 written = 0;
+
+    // 层 1（规格草案 §3.3）：先停 CRTC 与 VTG，再等 OTG 空闲（上界 100 ms）。
+    dcn314RegSet(regs, kDispP0RegOtgControl, 0x00000001u, 0, 0);    // MASTER_EN = 0
+    dcn314RegSet(regs, kDispP0RegVtg0Control, 0x80000000u, 31, 0);  // VTG0_ENABLE = 0
+    if (!dispP0Wait(regs, kDispP0RegOtgClock, 0x00010000u, 0, 100000)) {
+        panic("NootedRed: dispP0 OTG_BUSY timeout (reg=0x%x)", kDispP0RegOtgClock);
+    }
+
+    // O1/O2：OTG 时钟，随后等 ON（各 1 ms）。
+    dispP0Apply(regs, kDispP0Clocks, sizeof(kDispP0Clocks) / sizeof(kDispP0Clocks[0]), written);
+    if (!dispP0Wait(regs, kDispP0RegOdm0InputClk, 0x00000004u, 0x00000004u, 1000)) {
+        panic("NootedRed: dispP0 OPTC_INPUT_CLK_ON timeout (reg=0x%x)", kDispP0RegOdm0InputClk);
+    }
+    if (!dispP0Wait(regs, kDispP0RegOtgClock, 0x00000100u, 0x00000100u, 1000)) {
+        panic("NootedRed: dispP0 OTG_CLOCK_ON timeout (reg=0x%x)", kDispP0RegOtgClock);
+    }
+
+    // D4–D6：像素时钟源，随后等 DTO 使能状态（0.1 ms）。
+    dispP0Apply(regs, kDispP0Dto, sizeof(kDispP0Dto) / sizeof(kDispP0Dto[0]), written);
+    if (!dispP0Wait(regs, kDispP0RegPixelRateCntl, 0x00000080u, 0x00000080u, 100)) {
+        panic("NootedRed: dispP0 DPDTO0_ENABLE_STATUS timeout (reg=0x%x)", kDispP0RegPixelRateCntl);
+    }
+
+    // O4–O19：时序。
+    dispP0Apply(regs, kDispP0Timing, sizeof(kDispP0Timing) / sizeof(kDispP0Timing[0]), written);
+
+    // O20a–O20c：使能。MASTER_EN 必须是最后一个 OTG 写动作。
+    dispP0Apply(regs, kDispP0Enable, sizeof(kDispP0Enable) / sizeof(kDispP0Enable[0]), written);
+
+    // O21：帧计数递增（只读判据）。等 2 帧 = 2×11110 µs ≈ 22.2 ms。
+    const UInt32 fc0 = regs.read(kDispP0RegFrameCount) & 0x00FFFFFFu;
+    IODelay(kDispP0FrameUs * 2);
+    const UInt32 fc1 = regs.read(kDispP0RegFrameCount) & 0x00FFFFFFu;
+    if (fc1 == fc0) { panic("NootedRed: dispP0 frame count stalled (fc=0x%x)", fc0); }
+
+    SYSLOG("GFX9DCN314Display", "[dispp0] a=%u wr=%u dto=%08x clk=%08x vtg=%08x otgc=%08x pdiv=%x fc=%u", a, written,
+           regs.read(kDispP0RegPixelRateCntl), regs.read(kDispP0RegOtgClock), regs.read(kDispP0RegVtg0Control),
+           regs.read(kDispP0RegOtgControl), regs.read(kDispP0RegPixelRateDiv), fc1 - fc0);
+}
+
+// configureDisplay 包裹：先 super，再按开关执行探针或写序列。
+static bool dispP0ConfigureDisplay(AMDRadeonX5000_AMDHWDisplay* const self, const UInt32 a, const UInt32 b,
+                                   void* const fbInfo, void* const resource)
+{
+    const bool r = superConfigureDisplay(self, a, b, fbInfo, resource);
+
+    dispP0LoadFlags();
+    if (!sDispP0Flags.probe && !sDispP0Flags.write) { return r; }
+
+    auto* const regs = self->getHWRegisters();
+    if (regs == nullptr) {
+        SYSLOG("GFX9DCN314Display", "[dispp0] HW registers unavailable, skipped");
+        return r;
+    }
+
+    if (sDispP0Flags.probe) {
+        SYSLOG("GFX9DCN314Display",
+               "[dispp0off] a=%u dto=%08x,%08x,%08x clk=%08x vtg=%08x h=%08x v=%08x vs=%08x,%08x,%08x", a,
+               regs->read(kDispP0RegPixelRateCntl), regs->read(kDispP0RegDtoPhase), regs->read(kDispP0RegDtoModulo),
+               regs->read(kDispP0RegOtgClock), regs->read(kDispP0RegVtg0Control), regs->read(kDispP0RegHTotal),
+               regs->read(kDispP0RegVTotal), regs->read(kDispP0RegVStartup), regs->read(kDispP0RegVUpdate),
+               regs->read(kDispP0RegVReady));
+        if (sDispP0Flags.write) {
+            SYSLOG("GFX9DCN314Display", "[dispp0] -NRedDispP0Off 优先：本次零写");
+        }
+        return r;
+    }
+
+    if (!r) {
+        SYSLOG("GFX9DCN314Display", "[dispp0] super configureDisplay 返回 false，跳过（不伪造成功）");
+        return r;
+    }
+
+    // 模式门：只在"苹果没写时序"或"写的就是面板原生时序"时编程（需求文档 §4.1-4）。
+    const UInt32 h = regs->read(kDispP0RegHTotal) & 0x00007FFFu;
+    const UInt32 v = regs->read(kDispP0RegVTotal) & 0x00007FFFu;
+    if (!((h == 0 || h == kDispP0HTotal - 1) && (v == 0 || v == kDispP0VTotal - 1))) {
+        SYSLOG("GFX9DCN314Display", "[dispp0] skip: 读回时序 htot=0x%x vtot=0x%x 非原生（期望 0x%x/0x%x）", h, v,
+               kDispP0HTotal - 1, kDispP0VTotal - 1);
+        return r;
+    }
+
+    // 只读诊断：像素率分频由既有 S2 负责（P0 不写）；不满足只记警告。
+    const UInt32 pdiv = regs->read(kDispP0RegPixelRateDiv);
+    if ((pdiv & 0x00000007u) != 0x00000006u) {
+        SYSLOG("GFX9DCN314Display", "[dispp0] warn: OTG0_PIXEL_RATE_DIV=0x%x，期望 K1=BY_1/K2=BY_4(0x6)", pdiv);
+    }
+
+    dispP0Program(*regs, a);
+    return r;
 }
