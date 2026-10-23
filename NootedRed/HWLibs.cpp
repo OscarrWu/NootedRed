@@ -226,7 +226,8 @@ static bool   gQqProbeSeen = false;
 static bool   gQqHdl = false;
 static bool   gSt1G5Step24 = false;   // 步24 守卫已接入（安装判据 [9]）
 alignas(8) static UInt8 gQqHdlStore[8];   // 8B 句柄（static：无分配器；8B 对齐，避免未对齐写）
-                                          // 批次 P 起不再写入（方案 C 写入分支已撤回）⇒ [qqh] hstore= 恒 0
+                                          // 批次 P 起不再写入（方案 C 写入分支已撤回）⇒ 内容恒 0；
+                                          // 注意 `[qqh] hstore=` 打印的是本数组的**地址**（非内容），故该字段恒非 0
 static UInt64 gQqHdlOld = 0;
 static UInt32 gQqHdlRet = 0xFF;
 static UInt64 gQqP = 0, gQqQ = 0, gQqQ8 = 0, gQqS1 = 0;
