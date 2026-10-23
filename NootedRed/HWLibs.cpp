@@ -288,6 +288,25 @@ static UInt32 gP6Code = 0;                   // 0=未跑 1=成功 2=描述符缺
 static UInt32 gP6Mode[4] = {0,0,0,0};        // 0=Mode B 1=Mode A
 static UInt64 gP6ObjAddr[4] = {0,0,0,0};     // 四个对象地址
 static UInt32 gP6Key[4] = {0,0,0,0};         // 四个真实键
+// ─── 批次 P7：golden 表有界性只读探针（`-NRedP7Probe`，默认关）──────────────────────────
+//  数据链：ctx→P5→clone→T→pair→device→p→q→r→s→t→recs（逐级 KPtr）。
+//  遍历：复刻 0x18f7c 的 recs 遍历；0x1a99e 只做算术，不 deref 结果地址。
+//  ⚠ 不调用任何函数指针；不写非 BSS；观测行 ≤191 B、放头部区。
+//  ⚠ 读数标量必须在此处声明（`[p7]` 行在 `nredE3Stamp`，文件前部）。
+struct NRedP7Rec {
+    UInt32 type;     // 0x46/0xB/0x22/0x1C
+    UInt32 n;        // 记录数（-1 之前的项数）
+    UInt32 term;     // 1=找到 -1；0=未找到/超限
+    UInt32 fault;    // 0=正常；1=某级指针/项地址非法
+    UInt32 b0;       // 首个 base_idx
+    UInt32 i0;       // 首个 inst
+    UInt32 bl;       // 最后 base_idx（终止项或超限项）
+    UInt64 recs;     // recs 指针（0＝无表）
+};
+static bool      gP7On = false;                 // `-NRedP7Probe`（默认关）
+static NRedP7Rec gP7Rec[4] = {};
+static const UInt32 kP7Types[4] = {0x46, 0x0B, 0x22, 0x1C};
+static const UInt32 kP7Limit = 4096;            // 硬上限（项）
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -1174,6 +1193,21 @@ static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
                      static_cast<unsigned>(gP6Key[2]), static_cast<unsigned>(gP6Key[3]));
         if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                      off += d; room -= d; }
+    }
+    // 批次 P7：golden 表有界性读数（仅 -NRedP7Probe；关态一字不变）
+    if (gP7On) {
+        for (unsigned i = 0; i < 4; ++i) {
+            const NRedP7Rec& r = gP7Rec[i];
+            n = snprintf(body + off, room,
+                         "[p7] t=%x r=%llx n=%u term=%u f=%u b0=%x i0=%x bl=%x\n",
+                         static_cast<unsigned>(r.type),
+                         static_cast<unsigned long long>(r.recs),
+                         static_cast<unsigned>(r.n), static_cast<unsigned>(r.term),
+                         static_cast<unsigned>(r.fault), static_cast<unsigned>(r.b0),
+                         static_cast<unsigned>(r.i0), static_cast<unsigned>(r.bl));
+            if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                         off += d; room -= d; }
+        }
     }
 }
 // 265：`[st1qq]` client5 qq 对象四字段（noinline、零解引用、≤120 字符）。
@@ -6879,6 +6913,90 @@ static void nredE3S1Probe(const void* const ctx)
     gE3S1T90 = *reinterpret_cast<const UInt64*>(t + 0x90);
 }
 
+// ─── 批次 P7：golden 表有界性只读探针（零 MMIO、零函数指针、零行为改变）──────────────────
+//  返回：无；结果写 gP7Rec[4]。
+//  ⚠ 每个指针/项地址先 nredKernelPtrOk；任一失败 ⇒ fault=1，停止该 type。
+//  ⚠ 偏移以反汇编为准（实施文档有两处偏移错误，见交付报告 §5）：
+//     · `0xa31f6` 的 t 表扫描：`entry = t + k*0x10`（k=0..0x50），type 在 entry+0、recs 在 entry+8
+//       （`a3228 movl $8,%edx` 配 `a322f movl -8(%rax,%rdx),%esi` ⇒ 首项在 t+0）；
+//     · `0x18f7c` 的 recs 遍历：`inst = recs[j*16]`、`next = recs[(j+1)*16+4]`，j 从 **0** 起
+//       （`19040 xorl %r14d,%r14d` ⇒ 首轮偏移 0；`190c7 movl 4(%rbx,%rax),%r15d` 读下一项）。
+static void nredP7Probe(const void* const ctx)
+{
+    for (unsigned i = 0; i < 4; ++i) {
+        gP7Rec[i] = NRedP7Rec{};
+        gP7Rec[i].type = kP7Types[i];
+    }
+    if (!nredKernelPtrOk(ctx)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const p5 = *reinterpret_cast<const UInt8* const*>(
+        static_cast<const UInt8*>(ctx) + 0x30);
+    if (!nredKernelPtrOk(p5)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const clone = *reinterpret_cast<const UInt8* const*>(p5 + 0x28);
+    if (!nredKernelPtrOk(clone)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    // 0xa31f6 的纯内存读链（不调 0x8b8e7/0x9233d/0x1a538）
+    const UInt8* const T = *reinterpret_cast<const UInt8* const*>(clone + 0xE48);
+    if (!nredKernelPtrOk(T)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const pair = *reinterpret_cast<const UInt8* const*>(T + 8);
+    if (!nredKernelPtrOk(pair)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const device = *reinterpret_cast<const UInt8* const*>(pair);
+    if (!nredKernelPtrOk(device)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const p = *reinterpret_cast<const UInt8* const*>(device);
+    if (!nredKernelPtrOk(p)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const q = *reinterpret_cast<const UInt8* const*>(p + 0x58);
+    if (!nredKernelPtrOk(q)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const r = *reinterpret_cast<const UInt8* const*>(q + 0xE8);
+    if (!nredKernelPtrOk(r)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const s = *reinterpret_cast<const UInt8* const*>(r + 0x40);
+    if (!nredKernelPtrOk(s)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+    const UInt8* const t = *reinterpret_cast<const UInt8* const*>(s + 8);
+    if (!nredKernelPtrOk(t)) { for (unsigned i = 0; i < 4; ++i) gP7Rec[i].fault = 1; return; }
+
+    for (unsigned i = 0; i < 4; ++i) {
+        NRedP7Rec& out = gP7Rec[i];
+        const UInt32 type = kP7Types[i];
+        // 1. 在 clone 的描述符区按 type 找描述符（只为确认该 type 存在；不 deref 结果地址）
+        bool found = false;
+        for (unsigned k = 0; k < 6; ++k) {
+            const UInt8* const d = clone + 8 + k * 0x260;
+            if (!nredKernelPtrOk(d)) { out.fault = 1; break; }
+            if (*reinterpret_cast<const UInt32*>(d) == type) { found = true; break; }
+        }
+        if (out.fault != 0) { continue; }
+        if (!found) { out.fault = 1; continue; }
+        // 2. 扫描 t + k*0x10（k=0..0x50）找 sel==type ⇒ recs=*(u64*)(entry+8)
+        //    苹果 `0xa3233` 在 sel==0 时也停止（表尾哨兵）。
+        UInt64 recs = 0;
+        for (unsigned k = 0; k < 0x51; ++k) {
+            const UInt8* const entry = t + k * 0x10;
+            if (!nredKernelPtrOk(entry)) { out.fault = 1; break; }
+            const UInt32 sel = *reinterpret_cast<const UInt32*>(entry);
+            if (sel == 0) { break; }
+            if (sel == type) {
+                recs = *reinterpret_cast<const UInt64*>(entry + 8);
+                break;
+            }
+        }
+        if (out.fault != 0) { continue; }
+        if (recs == 0) { out.term = 1; out.n = 0; continue; }   // 无表 ⇒ 有界
+        if (!nredKernelPtrOk(reinterpret_cast<const void*>(recs))) { out.fault = 1; continue; }
+        out.recs = recs;
+        // 3. 复刻 0x18f7c 的 recs 遍历（不执行 MMIO）
+        const UInt8* const rp = reinterpret_cast<const UInt8*>(recs);
+        const UInt32 base = *reinterpret_cast<const UInt32*>(rp + 4);
+        out.b0 = base;
+        if (base == 0xFFFFFFFFU) { out.term = 1; out.n = 0; out.bl = base; continue; }
+        for (unsigned j = 0; j < kP7Limit; ++j) {
+            const UInt8* const e  = rp + j * 16;
+            const UInt8* const en = rp + (j + 1) * 16;
+            if (!nredKernelPtrOk(e) || !nredKernelPtrOk(en)) { out.fault = 1; break; }
+            if (j == 0) { out.i0 = *reinterpret_cast<const UInt32*>(e); }
+            const UInt32 next = *reinterpret_cast<const UInt32*>(en + 4);
+            out.bl = next;
+            if (next == 0xFFFFFFFFU) { out.term = 1; out.n = j + 1; break; }
+        }
+    }
+}
+
 // ─── 273：client5 stage1 叶（`0x985d0`）的我方完整复刻（`-NRedGvm5D`，默认关）──────────────
 //  依据：`kb/序列数据/反汇编/证据/HWLibs全量反编译/fn/985d0.c` 与 `HWLibs_full.asm` 的
 //        `985d0..989a4` 段（逐字核对；16 步对照见交付件）。
@@ -7124,6 +7242,7 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     // 批次 P5／P4-P5：stage1 入口只读探针（`-NRedE3Probe`，默认关）。
     //   与 `-NRedGvm5Phase` 独立：后者记 `(a, p1, ra)`，本探针记 `(ctx, P5, clone, *(T+0x90))`。
     if (gE3Probe && b == 5 && c == 1) { nredE3S1Probe(a); }
+    if (gP7On && b == 5 && c == 1) { nredP7Probe(a); }   // P7：golden 表有界性只读探针
     // ── 275：M4′ 幂等（`-NRedGvm5Early` 早期已真实成功 ⇒ powerUp 阶段不再执行 D）──────────
     //  R3a：**必须比较 p1**——两次调用的 ctx/p1 可能不是同一对象；p1 不同/非法时不得跳过
     //  （否则 powerUp 的 client5 未执行，失败仍可能落到 WindowServer）。
@@ -7715,6 +7834,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  ⚠ 关态：不安装、不介入、零新增日志、零新增解引用 ⇒ 与现状逐字一致。
     gGvmSwInstall  = checkKernelArgument("-NRedGvmSwInstall");
     gP6On          = checkKernelArgument("-NRedP6Obj");   // P6：四字段对象构造（默认关）
+    gP7On          = checkKernelArgument("-NRedP7Probe");   // P7：golden 表有界性（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
     //  ⚠ **放行开关语义**（R70 §3／需求 R3）：本开关**保留**，但语义改为"**仅当全部步骤均达可用层**时，
     //    才允许把成功报给苹果"⇒ 当前（A8 未达可用层、失败位恒非 0）它**单独无法导致成功**。
