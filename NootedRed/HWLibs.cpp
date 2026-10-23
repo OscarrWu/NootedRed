@@ -5884,6 +5884,7 @@ __attribute__((noinline))
 static bool nredStage1Guard2(const void* const ctx)
 {
     gSt1G2P = 0; gSt1G2Key = 0;
+    gSt1P3 = 0;   // 批次 P4：与 guard7 一致——本 guard 未跑到 P3 检查时，读数不得残留上一个 guard 的值
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(2, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x18);
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(2, 2); return false; }
@@ -6155,6 +6156,7 @@ __attribute__((noinline))
 static bool nredStage1Guard9(const void* const ctx)
 {
     gSt1G9P = 0; gSt1G9Key = 0;
+    gSt1P3 = 0;   // 批次 P4：与 guard7 一致（见 guard2 入口注释）
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(9, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x50);
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(9, 2); return false; }
