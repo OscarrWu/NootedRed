@@ -217,6 +217,23 @@ static UInt64 gSt1G5E88   = 0;   // 步 27：*(H+0xE88)
 static UInt64 gSt1G5E90   = 0;   // 步 27：*(H+0xE90)
 static UInt64 gSt1G5E98   = 0;   // 步 27：*(H+0xE98)
 static UInt32 gSt1G5Verdict = 0xFF;  // 0＝护栏判失败；1＝护栏全过但被 P-7 拦住；0xFF＝未跑
+// ─── 批次 Q′：0x1936e 截断器的读数（只写 BSS，由 [qp]/[qp2] 输出）──────────────────────────
+static bool   gQp       = false;   // `-NRedQp`（默认关）
+static bool   gQpArmed  = false;   // hook 是否**真的**注册成功（0 ⇒ 即使 -NRedQp 开也不放行叶子）
+static UInt32 gQpN      = 0;       // 被截断次数
+static UInt64 gQpRa     = 0;       // 调用者返回地址（减 slide）
+static UInt64 gQpObj    = 0;       // 第 1 实参（＝p1[5]）
+static UInt64 gQpClk    = 0;       // 第 2 实参（＝叶子 clk 缓冲，RBP-0xc8）
+static UInt64 gQpDesc   = 0;       // 第 3 实参（＝叶子 desc 缓冲，RBP-0x2a0）
+static UInt32 gQpC4     = 0;       // clk+0x04：能力位（叶子第 2–13 步的输出）
+static UInt32 gQpT20    = 0;       // clk+0x20：type[2].lo（0xa28ad 输出）
+static UInt64 gQpT28    = 0;       // clk+0x28：type[1]（0xa28ad 输出）
+static UInt64 gQpA30    = 0;       // clk+0x30：0xa2811(h8)
+static UInt64 gQpA38    = 0;       // clk+0x38：0xa2847(h8)
+static UInt32 gQpA50    = 0;       // clk+0x50：0x90da8()（恒 0x1000）
+static UInt64 gQpA58    = 0;       // clk+0x58：0x94ff7(ctx) + 0xa2b51(h8)
+static UInt32 gQpL68    = 0;       // local_68（ZFB mode；由 clk+0x68 派生）
+static UInt8  gQpL68Ok  = 0;       // 派生自证是否成立（0＝不读，1＝已读）
 // （265 的开关/ 观测变量见下方 gSt1Q 组）
 // 268（`-NRedQqProbe` / `-NRedQqHdl`，默认关）：client5 的 qq 句柄层（B1）。
 //  qq 实测是 0x8b969 构造的 0x228 表（q10==qq），而 0x8b4bf 期望 8B 句柄（*h=表）
@@ -1039,6 +1056,29 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
 }
 
+// 批次 Q′：截断器读数（两行，各 ≤191 B；只读 BSS 标量，零解引用）
+__attribute__((noinline))
+static void nredQpStamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room, "[qp] n=%u arm=%u ra=%llx c4=%x t20=%x t28=%llx l68=%x\n",
+                     static_cast<unsigned>(gQpN),
+                     static_cast<unsigned>(gQpArmed ? 1U : 0U),
+                     static_cast<unsigned long long>(gQpRa),
+                     static_cast<unsigned>(gQpC4),
+                     static_cast<unsigned>(gQpT20),
+                     static_cast<unsigned long long>(gQpT28),
+                     static_cast<unsigned>(gQpL68Ok ? gQpL68 : 0xFFFFFFFFU));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[qp2] a30=%llx a38=%llx a50=%x a58=%llx\n",
+                 static_cast<unsigned long long>(gQpA30),
+                 static_cast<unsigned long long>(gQpA38),
+                 static_cast<unsigned>(gQpA50),
+                 static_cast<unsigned long long>(gQpA58));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+}
 // 265：`[st1qq]` client5 qq 对象四字段（noinline、零解引用、≤120 字符）。
 __attribute__((noinline))
 static void nredSt1QQStamp(char* const body, size_t& off, const size_t cap)
@@ -1395,6 +1435,8 @@ int nredTraceFlush(int secTag)
     if (gStage1 && off < sizeof(body)) { nredSt1B3Stamp(body, off, sizeof(body) - off); }
     // 259：`[st1g2/5/6/7/9]` 各 client 的 P/关键指针（仅 -NRedStage1）。
     if (gStage1 && off < sizeof(body)) { nredSt1GuardsStamp(body, off, sizeof(body) - off); }
+    // 批次 Q′：截断器读数（仅 -NRedQp；关态一字不变）
+    if (gQp && off < sizeof(body)) { nredQpStamp(body, off, sizeof(body) - off); }
     // 265：`[st1qq]` client5 qq 四字段（仅 -NRedSt1Q）。
     if (gSt1Q && off < sizeof(body)) { nredSt1QQStamp(body, off, sizeof(body) - off); }
     // 266：`[ttlfd]` TTL 门面状态（仅 -NRedTtlFacade）。
@@ -2117,6 +2159,12 @@ static const UInt8 kMode2TailPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x
 //  返回 0=失败、非 0=成功。调用频率低（每槽 1 次×3-4 槽）。
 static const UInt8 kMode9440fPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
                                           0x45, 0x31, 0xE4, 0xFF, 0xCE, 0x83, 0xFE, 0x0E, 0x0F, 0x87};
+// 批次 Q′：`0x1936e`（client5 stage1 叶第 14 步的被调者）入口 24 B。
+//  实测首字节：55 48 89 e5 41 57 41 56 41 54 53 41 bc 02 00 00 00 48 85 ff 0f 84 c9 00
+//  其中 `41 BC 02 00 00 00`（mov $2,%r12d）是本函数独有的判别序列。
+static const UInt8 kQpGvm5InitPattern[] = {
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x41,
+    0xBC, 0x02, 0x00, 0x00, 0x00, 0x48, 0x85, 0xFF, 0x0F, 0x84, 0xC9, 0x00};
 // `0x96c4c`：回退路径（type3 槽 +0x30 虚槽 callee；发现块填充的**回退成败**——F0/F1 直接上游）。
 static const UInt8 kMode96c4cPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53,
                                           0x48, 0x81, 0xEC, 0x80, 0x02, 0x00, 0x00, 0x49, 0x89, 0xD4, 0x49,
@@ -6065,14 +6113,16 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
         case 2: ok = nredStage1Guard2(ctx); break;
         case 3: ok = nredStage1Guard3(ctx); break;
         case 5: {
-            // 批次 P／P-7（**关键**）：判定与放行解耦。
-            //   背景：nredStage1Guard 返回 true ⇒ 本文件下方的 `if (gStage1 && c == 1)` 分支
-            //   立即调用 orgMode9440f ⇒ 苹果叶执行 ⇒ 叶内 0x1936e 做真实 MMIO（M1 §2.3）。
-            //   而批次 P 的目的恰恰是"验证护栏读数、不放行叶子"。
-            //   ⇒ 照常跑完全部检查并记录读数，但 client5 恒不放行。
+            // 批次 P／P-7：判定与放行解耦——照常跑完全部检查并记录读数。
+            // 批次 Q′：`-NRedQp` 开 **且截断器已武装** ⇒ 放行叶子（第 14 步由 0x1936e 截断器
+            //          拦下，零 MMIO）；否则恒不放行（批次 P 的零行为形态）。
+            //   ⚠ `gQpArmed` 不可省：若 hook 注册失败而仍放行，叶子第 14 步会执行**真实的**
+            //     0x1936e（真实 MMIO）——那正是 Q′ 要避免的形态。
+            //  背景：nredStage1Guard 返回 true ⇒ 本文件下方的 `if (gStage1 && c == 1)` 分支
+            //  立即调用 orgMode9440f ⇒ 苹果叶执行 ⇒ 叶内 0x1936e 做真实 MMIO（M1 §2.3）。
             const bool v = nredStage1Guard5(ctx);
             gSt1G5Verdict = v ? 1U : 0U;
-            ok = false;
+            ok = (gQp && gQpArmed) ? v : false;
             break;
         }
         case 6: ok = nredStage1Guard6(ctx); break;
@@ -7109,6 +7159,61 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     return ret;
 }
 
+// ─── 批次 Q′：client5 stage1 叶第 14 步的截断器（`-NRedQp`，默认关）────────────────────────
+//  目的：让苹果叶 0x985d0 真实执行第 1–13 步（纯对象/字段操作，**零 MMIO**），
+//        在第 14 步（0x987e0 CALL RCX，RCX = *(P5+0x18) = 0x1936e）之前截断并返回失败。
+//  依据：M1 §2.1/§2.2/§2.4（13 步清单与零 MMIO 闭包：14 个函数、无 MMIO 助手）、RQ′ §3。
+//  机制：routeFunction 把 0x1936e 入口改跳本 wrapper；wrapper 按返回地址判定
+//        （ra - slide == 0x987e2）后返回非 0 ⇒ 叶子 0x987e2 TEST EAX,EAX 非零
+//        ⇒ 0x987e4 JZ 不跳 ⇒ 0x987e6 XOR EBX,EBX ⇒ 0x987e8 MOV EAX,EBX ⇒ 返回 0（失败）。
+//        非叶子路径 ⇒ 原样调回 org（trampoline）。
+//  ⚠ **本函数绝不返回 0**：返回 0 会让叶子继续走第 15 步
+//     `0x9880c memcpy(p1+0x30, desc+0xf0, 0xd8)`，把**全 0 的 30 个函数指针**
+//     装进 P5+0x30..+0x107 ⇒ 后续任何调用都会 call *0 ⇒ trap。
+//     （红线：不伪造判定输入、不填 0。）
+//  ⚠ **只读**：只读 clk/desc（叶子自己的栈帧）与 BSS 标量；不写任何苹果对象。
+//  ⚠ **无重入风险**：0x1936e 全库无直接 call/jmp（仅 0x98099 一处 LEA），
+//     且叶子不会递归调用 client5 stage1 ⇒ 无需 CAS 守卫。
+SInt32 X5000HWLibs::wrapQpGvm5Init(void* const obj, void* const clk, void* const desc)
+{
+    const mach_vm_address_t org = singleton().orgQpGvm5Init;
+    if (org == 0) { return 1; }   // hook 未成功 ⇒ 也返回失败（绝不调原件、绝不返回 0）
+
+    // RA 守卫：只有"从叶子 0x987e0 的下一条指令返回"才截断
+    const UInt64 ra = reinterpret_cast<UInt64>(__builtin_return_address(0));
+    const UInt64 raOff = (gHwlibsSlide != 0 && ra > gHwlibsSlide) ? (ra - gHwlibsSlide) : 0;
+    if (raOff != 0x987E2ULL) {
+        // 非叶子路径 ⇒ 原样调回原件（保证"只影响 client5 stage1 的第 14 步"）
+        return FunctionCast(wrapQpGvm5Init, org)(obj, clk, desc);
+    }
+
+    if (gQpN < 0xFFFFFFFFU) { ++gQpN; }
+    gQpRa   = raOff;
+    gQpObj  = reinterpret_cast<UInt64>(obj);
+    gQpClk  = reinterpret_cast<UInt64>(clk);
+    gQpDesc = reinterpret_cast<UInt64>(desc);
+
+    // 读叶子第 2–13 步的输出缓冲 clk（0x68 B，叶子栈；只读）
+    if (nredKernelPtrOk(clk)) {
+        const UInt8* const c = static_cast<const UInt8*>(clk);
+        gQpC4  = *reinterpret_cast<const UInt32*>(c + 0x04);
+        gQpT20 = *reinterpret_cast<const UInt32*>(c + 0x20);
+        gQpT28 = *reinterpret_cast<const UInt64*>(c + 0x28);
+        gQpA30 = *reinterpret_cast<const UInt64*>(c + 0x30);
+        gQpA38 = *reinterpret_cast<const UInt64*>(c + 0x38);
+        gQpA50 = *reinterpret_cast<const UInt32*>(c + 0x50);
+        gQpA58 = *reinterpret_cast<const UInt64*>(c + 0x58);
+        // local_68（ZFB mode）：clk = RBP-0xc8、local_68 = RBP-0x60 ⇒ clk+0x68。
+        //   自证：desc = RBP-0x2a0 ⇒ (clk - desc) 必须 == 0x1d8；不等则不读（防帧布局变化）。
+        if (nredKernelPtrOk(desc) &&
+            (static_cast<const UInt8*>(clk) - static_cast<const UInt8*>(desc)) == 0x1D8) {
+            gQpL68   = *reinterpret_cast<const UInt32*>(c + 0x68);
+            gQpL68Ok = 1;
+        }
+    }
+    return 1;   // ★ 恒非 0 ⇒ 叶子返回 0（失败）
+}
+
 // ─── (8,0) 失败点读点（2026-10-12 技术经理终审；深栈安全——只走 nredTraceLine）────────
 //  ⚠️ 本卡单变量＝仅恢复 H-96c4c 一个读点（B31 memdump 已证真机模式一致；其余读点
 //  9e505/6430f/6720b/956b8/9e757 本轮不加，后续逐轮单变量）。
@@ -7289,6 +7394,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 275：M4′ 早期注入（**批次 P／P-6 起代码侧撤回**，恒关）：不再解析 `-NRedGvm5Early`。
     //  它只在 D 的失败分支里被读，D 已不可启用 ⇒ 保留解析只会误导判读。
     gGvm5Early = false;
+    // 批次 Q′（**默认关**）：client5 stage1 叶第 14 步的截断器。
+    //  关态 ⇒ 不注册 hook、不写 BSS、不输出 [qp] ⇒ 与现状逐字一致。
+    gQp = checkKernelArgument("-NRedQp");
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
     // 265：client5 qq 四字段探针（默认关；只读一次）。
@@ -7709,6 +7817,19 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         if (const auto from = resolveProbe("mode9440f", kMode9440fPattern, nullptr, arrsize(kMode9440fPattern),
                                            0x9440F)) {
             hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapMode9440f, this->orgMode9440f}, "mode9440f");
+        }
+        // 批次 Q′：route 0x1936e（client5 stage1 叶第 14 步的被调者；函数入口型）。
+        //   ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        //   ⚠ resolveProbe 失败只打一行不 panic（沿用既有纪律）。
+        if (gQp) {
+            if (const auto from = resolveProbe("gvm5-init", kQpGvm5InitPattern, nullptr,
+                                               arrsize(kQpGvm5InitPattern), 0x1936E)) {
+                if (hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapQpGvm5Init,
+                                                                this->orgQpGvm5Init},
+                              "gvm5-init")) {
+                    gQpArmed = true;   // 只有真的挂上才允许放行叶子（见 nredStage1Guard 的 case 5）
+                }
+            }
         }
         if (const auto from = resolveProbe("mode96c4c", kMode96c4cPattern, nullptr, arrsize(kMode96c4cPattern),
                                            0x96C4C)) {
