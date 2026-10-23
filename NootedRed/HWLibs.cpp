@@ -253,6 +253,14 @@ static UInt64 gSt1QQ0 = 0, gSt1QQ8 = 0, gSt1QQ10 = 0, gSt1QQ18 = 0;
 static UInt32 gSt1QQF = 1;   // 1=尚未执行/任一级失败；0=读取成功
 static UInt64 gSt1G6P = 0, gSt1G6Key = 0;
 static UInt64 gSt1G9P = 0, gSt1G9Key = 0;
+// ─── 批次 P4：client 8（SMU）观测护栏（`-NRedSt1G8`，默认关）──────────────────────────────
+static bool   gSt1G8        = false;  // `-NRedSt1G8`（默认关）
+static UInt32 gSt1G8Verdict = 0xFF;   // 0＝判据未全过；1＝全过但被观测态拦住；0xFF＝未跑
+static UInt64 gSt1G8P   = 0;          // P8 = *(ctx+0x48)
+static UInt64 gSt1G8F18 = 0;          // *(P8+0x18)（静态回调 0x6463f）
+static UInt64 gSt1G8F28 = 0;          // *(P8+0x28)（SMU ctx）
+static UInt64 gSt1G8V6C8 = 0;         // *(SMU+0x6c8)（观测）
+static UInt64 gSt1G8V6D8 = 0;         // *(SMU+0x6d8)（观测）
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -994,8 +1002,10 @@ __attribute__((noinline))
 static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
 {
     size_t room = cap;
-    int n = snprintf(body + off, room, "[st1g2] p2=%llx key=%llx\n",
-                     static_cast<unsigned long long>(gSt1G2P), static_cast<unsigned long long>(gSt1G2Key));
+    int n = snprintf(body + off, room, "[st1g2] p2=%llx key=%llx p3=%llx\n",
+                     static_cast<unsigned long long>(gSt1G2P),
+                     static_cast<unsigned long long>(gSt1G2Key),
+                     static_cast<unsigned long long>(gSt1P3));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
     n = snprintf(body + off, room, "[st1g5] p5=%llx ip=%llx ipr=%llx\n",
@@ -1038,10 +1048,26 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
                  static_cast<unsigned long long>(gSt1P7), static_cast<unsigned long long>(gSt1P3));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
-    n = snprintf(body + off, room, "[st1g9] p9=%llx key=%llx\n",
-                 static_cast<unsigned long long>(gSt1G9P), static_cast<unsigned long long>(gSt1G9Key));
+    n = snprintf(body + off, room, "[st1g9] p9=%llx key=%llx p3=%llx\n",
+                 static_cast<unsigned long long>(gSt1G9P),
+                 static_cast<unsigned long long>(gSt1G9Key),
+                 static_cast<unsigned long long>(gSt1P3));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
+    // 批次 P4：client 8（SMU）观测护栏读数（**仅 -NRedSt1G8**；关态一字不变）
+    //   ⚠ 必须单独门控：本 stamp 函数整体只受 `gStage1` 门控，
+    //     若不加 `if (gSt1G8)`，`-NRedSt1G8` 关时也会多出这一行 ⇒ 破坏"关态逐字不变"。
+    if (gSt1G8) {
+        n = snprintf(body + off, room, "[st1g8] p8=%llx f18=%llx f28=%llx v6c8=%llx v6d8=%llx v=%u\n",
+                     static_cast<unsigned long long>(gSt1G8P),
+                     static_cast<unsigned long long>(gSt1G8F18),
+                     static_cast<unsigned long long>(gSt1G8F28),
+                     static_cast<unsigned long long>(gSt1G8V6C8),
+                     static_cast<unsigned long long>(gSt1G8V6D8),
+                     static_cast<unsigned>(gSt1G8Verdict));
+        if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                     off += d; room -= d; }
+    }
     n = snprintf(body + off, room, "[st1g14] p14=%llx mes=%llx m790=%llx\n",
                  static_cast<unsigned long long>(gSt1G14P), static_cast<unsigned long long>(gSt1Mes),
                  static_cast<unsigned long long>(gSt1M790));
@@ -5872,6 +5898,15 @@ static bool nredStage1Guard2(const void* const ctx)
     if (*reinterpret_cast<const UInt64*>(q + 0x70) == 0) { nredStage1GfMark(2, 6); return false; }
     const UInt8* const p2 = reinterpret_cast<const UInt8*>(gSt1G2P);
     if (*reinterpret_cast<const UInt64*>(p2 + 0x18) == 0) { nredStage1GfMark(2, 7); return false; }
+    // 批次 P4／P4-2：P3 = *(ctx+0x20) 必须非空。
+    //   依据（批B §2 行 3）：client2/7/9 的 stage1 都硬依赖 P3（经 0x95e90(dev)=0x93980(dev,3)）；
+    //   0x97307 读 P3+0x28 并 call *0x40(P3)、0x97621 读 P3+0x50，**均未判 P3==0**
+    //   ⇒ P3==0 时读地址 0x28 ⇒ fault。guard7 已有此检查（步 5），guard2/9 缺。
+    //   ⚠ P3 当前＝0（批B M1-1）⇒ 本检查生效后 client2 恒 fail-closed（**预期**）。
+    const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(
+        static_cast<const UInt8*>(ctx) + 0x20);
+    gSt1P3 = reinterpret_cast<UInt64>(p3);
+    if (!nredKernelPtrOk(p3)) { nredStage1GfMark(2, 8); return false; }
     return true;
 }
 
@@ -6060,6 +6095,45 @@ static bool nredStage1Guard6(const void* const ctx)
     return true;
 }
 
+// ─── 批次 P4／P4-1：client 8（SMU）的 stage1 **观测**护栏（`-NRedSt1G8`，默认关）──────────
+//  分派路径（批A §4）：0x929ac → 0x9440f(ctx,8,1) → 0x94c38[7]=0x945dd → 0x9e430(ctx)
+//    → P8=*(ctx+0x48) → 0x94d94[1]=0x94ae7 → jmp 0x9e8bb
+//  3 条必需判据（批A §7 P0）：① P8 KPtr ② *(P8+0x18)≠0 ③ *(P8+0x28)≠0
+//  2 条观测（**不参与判定**）：④ *(SMU+0x6c8) ⑤ *(SMU+0x6d8)，SMU=*(P8+0x28)
+//  ⚠ **3 条判据性质不同，必须逐条区分**（client8 叶的自判情况）：
+//    0x9e8bb TEST RDI,RDI ; 0x9e8be JE 0x9e91c   ⇒ 只判 **null**，**不判 KPtr**
+//    0x9e8e5 MOV RCX,[RBX+0x18] ; 0x9e8f9 TEST RCX,RCX ; 0x9e8fc JE 0x9e939  ⇒ 已判非 0
+//    0x9e8fe MOV RDI,[RBX+0x28] ; 0x9e902 TEST RDI,RDI ; 0x9e905 JE 0x9e939  ⇒ 已判非 0
+//    ⇒ 判据 ①（P8 KPtr）是**真防护**：叶的 null 检查拦不住垃圾指针，
+//      而 0x9e8e5 会读 P8+0x18 ⇒ 垃圾 P8 会 trap。
+//    ⇒ 判据 ②③ 是**观测**：叶自己已判非 0，护栏不提供额外防护。
+//  ⚠ 本函数只返回"判据是否全过"；**放行由 case 8 的 `return false` 恒否决**。
+//  ⚠ 观测 ④⑤ 是唯一"额外读"：SMU 至少 0x6D0 字节（苹果 0x67423 读 p+0x6C8），
+//    但 +0x6D8 的边界未离线证明 ⇒ 只在 `-NRedSt1G8` 开时读（默认关）。
+__attribute__((noinline))
+static bool nredStage1Guard8(const void* const ctx)
+{
+    gSt1G8P = 0; gSt1G8F18 = 0; gSt1G8F28 = 0; gSt1G8V6C8 = 0; gSt1G8V6D8 = 0;
+    if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(8, 1); return false; }
+    const UInt8* const p8 = *reinterpret_cast<const UInt8* const*>(
+        static_cast<const UInt8*>(ctx) + 0x48);
+    if (!nredKernelPtrOk(p8)) { nredStage1GfMark(8, 2); return false; }
+    gSt1G8P = reinterpret_cast<UInt64>(p8);
+    const UInt64 f18 = *reinterpret_cast<const UInt64*>(p8 + 0x18);
+    gSt1G8F18 = f18;
+    if (f18 == 0) { nredStage1GfMark(8, 3); return false; }
+    const UInt64 f28 = *reinterpret_cast<const UInt64*>(p8 + 0x28);
+    gSt1G8F28 = f28;
+    if (f28 == 0) { nredStage1GfMark(8, 4); return false; }
+    // 观测（不参与判定）
+    if (nredKernelPtrOk(reinterpret_cast<const void*>(f28))) {
+        const UInt8* const smu = reinterpret_cast<const UInt8*>(f28);
+        gSt1G8V6C8 = *reinterpret_cast<const UInt64*>(smu + 0x6c8);
+        gSt1G8V6D8 = *reinterpret_cast<const UInt64*>(smu + 0x6d8);
+    }
+    return true;
+}
+
 __attribute__((noinline))
 static bool nredStage1Guard7(const void* const ctx)
 {
@@ -6093,6 +6167,12 @@ static bool nredStage1Guard9(const void* const ctx)
     if (*reinterpret_cast<const UInt64*>(p9 + 0x18) == 0) { nredStage1GfMark(9, 5); return false; }
     if (*reinterpret_cast<const UInt64*>(p9 + 0x28) != 0 &&
         *reinterpret_cast<const UInt64*>(p9 + 0x30) == 0) { nredStage1GfMark(9, 6); return false; }
+    // 批次 P4／P4-2：P3 = *(ctx+0x20) 必须非空（同 guard2 步 8 的理由）。
+    //   ⚠ P3 当前＝0 ⇒ 本检查生效后 client9 恒 fail-closed（**预期**）。
+    const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(
+        static_cast<const UInt8*>(ctx) + 0x20);
+    gSt1P3 = reinterpret_cast<UInt64>(p3);
+    if (!nredKernelPtrOk(p3)) { nredStage1GfMark(9, 7); return false; }
     return true;
 }
 
@@ -6121,6 +6201,18 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
         }
         case 6: ok = nredStage1Guard6(ctx); break;
         case 7: ok = nredStage1Guard7(ctx); break;
+        case 8: {
+            // 批次 P4／P4-1：client 8（SMU）的**观测护栏**。
+            //   ⚠ 恒不放行：client8 的 MMIO 经运行期函数指针（*(*(h+8)+0x40/+0xC0)），
+            //     不可离线证明有界（R279 §5 建议 3）⇒ 本批只观测。
+            //   ⚠ `-NRedSt1G8` 默认关：`nredStage1GfMark` 只记**首个**失败，
+            //     client8 的失败会遮蔽 client5 的 `c=5`（r279 的既有形态）。
+            //   ⚠ 直接 `return false` 而不走 `ok`：既不放行，也不置 `gSt1Try` 的 bit8。
+            if (!gSt1G8) { return false; }
+            const bool v8 = nredStage1Guard8(ctx);
+            gSt1G8Verdict = v8 ? 1U : 0U;
+            return false;
+        }
         case 9: ok = nredStage1Guard9(ctx); break;
         case 14: ok = nredStage1Guard14(ctx); break;
         default: return false;   // 8（暂缓）及其它 client：继续 fail-closed
@@ -7403,6 +7495,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gIpR = checkKernelArgument("-NRedIpR");
     // 257：client 3 stage1 时刻的 P3 观测（默认关；只记首次）。
     gSt1P = nredExactBootArg("-NRedSt1P");
+    // 批次 P4（**默认关**）：client 8 观测护栏。关态 ⇒ `case 8` 不可达 ⇒ 逐字不变。
+    gSt1G8 = checkKernelArgument("-NRedSt1G8");
     // 253：MES stage0 真实路径（默认关）。关 ⇒ D2 原行为（清零 + 回读为 0）。
     gMesReal = checkKernelArgument("-NRedMesReal");
     // 254：MES b 系列提供者（默认关）。仅构造静态描述符并挂到 +0x790；不调 0x441ad、不写 MMIO。
