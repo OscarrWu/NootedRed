@@ -202,6 +202,21 @@ static UInt64 gSt1B3P3  = 0;  // 258：client 3 分支读到的 P3（供 `[st1b3
 static UInt64 gSt1G2P = 0, gSt1G2Key = 0;
 static UInt64 gSt1G5P = 0, gSt1G5Ip = 0, gSt1G5Ipr = 0;
 static UInt64 gSt1G5P20 = 0, gSt1G5P21 = 0, gSt1G5P22 = 0, gSt1G5P23 = 0;   // 步20-23 四级指针
+// ─── 批次 P：client5 护栏的中间量与判定结果（只写 BSS，由 [st1g5x/y/z] 输出）──────────────
+static UInt64 gSt1G5H     = 0;   // 步 10：H = *(P5+0x28)（供步 27 读 +0xE88/0xE90/0xE98）
+static UInt64 gSt1G5Root  = 0;   // 步 14：root = *(h8)
+static UInt64 gSt1G5Head  = 0;   // 步 15（观测）：head = *(dev+0xE8)
+static UInt64 gSt1G5Blk   = 0;   // 步 17（观测）：blk = *(head+0x40)
+static UInt64 gSt1G5Arr   = 0;   // 步 18（观测）：arr = *(blk+8)
+static UInt64 gSt1G5F70   = 0;   // 步 24：*(slot1+0x70)
+static UInt64 gSt1G5F268  = 0;   // 步 24：*(slot1+0x268)
+static UInt64 gSt1G5F2B8  = 0;   // 步 24：*(slot1+0x2b8)
+static UInt64 gSt1G5F78   = 0;   // 步 25：*(P5+0x78)
+static UInt64 gSt1G5FE0   = 0;   // 步 26：*(P5+0xE0)
+static UInt64 gSt1G5E88   = 0;   // 步 27：*(H+0xE88)
+static UInt64 gSt1G5E90   = 0;   // 步 27：*(H+0xE90)
+static UInt64 gSt1G5E98   = 0;   // 步 27：*(H+0xE98)
+static UInt32 gSt1G5Verdict = 0xFF;  // 0＝护栏判失败；1＝护栏全过但被 P-7 拦住；0xFF＝未跑
 // （265 的开关/ 观测变量见下方 gSt1Q 组）
 // 268（`-NRedQqProbe` / `-NRedQqHdl`，默认关）：client5 的 qq 句柄层（B1）。
 //  qq 实测是 0x8b969 构造的 0x228 表（q10==qq），而 0x8b4bf 期望 8B 句柄（*h=表）
@@ -211,6 +226,7 @@ static bool   gQqProbeSeen = false;
 static bool   gQqHdl = false;
 static bool   gSt1G5Step24 = false;   // 步24 守卫已接入（安装判据 [9]）
 alignas(8) static UInt8 gQqHdlStore[8];   // 8B 句柄（static：无分配器；8B 对齐，避免未对齐写）
+                                          // 批次 P 起不再写入（方案 C 写入分支已撤回）⇒ [qqh] hstore= 恒 0
 static UInt64 gQqHdlOld = 0;
 static UInt32 gQqHdlRet = 0xFF;
 static UInt64 gQqP = 0, gQqQ = 0, gQqQ8 = 0, gQqS1 = 0;
@@ -980,6 +996,30 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
                  static_cast<unsigned long long>(gSt1G5P22), static_cast<unsigned long long>(gSt1G5P23));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
+    // 批次 P：client5 护栏的中间量与判定（三行，各 ≤191 B；只读 BSS 标量，零解引用）
+    n = snprintf(body + off, room, "[st1g5x] h8=%llx root=%llx s1=%llx dev=%llx head=%llx v=%u\n",
+                 static_cast<unsigned long long>(gSt1G5Ip),
+                 static_cast<unsigned long long>(gSt1G5Root),
+                 static_cast<unsigned long long>(gSt1G5P23),
+                 static_cast<unsigned long long>(gSt1G5Ipr),
+                 static_cast<unsigned long long>(gSt1G5Head),
+                 static_cast<unsigned>(gSt1G5Verdict));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1g5y] f70=%llx f268=%llx f2b8=%llx f78=%llx fe0=%llx\n",
+                 static_cast<unsigned long long>(gSt1G5F70),
+                 static_cast<unsigned long long>(gSt1G5F268),
+                 static_cast<unsigned long long>(gSt1G5F2B8),
+                 static_cast<unsigned long long>(gSt1G5F78),
+                 static_cast<unsigned long long>(gSt1G5FE0));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room, "[st1g5z] e88=%llx e90=%llx e98=%llx\n",
+                 static_cast<unsigned long long>(gSt1G5E88),
+                 static_cast<unsigned long long>(gSt1G5E90),
+                 static_cast<unsigned long long>(gSt1G5E98));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
     n = snprintf(body + off, room, "[st1g6] p6=%llx key=%llx\n",
                  static_cast<unsigned long long>(gSt1G6P), static_cast<unsigned long long>(gSt1G6Key));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
@@ -1044,7 +1084,7 @@ static void nredQqStamp(char* const body, size_t& off, size_t cap, const bool pr
                      off += d; room -= d; }
     }
     if (hdl) {
-        n = snprintf(body + off, room, "[qqh] ret=%u p=%llx qq=%llx h=%llx old=%llx\n",
+        n = snprintf(body + off, room, "[qqh] ret=%u p=%llx qq=%llx hstore=%llx old=%llx\n",
                      static_cast<unsigned>(gQqHdlRet), static_cast<unsigned long long>(gQqP),
                      static_cast<unsigned long long>(gQqQ),
                      static_cast<unsigned long long>(reinterpret_cast<UInt64>(gQqHdlStore)),
@@ -5798,6 +5838,10 @@ static bool nredStage1Guard5(const void* const ctx)
 {
     gSt1G5P = 0; gSt1G5Ip = 0; gSt1G5Ipr = 0;
     gSt1G5P20 = 0; gSt1G5P21 = 0; gSt1G5P22 = 0; gSt1G5P23 = 0;
+    // 批次 P：新增中间量同样逐次清零（沿用本函数"每次重算"的既有纪律，避免跨次残留读数）。
+    gSt1G5H = 0; gSt1G5Root = 0; gSt1G5Head = 0; gSt1G5Blk = 0; gSt1G5Arr = 0;
+    gSt1G5F70 = 0; gSt1G5F268 = 0; gSt1G5F2B8 = 0; gSt1G5F78 = 0; gSt1G5FE0 = 0;
+    gSt1G5E88 = 0; gSt1G5E90 = 0; gSt1G5E98 = 0;
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(5, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x30);
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 2); return false; }
@@ -5816,33 +5860,60 @@ static bool nredStage1Guard5(const void* const ctx)
     if (*reinterpret_cast<const UInt64*>(p5 + 0x18) == 0) { nredStage1GfMark(5, 9); return false; }
     q = *reinterpret_cast<const UInt8* const*>(p5 + 0x28);         // S
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 10); return false; }
+    gSt1G5H = reinterpret_cast<UInt64>(q);                         // 批次 P：供步 27 使用
     q = *reinterpret_cast<const UInt8* const*>(q + 0xE48);         // *(S+0xE48)
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 11); return false; }
     if (*reinterpret_cast<const UInt64*>(q + 0x90) == 0) { nredStage1GfMark(5, 12); return false; }
     q = *reinterpret_cast<const UInt8* const*>(q + 0x08);          // *(..+0x08)
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 13); return false; }
-    // 14（264 更正）：IP=*(A)，iproot=*(IP+0x58) —— 苹果叶/查询用 *(*(A)+0x58)，不是 *(A+0x58)
-    q = *reinterpret_cast<const UInt8* const*>(q);                 // IP=*(A)
+    // 14（批次 P／P-2 修正）：IP=*(A)（＝h8；叶 0x989fd/0x98a00 实测同值）。
+    //   ⚠ 264 版把 iproot 写成 *(IP+0x58)，而 IP 是 8 B 句柄 ⇒ 读对象之外
+    //   （r271 实测落在内核镜像区 ffffff801155cc00，不是合法 iproot）。
+    //   叶子算的是 0x8b8e7(h8) = *(*(h8)+0x58)：
+    //     0x8b4bf/0x8b8e7 同族 —— 0x8b4c8 mov (%rdi),%rdi 先取表，
+    //     0x8bbd3 mov 0x10(%rdi,%rax,8),%rax 再取槽（槽 3 ⇒ +0x58）。
+    q = *reinterpret_cast<const UInt8* const*>(q);                 // IP=*(A)（＝h8）
     if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 14); return false; }
     gSt1G5Ip = reinterpret_cast<UInt64>(q);
-    q = *reinterpret_cast<const UInt8* const*>(q + 0x58);          // iproot=*(IP+0x58)
-    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 14); return false; }
-    gSt1G5Ipr = reinterpret_cast<UInt64>(q);
-    q = *reinterpret_cast<const UInt8* const*>(q + 0xE8);          // 15：head=*(iproot+232)
-    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 15); return false; }
-    if (*reinterpret_cast<const UInt64*>(q + 0x40) == 0) { nredStage1GfMark(5, 16); return false; }   // 16：blk≠0
-    q = *reinterpret_cast<const UInt8* const*>(q + 0x40);          // 17：blk
-    if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 17); return false; }
-    if (*reinterpret_cast<const UInt64*>(q + 0x08) == 0) { nredStage1GfMark(5, 18); return false; }   // 18：arr≠0
-    // 19：叶内 0x98a28 `callq *56(%r13)` ⇒ *(ctx+0x38) 作为函数指针直接调用（未判空）
     {
-        const UInt8* const c38 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x38);
+        const UInt8* const root = *reinterpret_cast<const UInt8* const*>(q);   // root=*(h8)
+        if (!nredKernelPtrOk(root)) { nredStage1GfMark(5, 14); return false; }
+        gSt1G5Root = reinterpret_cast<UInt64>(root);
+        q = *reinterpret_cast<const UInt8* const*>(root + 0x58);   // dev=*(root+0x58)
+        if (!nredKernelPtrOk(q)) { nredStage1GfMark(5, 14); return false; }
+    }
+    gSt1G5Ipr = reinterpret_cast<UInt64>(q);
+    // 15-18（批次 P／P-3 降级为观测）：该四级模型＝0xa31f6（IP 注册表按 type 查表）。
+    //   原型存在（0x1a538 的 0x1a552/0x1a559/0x1a565 ＋ 回调 0xa31f6 的
+    //   0xa3208/0xa3214/0xa3220/0xa3224），但它属于 *(T+0x90) 回调的内部实现，
+    //   该回调的实际绑定未证（M1 U2）。且 0xa31f6 对 *(dev+0xE8)==0 自带判空并返回 0
+    //   ⇒ 该字段为 0 不会 trap。⇒ 只观测，不据此 fail-closed。
+    {
+        const UInt8* const ipr = reinterpret_cast<const UInt8*>(gSt1G5Ipr);
+        if (nredKernelPtrOk(ipr)) {
+            const UInt8* const head = *reinterpret_cast<const UInt8* const*>(ipr + 0xE8);
+            gSt1G5Head = reinterpret_cast<UInt64>(head);
+            if (nredKernelPtrOk(head)) {
+                const UInt8* const blk = *reinterpret_cast<const UInt8* const*>(head + 0x40);
+                gSt1G5Blk = reinterpret_cast<UInt64>(blk);
+                if (nredKernelPtrOk(blk)) {
+                    gSt1G5Arr = *reinterpret_cast<const UInt64*>(blk + 0x08);
+                }
+            }
+        }
+    }
+    // 19（批次 P／P-4）：叶内 0x98a28 是 `callq *0x38(%r13)`，R13 = P5（0x989bc MOV R13,RDI）
+    //   ⇒ 锚点必须是 P5，不是 ctx。
+    {
+        const UInt8* const c38 = *reinterpret_cast<const UInt8* const*>(
+            reinterpret_cast<const UInt8*>(gSt1G5P) + 0x38);
         if (!nredKernelPtrOk(c38)) { nredStage1GfMark(5, 19); return false; }
     }
-    // 20-23：叶内 0x98a08 读 `0x8b4bf(*(*(ctx)))+0x258`（不判返回值）。逐级复刻并分别编号，
-    //   便于用 [st1gf] 定位哪一级为空；不调用 0x8b4bf。
+    // 20-23（批次 P／P-4）：叶内 0x989fd 是 `mov (%rdi),%rax`，rdi = P5（0x989bc）
+    //   ⇒ p = *(P5) = ctx（不是 *(ctx) = h8）。逐级复刻并分别编号，便于用 [st1gf] 定位哪一级为空。
     {
-        const UInt8* const p = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx));
+        const UInt8* const p = *reinterpret_cast<const UInt8* const*>(
+            reinterpret_cast<const UInt8*>(gSt1G5P));
         if (!nredKernelPtrOk(p)) { nredStage1GfMark(5, 20); return false; }
         gSt1G5P20 = reinterpret_cast<UInt64>(p);
     }
@@ -5864,18 +5935,60 @@ static bool nredStage1Guard5(const void* const ctx)
         if (!nredKernelPtrOk(s)) { nredStage1GfMark(5, 23); return false; }
         gSt1G5P23 = reinterpret_cast<UInt64>(s);
     }
-    // 24（仅 -NRedQqHdl）：步23 的 slot1 三值＋服务函数（叶内 0x98ac6/叶主体调用点）。
-    //   0x98a42：*(slot1+0x268)==0 ⇒ 苹果失败返回（合法）；非 0 ⇒ 0x98ac6 callq 它。
-    //   269：f70/f268/f2b8 必须是 __text 函数入口（首字节 0x55＝push %rbp），否则 fail-closed。
-    if (gQqHdl) {
+    // 24（批次 P／P-5）：门控从 gQqHdl 改为 gStage1（随护栏本身启用）。
+    //   强度按叶内真实调用点分级：
+    //     f2b8 —— 叶 0x9894f CALL R12，**成功路径**（前置 0x9891c/0x98925/0x98932 全过）
+    //             ⇒ 无条件校验（非 0 则必须是 __text 入口）。
+    //     f70  —— 叶 0x9885f CALL RBX，**仅错误路径**（前置 0x98811 MOVSXD/CMP 0x3/JNC，
+    //             即 local_68 >= 3 才进）⇒ 放宽为"非 0 则校验"；无条件化比苹果更严。
+    //     f268 —— 叶 0x98ac6 CALL [RBP-0x40]，且 0x98a42 判 *(slot1+0x268)==0 即合法
+    //             ⇒ 保持"非 0 则校验"。
+    if (gStage1) {
         const UInt8* const s1 = reinterpret_cast<const UInt8*>(gSt1G5P23);
         if (!nredKernelPtrOk(s1)) { nredStage1GfMark(5, 24); return false; }
-        const UInt64 f70 = *reinterpret_cast<const UInt64*>(s1 + 0x70);
+        const UInt64 f70  = *reinterpret_cast<const UInt64*>(s1 + 0x70);
         const UInt64 f268 = *reinterpret_cast<const UInt64*>(s1 + 0x268);
         const UInt64 f2b8 = *reinterpret_cast<const UInt64*>(s1 + 0x2b8);
-        if (!nredTextPrologue(f70)) { nredStage1GfMark(5, 24); return false; }
+        gSt1G5F70 = f70; gSt1G5F268 = f268; gSt1G5F2B8 = f2b8;
+        if (f70  != 0 && !nredTextPrologue(f70))  { nredStage1GfMark(5, 24); return false; }
         if (f268 != 0 && !nredTextPrologue(f268)) { nredStage1GfMark(5, 24); return false; }
-        if (f2b8 != 0 && !nredTextPrologue(f2b8)) { nredStage1GfMark(5, 24); return false; }
+        // f2b8 **无条件**：叶 0x988fa MOV R12,[RAX+0x2b8] → 0x9894f CALL R12，
+        //   中间（0x98901-0x9894c）只做缓冲区清零与两次判空（*(P5+0x28)、*(P5+0x78)），
+        //   **不判 R12** ⇒ f2b8==0 时叶子会 call *0（trap）⇒ 为 0 也必须失败。
+        //   （nredTextPrologue(0) 本身返回 false，故这一行同时覆盖"为 0"与"非入口"。）
+        if (!nredTextPrologue(f2b8)) { nredStage1GfMark(5, 24); return false; }
+    }
+    // 25（批次 P 新增）：叶 0x98925 MOV RAX,[R14+0x78] → 0x98932 CALL RAX。
+    //   叶子自带判空（0x98929 TEST RAX,RAX ; 0x9892c JZ 0x98959 走断言通道）
+    //   ⇒ 为 0 合法，非 0 才需是 __text 入口。
+    {
+        const UInt64 f78 = *reinterpret_cast<const UInt64*>(p5 + 0x78);
+        gSt1G5F78 = f78;
+        if (f78 != 0 && !nredTextPrologue(f78)) { nredStage1GfMark(5, 25); return false; }
+    }
+    // 26（批次 P 新增）：叶 0x988b2 MOV RAX,[R14+0xE0] → 0x988c2 CALL RAX。
+    //   同样自带判空（0x988b9 TEST RAX,RAX ; 0x988bc JZ 0x988cc）。
+    {
+        const UInt64 fE0 = *reinterpret_cast<const UInt64*>(p5 + 0xE0);
+        gSt1G5FE0 = fE0;
+        if (fE0 != 0 && !nredTextPrologue(fE0)) { nredStage1GfMark(5, 26); return false; }
+    }
+    // 27（批次 P 新增，**必须**）：0x1aef4/0x1dde1/0x3d1b5 的首句直接读
+    //   *(H+0xE90)+8 / *(H+0xE88)+8 / *(H+0xE98)+8，**不判空**
+    //   （0x1af08 MOV RAX,[RDI+0xe90] ; 0x1af0f MOV EAX,[RAX+0x8]；
+    //     0x1ddf8 MOV R13,[RDI+0xe88]；0x3d1c9 MOV RAX,[RDI+0xe98] ; 0x3d1d0 MOV EAX,[RAX+0x8]）
+    //   ⇒ 为 0 时叶子必 trap。这是原护栏完全缺失的一项。
+    {
+        const UInt8* const H = reinterpret_cast<const UInt8*>(gSt1G5H);
+        const UInt64 e88 = *reinterpret_cast<const UInt64*>(H + 0xE88);
+        const UInt64 e90 = *reinterpret_cast<const UInt64*>(H + 0xE90);
+        const UInt64 e98 = *reinterpret_cast<const UInt64*>(H + 0xE98);
+        gSt1G5E88 = e88; gSt1G5E90 = e90; gSt1G5E98 = e98;
+        if (!nredKernelPtrOk(reinterpret_cast<const void*>(e88)) ||
+            !nredKernelPtrOk(reinterpret_cast<const void*>(e90)) ||
+            !nredKernelPtrOk(reinterpret_cast<const void*>(e98))) {
+            nredStage1GfMark(5, 27); return false;
+        }
     }
     return true;
 }
@@ -5950,7 +6063,17 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
     switch (client) {
         case 2: ok = nredStage1Guard2(ctx); break;
         case 3: ok = nredStage1Guard3(ctx); break;
-        case 5: ok = nredStage1Guard5(ctx); break;
+        case 5: {
+            // 批次 P／P-7（**关键**）：判定与放行解耦。
+            //   背景：nredStage1Guard 返回 true ⇒ 本文件下方的 `if (gStage1 && c == 1)` 分支
+            //   立即调用 orgMode9440f ⇒ 苹果叶执行 ⇒ 叶内 0x1936e 做真实 MMIO（M1 §2.3）。
+            //   而批次 P 的目的恰恰是"验证护栏读数、不放行叶子"。
+            //   ⇒ 照常跑完全部检查并记录读数，但 client5 恒不放行。
+            const bool v = nredStage1Guard5(ctx);
+            gSt1G5Verdict = v ? 1U : 0U;
+            ok = false;
+            break;
+        }
         case 6: ok = nredStage1Guard6(ctx); break;
         case 7: ok = nredStage1Guard7(ctx); break;
         case 9: ok = nredStage1Guard9(ctx); break;
@@ -6286,6 +6409,8 @@ static void nredQqProbe(const void* const ctx)
 
 //  安装（决策 C）：7 条 fail-closed 全满足才建 8B 句柄（*h=qq）并改写 *(p) 一处。
 //  ⚠ 规格写的 `nredKernelMalloc` 在本仓库不存在 ⇒ 用 static 8B 对象（生命周期＝kext）。
+//  批次 P（P-1）：**写入分支已撤回**（见函数尾注释）——本函数现在只做只读探针，
+//  `gQqHdlRet=0` 表示"只读探针全部通过"，不再表示"已改写 *(p)"。
 __attribute__((noinline))
 static bool nredQqHdlInstall(const void* const ctx)
 {
@@ -6315,10 +6440,12 @@ static bool nredQqHdlInstall(const void* const ctx)
     if (gQqV268 != 0 && !nredTextPrologue(gQqV268)) { gQqHdlRet = 8; return false; }
     if (gQqV2B8 != 0 && !nredTextPrologue(gQqV2B8)) { gQqHdlRet = 8; return false; }
     if (!gSt1G5Step24) { gQqHdlRet = 9; return false; }
-    UInt8* const h = gQqHdlStore;
-    gQqHdlOld = *reinterpret_cast<const UInt64*>(p);
-    *reinterpret_cast<UInt64*>(h) = reinterpret_cast<UInt64>(qq);
-    *reinterpret_cast<UInt8**>(const_cast<UInt8*>(p)) = h;           // 唯一写入点：*(p)
+    // 批次 P（P-1）：撤回方案 C 的写入分支。
+    //   理由（W2 §6.3）：C 的写入点 p ＝ *(ctx) ＝ h8；写后 0x8b4bf(h8) 变成 *(h+0x28)
+    //   （h 为 8 B 静态对象）＝越界读；更严重的是它会让护栏步 22 由"失败"变"通过"
+    //   ⇒ 同时解除护栏。
+    //   ⇒ 只保留只读探针。gQqHdlRet=0 的语义改为"只读探针全部通过"（不再是"写入成功"）。
+    gQqHdlOld = *reinterpret_cast<const UInt64*>(p);   // 只读：记录原值供 [qq] 观测
     gQqHdlRet = 0;
     return true;
 }
@@ -7152,13 +7279,15 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSt1C = checkKernelArgument("-NRedSt1C");
     // 261：client5 GVM type/注册表探针（默认关；只读一次）。
     gGvm5 = checkKernelArgument("-NRedGvm5");
-    // 273：client5 stage1 叶替换（默认关）。开 ⇒ 我方完整复刻 0x985d0；关 ⇒ 苹果原叶。
-    //  A3（L5）：用精确 token 匹配，避免 `-NRedGvm5D` 被 `checkKernelArgument("-NRedGvm5")` 前缀命中。
-    gGvm5D = nredExactBootArg("-NRedGvm5D");
+    // 273：client5 stage1 叶替换（**批次 P／P-6 起代码侧撤回**，恒关）。
+    //  理由：D 分支位于下方护栏分支**之前** ⇒ D 在则护栏根本不跑，批次 P 的读数目的落空，
+    //  且会重复 277 的形态。⇒ 不再解析 `-NRedGvm5D`；D 代码保留但不启用（需求文档 §2 非范围）。
+    gGvm5D = false;
     // 274：client5 stage1 入口只读探针（默认关；只写 BSS，不执行 D）。
     gGvm5Phase = nredExactBootArg("-NRedGvm5Phase");
-    // 275：M4′ 早期注入（默认关；依赖 -NRedGvm5D）。开 ⇒ wrapInitializeTtl 入口执行 D。
-    gGvm5Early = nredExactBootArg("-NRedGvm5Early");
+    // 275：M4′ 早期注入（**批次 P／P-6 起代码侧撤回**，恒关）：不再解析 `-NRedGvm5Early`。
+    //  它只在 D 的失败分支里被读，D 已不可启用 ⇒ 保留解析只会误导判读。
+    gGvm5Early = false;
     // 262：client5 golden 6 槽（默认关；只读一次）。
     gGSlot = checkKernelArgument("-NRedGSlot");
     // 265：client5 qq 四字段探针（默认关；只读一次）。
