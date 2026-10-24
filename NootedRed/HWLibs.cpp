@@ -3497,6 +3497,24 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
                 gPspEdxSkip = 1;                               // i >= 32（idx 异常）
             }
         }
+        // 修复 A（R-pspedx3轮判读 §4）：事件发生时**立刻**写一条环行（限流 ≤4），
+        //  不再依赖头部 flush 的时机（本轮实证：头部行在 20 s flush，而事件在 34.1 s）。
+        //  ⚠ 纯内存（`nredTraceLine` 不刷盘）⇒ 深栈安全；`static` 缓冲不占栈。
+        //  ⚠ 与头部行共用同一组 BSS ⇒ 两处读数必然一致。
+        if (gPspEdxEnter <= 4) {
+            static char pspLine[128];
+            const int nPsp = snprintf(pspLine, sizeof(pspLine),
+                                      "[pspedx] enter=%u ret=%x idx=%u wrap=%u skip=%u edx=%llx ev=%x sev=%u\n",
+                                      static_cast<unsigned>(gPspEdxEnter),
+                                      static_cast<unsigned>(gPspEdxRet),
+                                      static_cast<unsigned>(gPspEdxRawIdx),
+                                      static_cast<unsigned>(gPspEdxWrapped),
+                                      static_cast<unsigned>(gPspEdxSkip),
+                                      static_cast<unsigned long long>(gPspEdxVal),
+                                      static_cast<unsigned>(gPspEdxEv),
+                                      static_cast<unsigned>(gPspEdxSev));
+            if (nPsp > 0) { nredTraceLine(pspLine, nPsp); }
+        }
     }
     return ret;
 }
