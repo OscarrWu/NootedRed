@@ -28,10 +28,11 @@ void nredTraceLine(char* const buf, const int n);
 int nredTraceFlush();
 // A-28：秒级标签版本（由 L2 周期拍 `dumpTick` 在 stBusy 保护区内调用；文件名与首行带 `sec=`）
 int nredTraceFlush(int secTag);
-// 失败收容（-NRedFailReset，默认关）：先落盘，再 PEHaltRestart(1)。
-void nredFailReset(const char* where, int code, UInt64 a, UInt64 b);
-// 验收路径 B：通道自检待办查询（关态第一行返回 false ⇒ 零行为）。
-bool nredFailResetTestPending();
+// 失败收容（-NRedFailReset，默认关）：失败点只留内存证据（零 I/O、零复位）。
+//  批次 F 起与安全点解耦：Mark（失败点）→ Service（L2 拍：落盘 → 刷环 → PEHaltRestart(1)）。
+void nredFailResetMark(const char* where, int code, UInt64 a, UInt64 b);
+// 安全点：有待处理失败时落盘并复位。返回 true ⇒ 已发起复位（正常不返回）。
+bool nredFailResetService();
 // B19（2026-10-11）：早期 bringup 期间**静音** `NRED_TRACE` 的 SYSLOG（内核日志）通道。
 //  根因（B19 Double-fault 归因）：bringup 挂在深栈上执行，而 `NRED_TRACE` 每条都先调 SYSLOG ⇒
 //  `lilu_os_log`（内含 1 KB 栈缓冲）→ `IOLog` → `__os_log_internal` ⇒ 深栈 + 大栈耗 ⇒ 触栈保护页

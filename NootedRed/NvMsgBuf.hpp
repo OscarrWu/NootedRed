@@ -87,10 +87,10 @@ extern "C" {
 //  @param secTag 秒级时间戳（写入文件名与首行标签 ⇒ 判读"最后一拍"可读到秒）
 int nredTraceFlush(int secTag);
 int nredTraceFlush();   // 无参兼容封装（既有 dumpNow 调用点）
-// 失败收容（-NRedFailReset，默认关）：先落盘，再 PEHaltRestart(1)。定义于 HWLibs.cpp。
-void nredFailReset(const char* where, int code, UInt64 a, UInt64 b);
-// 验收路径 B：通道自检待办查询（关态返回 false ⇒ 零行为）。
-bool nredFailResetTestPending();
+// 失败收容（-NRedFailReset，默认关）：失败点只留内存证据（零 I/O、零复位）。定义于 HWLibs.cpp。
+void nredFailResetMark(const char* where, int code, UInt64 a, UInt64 b);
+// 安全点（L2 拍）：有待处理失败时落盘并 PEHaltRestart(1)。返回 true ⇒ 已发起复位。
+bool nredFailResetService();
 
 namespace NvMsgBuf {
 	static constexpr int kMagic   = 0x063061;
@@ -511,9 +511,10 @@ namespace NvMsgBuf {
 			// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之后**调用 ⇒
 			//  flush 的耗时（含 FS 阻塞）不计入 stBusy 持有时间 ⇒ L2 计时器不被拖住）。
 			//  flush 自身用独立的 stFlushBusy 互斥（防并发写同一卷）。
-			// 批次 FailReset：验收路径 B 的通道自检（仅 -NRedFailReset + -NRedFailResetTest；
-			//  关态返回 false ⇒ 零行为）。放在 rootvnode 已确认、stBusy 已释放之后。
-			if (nredFailResetTestPending()) { nredFailReset("selftest", 0, 0, 0); }
+			// 批次 F：失败收容的安全点（仅 -NRedFailReset；关态第一行返回 false ⇒ 零行为）。
+			//  放在 rootvnode 已确认、stBusy 已释放之后：失败点只留内存证据，落盘/复位都在此完成。
+			//  返回 true ⇒ 已发起复位（正常不返回）⇒ 不再继续本拍。
+			if (nredFailResetService()) { return; }
 			nredTraceFlush(sec);
 			return;
 		}

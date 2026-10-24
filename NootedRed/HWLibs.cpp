@@ -238,7 +238,7 @@ static UInt8  gQpL68Ok  = 0;       // 派生自证是否成立（0＝不读，1�
 //  ⚠ 只写标量；关态 nredFailReset 第一行即 return ⇒ 零行为、零输出。
 static bool   gFailResetOn = false;   // `-NRedFailReset`
 static bool   gFailResetTest = false; // `-NRedFailResetTest`（验收路径 B；仅与上者同开生效）
-static bool   gFrTestDone = false;    // 自检只做一次
+static bool   gFrTestDone = false;    // 测试触发只做一次（批次 F 起语义）
 static UInt32 gFrSeq       = 0;       // 调用序号（1 起）
 static char   gFrWhere[24] = {0};     // 失败点短名（有界拷贝）
 static int    gFrCode      = 0;       // 失败码（步号/F 编号/返回码）
@@ -247,6 +247,10 @@ static UInt64 gFrB         = 0;       // 附加读数 2（读回值/尺寸）
 static UInt32 gFrCtx       = 0;       // 上下文位：bit0 中断开 / bit1 rootvnode / bit2 静态无锁
 static int    gFrFlush     = -1;      // 最近一次落盘行数（-1＝尚未尝试）
 static int    gFrRet       = -1;      // PEHaltRestart 返回值（-1＝尚未调用/未返回）
+// 批次 F（失败收容重写）：失败点只置标志，安全点（L2 拍）才落盘/复位。
+static UInt32 gFrPending  = 0;        // 1＝失败已记录，待安全点处理
+static UInt32 gFrServiced = 0;        // 1＝安全点已处理（防重复）
+static UInt32 gFrTickSec  = 0;        // 失败时刻的秒级标签（stTick()*kTickSecs）
 // （265 的开关/ 观测变量见下方 gSt1Q 组）
 // 268（`-NRedQqProbe` / `-NRedQqHdl`，默认关）：client5 的 qq 句柄层（B1）。
 //  qq 实测是 0x8b969 构造的 0x228 表（q10==qq），而 0x8b4bf 期望 8B 句柄（*h=表）
@@ -2128,18 +2132,40 @@ int nredTraceFlush(int secTag)
 // 无参兼容封装（既有调用点 X6000FB.cpp 曾用）：秒级标签取"当前拍序号×kTickSecs"。
 int nredTraceFlush() { return nredTraceFlush(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs); }
 
-// ── 失败收容：先落盘，再 ACPI 复位（-NRedFailReset，默认关）────────────────────
-//  顺序（需求 §5.2）：填 BSS → 自检上下文 → 进内存环 → 落盘 → 复位 → 返回兜底。
-//  ⚠ 红线：返回值语义不变（调用者仍返回失败）；上下文不满足时只落盘、不复位。
+// ── 失败收容（-NRedFailReset，默认关）：失败点只留内存证据，安全点落盘并复位 ──────────
+//  批次 F 重写（原实现在失败点直接刷盘＋复位，违反 :846-850 的深栈纪律）：
+//    ① nredFailResetMark    —— 失败点（可能在 stage1 深栈）：只写 BSS + 内存环。零 I/O、零复位。
+//    ② nredFailResetService —— 安全点（L2 拍：stBusy 已释放、rootvnode 已确认）：落盘 → 刷环 → 复位。
+//    ③ nredFailResetWrite   —— 一次独立写（专用文件），成功与否本身就是证据。
+//  ⚠ 红线：Mark 是 void ⇒ 调用点返回值不变（不掩盖失败）；上下文不满足时只落盘、不复位。
 //  ⚠ 不写 NVRAM（避免与 gAppleEFIRuntimeBusy 争用）；不写任何内核全局。
-void nredFailReset(const char* const where, const int code, const UInt64 a, const UInt64 b)
+
+// 一次独立写（与内存环无关）；复用既有 nredTraceTruncateFile + FileIO::writeBufferToFile。
+static int nredFailResetWrite(const char* const stage)
+{
+    char path[64];
+    const int pn = snprintf(path, sizeof(path), "/var/log/NRedFailReset-%u-%s.txt",
+                            static_cast<unsigned>(gFrSeq), stage);
+    if (pn <= 0) { return -1; }
+    char line[192];
+    const int n = snprintf(line, sizeof(line),
+        "failreset seq=%u stage=%s where=%s code=%d a=%llx b=%llx ctx=%u flush=%d rc=%d sec=%u\n",
+        static_cast<unsigned>(gFrSeq), stage, gFrWhere, gFrCode,
+        static_cast<unsigned long long>(gFrA), static_cast<unsigned long long>(gFrB),
+        static_cast<unsigned>(gFrCtx), gFrFlush, gFrRet,
+        static_cast<unsigned>(gFrTickSec));
+    if (n <= 0) { return -1; }
+    nredTraceTruncateFile(path);
+    return FileIO::writeBufferToFile(path, line, static_cast<size_t>(n));
+}
+
+// 失败点（可能在 stage1 深栈）：只写内存环 + 置标志。零 I/O、零复位。
+//  ⚠ 不得在此调用 nredTraceFlush／FileIO::writeBufferToFile／PEHaltRestart（深栈纪律）。
+void nredFailResetMark(const char* const where, const int code, const UInt64 a, const UInt64 b)
 {
     if (!gFailResetOn) { return; }                       // 关态：零行为
-
-    // ① 填 BSS（where 有界拷贝，避免悬垂指针）
+    if (gFrPending != 0) { return; }                     // 只记第一次
     gFrSeq += 1;
-    gFrCode = code; gFrA = a; gFrB = b;
-    gFrFlush = -1; gFrRet = -1;
     {
         size_t i = 0;
         if (where != nullptr) {
@@ -2147,53 +2173,41 @@ void nredFailReset(const char* const where, const int code, const UInt64 a, cons
         }
         gFrWhere[i] = '\0';
     }
-
-    // ② 上下文自检（C1 由调用点设计保证；C2/C3 在此判定）
-    gFrCtx = 0;
-    if (ml_get_interrupts_enabled()) { gFrCtx |= 1U; }   // C2
-    if (rootvnode != nullptr)        { gFrCtx |= 2U; }   // 落盘前提
-    gFrCtx |= 4U;                                        // C3：接入点静态无锁（评审常量）
-
-    // ③ 进内存环（保证 nredTraceFlush 的 count>0）
-    //   ⚠ 深栈纪律（B19）：只用 nredTraceLine（纯内存），**不用 NRED_TRACE**（后者含 SYSLOG，
-    //     1 KB 栈缓冲 + IOLog；失败点可能在 stage1 深栈上）。
-    {
-        char line[192];
-        const int ln = snprintf(line, sizeof(line),
-            "failreset: seq=%u where=%s code=%d a=%llx b=%llx ctx=%u\n",
-            static_cast<unsigned>(gFrSeq), gFrWhere, gFrCode,
-            static_cast<unsigned long long>(gFrA),
-            static_cast<unsigned long long>(gFrB),
-            static_cast<unsigned>(gFrCtx));
-        if (ln > 0) { nredTraceLine(line, ln); }
-    }
-
-    // ④ 先落盘（L2：/var/log/NRedTraceFlush-*.txt）
-    const int sec = NvMsgBuf::stTick() * NvMsgBuf::kTickSecs;
-    gFrFlush = nredTraceFlush(sec);
-
-    // ⑤ 上下文不满足 ⇒ 不复位（红线：不得在持锁/中断上下文调用）
-    if (gFrCtx != 7U) { return; }
-
-    // ⑥ ACPI 复位（type 1；正常不返回）
-    const int rc = PEHaltRestart(kPERestartCPU);
-
-    // ⑦ 返回兜底：记录 + 再落盘一次（尽力；不重试、不换 type）
-    gFrRet = rc;
-    {
-        char line[96];
-        const int ln = snprintf(line, sizeof(line), "failreset: reset returned seq=%u rc=%d\n",
-                                static_cast<unsigned>(gFrSeq), rc);
-        if (ln > 0) { nredTraceLine(line, ln); }
-    }
-    (void)nredTraceFlush(sec);
+    gFrCode = code; gFrA = a; gFrB = b;
+    gFrTickSec = static_cast<UInt32>(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs);
+    gFrPending = 1;
+    //  ⚠ 深栈纪律（B19）：只用 nredTraceLine（纯内存），**不用 NRED_TRACE**（后者含 SYSLOG）。
+    char line[192];
+    const int n = snprintf(line, sizeof(line),
+        "[failreset] seq=%u where=%s code=%d a=%llx b=%llx sec=%u st=mark\n",
+        static_cast<unsigned>(gFrSeq), gFrWhere, gFrCode,
+        static_cast<unsigned long long>(gFrA), static_cast<unsigned long long>(gFrB),
+        static_cast<unsigned>(gFrTickSec));
+    if (n > 0) { nredTraceLine(line, n); }
 }
 
-// 验收路径 B：通道自检待办查询（关态第一行返回 false ⇒ 零行为）
-bool nredFailResetTestPending()
+// 安全点（L2 拍：stBusy 已释放、rootvnode 已确认）：落盘 → 刷环 → 复位 → 返回兜底。
+//  返回 true ⇒ 已发起复位（正常不返回）；false ⇒ 未处理或上下文不满足。
+bool nredFailResetService()
 {
-    if (!gFailResetOn || !gFailResetTest || gFrTestDone) { return false; }
-    gFrTestDone = true;
+    if (!gFailResetOn || gFrPending == 0 || gFrServiced != 0) { return false; }
+    gFrServiced = 1;
+
+    gFrCtx = 0;
+    if (ml_get_interrupts_enabled()) { gFrCtx |= 1U; }   // C2
+    if (rootvnode != nullptr)        { gFrCtx |= 2U; }   // C3
+    gFrCtx |= 4U;                                        // C4：L2 拍静态无锁
+
+    gFrFlush = -1; gFrRet = -1;
+    (void)nredFailResetWrite("pre");                     // ① 专用文件（主证据）
+    gFrFlush = nredTraceFlush(static_cast<int>(gFrTickSec));   // ② 刷环（尽力）
+
+    if (gFrCtx != 7U) { (void)nredFailResetWrite("skip"); return false; }   // 不复位
+
+    const int rc = PEHaltRestart(kPERestartCPU);         // ③ 复位（正常不返回）
+    gFrRet = rc;
+    (void)nredFailResetWrite("post");                    // ④ 返回兜底
+    (void)nredTraceFlush(static_cast<int>(gFrTickSec));
     return true;
 }
 
@@ -5288,8 +5302,8 @@ static int nredGvmSwInit(void* const info, void* const out, const UInt64 o8init)
     //  ⚠ 失败 ⇒ 按键释放已建对象＋清字段＋0x19324(clone)；不得留半成品。
     if (gP6On) {
         if (!nredP6BuildFourObjects(handle, info)) {
-            // 批次 FailReset：先落盘 + 复位（复位返回后才做清理；关态零行为）。
-            nredFailReset("p6.build", static_cast<int>(gP6Code), gP6Key[0], 0);
+            // 批次 F：失败点只留内存证据（零 I/O、零复位）；落盘与复位由 L2 拍的安全点完成。
+            nredFailResetMark("p6.build", static_cast<int>(gP6Code), gP6Key[0], 0);
             nredP6FreeBuilt(handle);
             using P6Cleanup = void (*)(void*);
             const auto cleanup = reinterpret_cast<P6Cleanup>(gHwlibsSlide + 0x19324);
@@ -6930,6 +6944,14 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
             //  立即调用 orgMode9440f ⇒ 苹果叶执行 ⇒ 叶内 0x1936e 做真实 MMIO（M1 §2.3）。
             const bool v = nredStage1Guard5(ctx);
             gSt1G5Verdict = v ? 1U : 0U;
+            // 批次 F：确定性测试触发（-NRedFailReset -NRedFailResetTest）。
+            //  client5 的 stage1 每次启动必发生（它就是 panic 的路径）⇒ 确定性；
+            //  只置标志（零 I/O），由下一个 L2 拍（≤1 s）落盘并复位。
+            if (gFailResetOn && gFailResetTest && gFrTestDone == 0) {
+                gFrTestDone = true;
+                nredFailResetMark("test.g5", static_cast<int>(gSt1G5Verdict),
+                                  gSt1G5P, gSt1G5P23);
+            }
             // 批次 R1：门＝(Q′ 已武装) ∧ (R1 关 或 就绪判定为真)。
             //  ⚠ R1 恒未就绪（a210=0／表空／R2 未开）⇒ 门不开 ⇒ 叶不跑（安全出口）。
             // 批次 P2b／C3：门 A 用 gR1ReadyA（stage0 可判项）＋ gR2On/gP2bOn；
@@ -7797,11 +7819,11 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     //  关态 ⇒ 本行不成立，后续路径逐字不变；开态 ⇒ 不进入苹果叶（也不进入下方 fail-closed 护栏）。
     if (gGvm5D && b == 5 && c == 1) {
         const UInt32 rc = nredGvm5Stage1(a, d);
-        // 批次 FailReset：可检测失败 ⇒ 先落盘 + ACPI 复位（-NRedFailReset；关态零行为）。
-        //  ⚠ 返回值语义不变：复位返回（异常）后仍走下方既有 panic/return 路径。
+        // 批次 F：可检测失败 ⇒ 只记内存证据（零 I/O、零复位）；落盘与复位由 L2 拍的安全点完成。
+        //  ⚠ 返回值语义不变：仍走下方既有 panic/return 路径。
         if (rc == 0) {
-            nredFailReset("gvm5d", static_cast<int>(gGvm5DStep),
-                          gGvm5DP1, static_cast<UInt64>(gGvm5DLocal68));
+            nredFailResetMark("gvm5d", static_cast<int>(gGvm5DStep),
+                              gGvm5DP1, static_cast<UInt64>(gGvm5DLocal68));
         }
         // 276：`-NRedGvm5Early` 下未命中幂等（p1 不同/非法，或早期未成功）⇒ 这是 late path；
         //  D 失败必须**主动 panic**（否则失败可能拖到 powerUp/WindowServer，违反"失败必早 panic"）。
