@@ -1660,9 +1660,14 @@ static void nredMesBStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
-int nredTraceFlush(int secTag)
+// 批次 F1（A 轮全零定因 §8.1）：把实现抽成 impl，`force` 只放宽"环空"这一条早退。
+//  动机：头部读数（`[p6]`／`[st1r]`／`[r1]`／`[p2b]`）只在"有环行要写"时才被带出去 ⇒
+//  环空时头部读数永远落不了盘（A 轮唯一新鲜片 sec=20 早于 sw init 1–2 s 即此机制）。
+//  ⚠ `force` **不**放宽 `rootvnode` 判据（落盘前提）；也不改任何既有落盘时点/频率/正文格式。
+static int nredTraceFlushImpl(const int secTag, const bool force)
 {
-    if (rootvnode == nullptr || gTraceRing.count == 0) { return 0; }
+    if (rootvnode == nullptr) { return 0; }              // 落盘前提（force 也不放宽）
+    if (!force && gTraceRing.count == 0) { return 0; }   // 非 force：环空不写（既有行为）
     // A-28 风险①处理：flush 用**独立** `stFlushBusy` 互斥（与 L2 的 `stBusy` 分开）⇒
     //  万一 FS 阻塞，只影响本 flush，不会让 L2 周期拍后续全部跳过（唯一存活计时器保住）。
     //  使用 OSCompareAndSwap 原子 test-and-set 防止 flush 重入写坏缓冲。
@@ -2138,8 +2143,12 @@ int nredTraceFlush(int secTag)
     NvMsgBuf::stFlushBusy() = false;
     return 0;
 }
+// 既有入口（行为逐字不变）：环空不写。
+int nredTraceFlush(const int secTag) { return nredTraceFlushImpl(secTag, false); }
 // 无参兼容封装（既有调用点 X6000FB.cpp 曾用）：秒级标签取"当前拍序号×kTickSecs"。
-int nredTraceFlush() { return nredTraceFlush(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs); }
+int nredTraceFlush() { return nredTraceFlushImpl(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs, false); }
+// 批次 F1：强制入口——环空也写一片**头部**（正文区无环行）。只给 panic 路径用。
+int nredTraceFlushForce(const int secTag) { return nredTraceFlushImpl(secTag, true); }
 
 // ── 失败收容（-NRedFailReset，默认关）：失败点只留内存证据，安全点落盘并复位 ──────────
 //  批次 F 重写（原实现在失败点直接刷盘＋复位，违反 :846-850 的深栈纪律）：
@@ -5131,6 +5140,17 @@ static bool nredR1InitE88(void* const obj, void* const clone, const UInt32 key)
 
 static bool nredP6BuildFourObjects(void* const clone, void* const info)
 {
+    // 批次 F2（A 轮全零定因 §8.2）：P6 构造入口一次性环标记。
+    //  目的：环非空 ⇒ 下一拍 L2 tick 必写一片 ⇒ 头部读数（`[p6]`／`[st1r]`／`[r1]`／`[p2b]`）随之落盘。
+    //  ⚠ 纯内存（`nredTraceLine` 不刷盘）⇒ 深栈安全；本函数只由 `if (gP6On)` 分支调用 ⇒ 关态不执行。
+    {
+        static bool once = false;
+        if (!once) {
+            once = true;
+            static char kP6Enter[] = "[swinit] p6-enter\n";
+            nredTraceLine(kP6Enter, static_cast<int>(sizeof(kP6Enter) - 1));
+        }
+    }
     if (!nredKernelPtrOk(clone) || gHwlibsSlide == 0) { gP6Code = 4; return false; }
     using P6Lookup = UInt64 (*)(UInt32, UInt32, UInt32, UInt32, const void*, UInt32);
     using P6Create = UInt64 (*)(void*, void*, void*, void*);

@@ -87,6 +87,8 @@ extern "C" {
 //  @param secTag 秒级时间戳（写入文件名与首行标签 ⇒ 判读"最后一拍"可读到秒）
 int nredTraceFlush(int secTag);
 int nredTraceFlush();   // 无参兼容封装（既有 dumpNow 调用点）
+// 批次 F1（A 轮全零定因 §8.1）：强制入口——环空也写一片**头部**（只给 panic 路径用）。
+int nredTraceFlushForce(int secTag);
 // 失败收容（-NRedFailReset，默认关）：失败点只留内存证据（零 I/O、零复位）。定义于 HWLibs.cpp。
 void nredFailResetMark(const char* where, int code, UInt64 a, UInt64 b);
 // 安全点（L2 拍）：有待处理失败时落盘并 PEHaltRestart(1)。返回 true ⇒ 已发起复位。
@@ -438,7 +440,8 @@ namespace NvMsgBuf {
 	//   线程上。两条路径共用 `stBusy` 标志互斥，避免同时写同一卷（最坏只丢一拍，不影响流程）。
 	//   位置要求：必须定义在 `dumpIncrement`/`commitIncrement` **之后**（它们是同命名空间的
 	//   自由函数，使用前须已声明）。
-	inline void dumpNow() {
+	// 批次 F1：`force` 只影响末尾那次环刷盘（环空也写头部）；其余行为逐字不变。
+	inline void dumpNowImpl(const bool force) {
 		if (rootvnode == nullptr || stBusy()) return;
 		stBusy() = true;
 		const int n = dumpIncrement();
@@ -454,8 +457,13 @@ namespace NvMsgBuf {
 		// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之后**调用 ⇒
 		//  flush 耗时（含 FS 阻塞）不计入 stBusy 持有时间）。flush 用独立 stFlushBusy 互斥。
 		stBusy() = false;
-		nredTraceFlush(stTick() * kTickSecs);
+		if (force) { nredTraceFlushForce(stTick() * kTickSecs); }
+		else       { nredTraceFlush(stTick() * kTickSecs); }
 	}
+	inline void dumpNow() { dumpNowImpl(false); }
+	// 批次 F1（A 轮全零定因 §8.1）：panic 路径专用——环空也写一片头部，
+	//  使 `[p6]`／`[st1r]`／`[r1]`／`[p2b]` 等头部读数不再被"环有无内容"绑架。
+	inline void dumpNowForce() { dumpNowImpl(true); }
 
 	// 一拍：有增量就写一个文件；无论成败都排下一拍，直到用完 kMaxTicks 或写满 kMaxTotal。
 	// 由 thread_call 调用 ⇒ **独立线程上下文**（与 Lilu 的 debugDumpCall 同款），不在锁里、不阻塞调用者。

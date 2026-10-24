@@ -291,7 +291,9 @@ static void nredPPTrace(char* const buf, const int n)
     // 通道 1：写内核 console（同时也会进 Lilu 日志——但该通道在下述时刻常已饱和）
     SYSLOG("X6000FB", "%s", buf);
     // 通道 2：立即把 msgbuf 增量落盘（失败静默，不影响流程）
-    NvMsgBuf::dumpNow();
+    // 批次 F1：panic 路径用**强制**刷盘（环空也写一片头部）⇒ `[p6]`／`[st1r]`／`[r1]`／`[p2b]`
+    //  等头部读数不再因"环已空"而丢失（A 轮全零的直接机制，见 R-A轮全零定因 §7.3）。
+    NvMsgBuf::dumpNowForce();
     // 通道 3：直写文件（前两条都失效时的兜底；本时刻 `FileIO` 可能不可用，故仅作冗余）
     if (gPPTraceSafe.shouldWrite(rootvnode != nullptr, static_cast<int>(len))) {
         static unsigned seq = 0;
