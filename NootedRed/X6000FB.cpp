@@ -2056,25 +2056,37 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         //   实测规律（2026-09-27）—— 2 字段（第 7 轮）正常自动重启；6 字段（第 8/9/11 轮）均
         //   出现"快照头正常但机器不自动重启"。原因未查明前，一律用最小字段数。
         const int dn = NvMsgBuf::dumpTail(want, off);
-        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
-        //  ⚠ 多行格式串 ⇒ 按任务卡"拆两行"：第 1 行数值头，第 2 行快照正文。
-        //  ⚠ 环行上限 `kLineBytes = 192`（`NRedTraceRing.hpp:33`）⇒ 正文只能带出前 180 B
-        //    （32 KB 快照无法完整进环）。已在交付报告 §7.6 上报：本探针是"转储工具"而非
-        //    "读数探针"，改走内存环后其原有用途（带出整段 msgbuf）结构性失效。
         {
+            // 批次 挂起修复补丁3（8.1 选 (c)）：32 KB 快照按环单行 160 B 分块写入内存环（前缀+160+换行 ≤185 < 192）。
+            //  每块一行：`[probe] msgdump[i/N]: <160 B>`；末尾 `[probe] msgdump end`。
+            //  ⚠ 不 panic；门控沿用 `-NRedMsgDump*`（默认关）；关态零行为。
+            constexpr int kChunk = 160;          // 前缀≤24 B + 160 + 换行 ≤185 < kLineBytes(192)
+            constexpr int kMaxChunks = 64;       // 上限：64×160 = 10240 B
+            const int total = (dn > 0) ? ((dn + kChunk - 1) / kChunk) : 0;
+            const int nChunks = (total > kMaxChunks) ? kMaxChunks : total;
+
             char line[192];
-            const int n = snprintf(line, sizeof(line), "[probe] msgdump off=%d n=%d\n", off, dn);
+            const int n = snprintf(line, sizeof(line),
+                                   "[probe] msgdump off=%d n=%d chunks=%d\n", off, dn, nChunks);
             if (n > 0) { nredTraceLine(line, n); }
-            if (dn > 0) {
-                char blk[192];
+
+            for (int i = 0; i < nChunks; ++i) {
+                const int base = i * kChunk;
+                const int len  = ((dn - base) > kChunk) ? kChunk : (dn - base);
                 int k = 0;
-                while (k < dn && k < 180) {
-                    const char c = NvMsgBuf::gBuf[k];
-                    blk[k] = (c == '\n' || c == '\t') ? ' ' : c;
-                    ++k;
+                const int pn = snprintf(line, sizeof(line), "[probe] msgdump[%d/%d]: ", i + 1, nChunks);
+                if (pn <= 0) { break; }
+                k = pn;
+                for (int j = 0; j < len && k < static_cast<int>(sizeof(line)) - 2; ++j) {
+                    const char c = NvMsgBuf::gBuf[base + j];
+                    line[k++] = (c == '\n' || c == '\t') ? ' ' : c;
                 }
-                blk[k] = '\n';
-                nredTraceLine(blk, k + 1);
+                line[k++] = '\n';
+                nredTraceLine(line, k);
+            }
+            if (nChunks > 0) {
+                static char endLine[] = "[probe] msgdump end\n";
+                nredTraceLine(endLine, static_cast<int>(sizeof(endLine) - 1));
             }
         }
     }
