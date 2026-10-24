@@ -2064,14 +2064,18 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
             constexpr int kMaxChunks = 64;       // 上限：64×160 = 10240 B
             const int total = (dn > 0) ? ((dn + kChunk - 1) / kChunk) : 0;
             const int nChunks = (total > kMaxChunks) ? kMaxChunks : total;
+            // 批次 挂起修复补丁4（8.1）：`dumpTail` 的 `gBuf[0]` 是最旧、尾部才是最新；
+            //  16k/32k 档位 `total > kMaxChunks` 时必须从尾部取块，否则带出的是最旧段。
+            const int first = (total > kMaxChunks) ? (total - kMaxChunks) : 0;
 
             char line[192];
             const int n = snprintf(line, sizeof(line),
-                                   "[probe] msgdump off=%d n=%d chunks=%d\n", off, dn, nChunks);
+                                   "[probe] msgdump off=%d n=%d chunks=%d/%d\n",
+                                   off, dn, nChunks, total);
             if (n > 0) { nredTraceLine(line, n); }
 
             for (int i = 0; i < nChunks; ++i) {
-                const int base = i * kChunk;
+                const int base = (first + i) * kChunk;   // 从尾部取块
                 const int len  = ((dn - base) > kChunk) ? kChunk : (dn - base);
                 int k = 0;
                 const int pn = snprintf(line, sizeof(line), "[probe] msgdump[%d/%d]: ", i + 1, nChunks);
