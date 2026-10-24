@@ -649,6 +649,11 @@ static UInt64 gDmcuF280 = 0;                       // `*(u64*)(p1+0x280)`（苹�
 // R191：护栏命中标记（1＝曾命中；纯 BSS，不依赖 `[swgrd]` 落盘）。护栏在 `wrapMode9440f` 内直接
 //  返回苹果极性的 0（失败），不进入 `NRedSwInitDispatch` ⇒ `gSwResById` 不会被记成"成功"。
 static UInt32 gGrdLastHit = 0;
+// 批次 M3-1（`-NRedSmu20`，默认关）：模块 8 的 `#20` 恢复开关。
+//  开 ⇒ 调苹果 `#20`（`0x6720b`：版本分类＋版本门＋per-version 分派＋`#20a`/`#20b`）**整段**；
+//  关 ⇒ 与 D2 现状逐字一致（只调 `#20a`/`#20b`）。
+//  ⚠ 开态会填 `h+0x6C8` 等函数指针槽 ⇒ 苹果既有的 `0x6463f→0x67423` 会**自动**调槽（MMIO）。
+static bool gSmu20On = false;
 // R129／R143（观测）：模块 8 的**关键字段留存**（只读我方 BSS；`0xFF…FF`＝"未读到"哨兵）。
 //  `gM8V612`＝能力位快照；`gM8H712`＝**D2 不写该字段**（`0x66d84` 属已删的 `#20`）⇒ 回读应为 0（`bit29` 佐证）；
 //  `gM8H1728`＝由保留的 `#20a`（`0x64b1a(h,h+1728,240)`）装表；`gM8N`＝模块 8 本体被进入的次数。
@@ -5750,10 +5755,26 @@ static int nredSmuSwInit(void* const info, void* const out)
             return kSwResStepFail;                                                 // 6
         }
     }
-    fnInitFrom(h, reinterpret_cast<void*>(H + 1728), 240);   // #20a（`6722c`）**返回值照苹果丢弃**
-    using NRedSmuCfgRead = int (*)(void*);
-    const NRedSmuCfgRead fnCfgRead = reinterpret_cast<NRedSmuCfgRead>(gHwlibsSlide + 0x66f18);
-    fnCfgRead(h);                                            // #20b（`67240`）**返回值苹果亦丢弃**（`67243`）
+    if (gSmu20On) {
+        // 批次 M3-1：调苹果 `#20`（`0x6720b`）**整段**——版本分类（`0x66d84`）＋版本门＋per-version
+        //  分派（跳转表 `0x672fc`）＋`#20a`/`#20b`（其内部已含，故此处**不得**再单独调）。
+        //  参数与苹果调用点 `0x64576..0x64582` 逐字一致：`(h, *(u64*)(info+12), *(u64*)(info+20))`。
+        //  ⚠ 开态会填 `h+0x6C8` 等函数指针槽 ⇒ 苹果既有的 `0x6463f→0x67423` 会自动调槽（MMIO）。
+        //  ⚠ 失败诚实：返回非 0（版本无处理柄／版本门拒绝）⇒ 记 `bit26` ＋ 6，**不填 0、不伪造**。
+        using NRedSmu20 = int (*)(void*, UInt64, UInt64);
+        const NRedSmu20 fnSmu20 = reinterpret_cast<NRedSmu20>(gHwlibsSlide + 0x6720B);
+        const UInt64 a12 = *reinterpret_cast<const UInt64*>(I + 12);
+        const UInt64 a20 = *reinterpret_cast<const UInt64*>(I + 20);
+        const int rc20 = fnSmu20(h, a12, a20);
+        if (rc20 != 0) {
+            gGvmBook.failMask |= (1U << 26); *reinterpret_cast<UInt64*>(O + 8) = 0; return kSwResStepFail;
+        }
+    } else {
+        fnInitFrom(h, reinterpret_cast<void*>(H + 1728), 240);   // #20a（`6722c`）**返回值照苹果丢弃**
+        using NRedSmuCfgRead = int (*)(void*);
+        const NRedSmuCfgRead fnCfgRead = reinterpret_cast<NRedSmuCfgRead>(gHwlibsSlide + 0x66f18);
+        fnCfgRead(h);                                            // #20b（`67240`）**返回值苹果亦丢弃**（`67243`）
+    }
     // #21（`6458d..645a2`）取/建 `h[1712]` 的 `0x8000` 子对象——**第 4 实参＝`h+1712`（内部指针）**
     const int rc21 = fnGetOrCreate(h, 0x8000U, 1, reinterpret_cast<void**>(H + 1712));
     if (rc21 != 0) {
@@ -5827,10 +5848,15 @@ static int nredSmuSwInit(void* const info, void* const out)
                                           //   （读者 `0x687a6`／`0x68daf`／`0x6fb27`／`0x74db6` 的 `cmpb $0,888(%rdi)`
                                           //    为 0 ⇒ 包装器空跑／返 0）。**苹果侧常态值未证**（其值来自框架填的
                                           //    `O+32/40/…`，复核 M-3）⇒ 与苹果的差异**不可离线判定**。
-    gGvmBook.omittedMask |= (1U << 29);   // `h+712` **未写**（`0x66d84` 属已删的 `#20`）⇒ 本世代标识未提供
+    //  `h+712`（本世代标识）由 `0x66d84` 写入——它属 `#20`。批次 M3-1 开 `-NRedSmu20` 时 `#20` 整段执行
+    //  ⇒ 该字段**已写** ⇒ 不再登记为"省略"（否则自报与实际不符）。
+    if (!gSmu20On) { gGvmBook.omittedMask |= (1U << 29); }
     gGvmBook.omittedMask |= (1U << 30);   // 槽 29／uCode 常量**未取得**；**且槽 1..29 整段 API 表未安装**
                                           //   （`h+1736`＝槽 1 为空 ⇒ 后续苹果 hw-init（`0x6463f`→`0x67423`）
                                           //    会**静默返 0**＝"成功但未做"；复核 N-2）
+                                          //   ⚠ 批次 M3-1 开 `-NRedSmu20` 时 `#20` 的处理柄会填 `h+0x6C0..0x758`
+                                          //     ⇒ "槽 1 为空"这一半不再成立；但"槽 29／uCode 常量未取得"仍成立
+                                          //     ⇒ 本位**保持置位**（复合声明，至少一半为真）。
     gGvmBook.omittedMask |= (1U << 31);   // **未调用苹果 `#23`**（其职责按 Linux 由我方最小实现替代）；
                                           //   同时 `h+720` **未置位**＝**不宣告**"SMU 上下文已就绪"（R141 §3.2）
     // ── 成功出口门控（R108 §4 逐字）：门控关 ⇒ 只返 7（**不报成功**）──────────────────────────────
@@ -8752,6 +8778,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // A-1 固件层第一增量门控（默认关）：开启后在 C2（wrapSmuInitFunctionPointerList 出口）执行
     // PSP bringup（fw::nredFwBringupHook）+ 置有效 smuCtxCache。解析一次存标量。
     singleton().smu13FwBringupEnabled = checkKernelArgument("-NRedFwBringup");
+    // 批次 M3-1（**默认关**）：模块 8 的 `#20` 恢复（调苹果 `0x6720b` 整段）。精确 token。
+    //  ⚠ 开态会连带触发 `0x67423` 的槽调用（MMIO）⇒ 与 M4-1 必须一起授权。
+    gSmu20On = nredExactBootArg("-NRedSmu20");
     // 批次 S2（**默认关**）：我方 PSP bringup 跳过 RingCreate（只做 TMR），
     //  让苹果 PSP 驱动成为 KM ring 的正当所有者（M5-1 §7.2）。精确 token，避免前缀误开。
     //  ⚠ 解析一次存标量（bringup 内不调 checkKernelArgument）；关态 ⇒ Step 2 逐字不变。
