@@ -439,6 +439,13 @@ static const UInt8 kP8HeadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41,
 //  （第 16 字节起是 `callq *32176(%rdi)` 的 `ff 87 …`，故只取到指令边界）。
 static const UInt8 kPspRingCreatePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
                                               0x53, 0x50, 0x89, 0xF3, 0x49, 0x89, 0xFF};
+// 子调用前 14/16 B（批次 pspedx5；取自 macho `__text`，file off = 0x1760 + (VMA − 0x760)）。
+static const UInt8 kPspSub4ccaePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x53, 0x50, 0x48,
+                                            0x89, 0xFB, 0xB9, 0x4B, 0x00, 0x00, 0x00};
+static const UInt8 kPspSub4c05bPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x20,
+                                            0x49, 0x89, 0xF8, 0x48, 0x8D, 0x45, 0xE8, 0x48};
+static const UInt8 kPspSub56fffPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48,
+                                            0x83, 0xEC, 0x20, 0x49, 0x89, 0xFE, 0x31, 0xC0};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -558,6 +565,16 @@ static UInt64 gPspEdxVal = 0;                 // 条目 +8（edx）
 static UInt32 gPspEdxEv  = 0;                 // 条目 +0（事件 ID）
 static UInt32 gPspEdxSev = 0;                 // 条目 +4（严重度）
 static mach_vm_address_t gOrgPspRingCreate = 0;   // `0x4cb8a` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
+// 批次 pspedx5（R-pspedx5判读 §3.2）：PSP ring create 的**子调用级**只读探针。
+//  目的：edx=2 的返回路径有三条（`0x4ccae`×2／`0x4c05b`×2／`0x56fff` 内层）⇒ 用入口/返回/耗时区分。
+//  ⚠ 零写、零寄存器访问、返回值原样透传；只在 `-NRedPspEdx` 开时输出。
+//  ⚠ 限流：**每个函数各 2 行**（合计 ≤6 行，满足"≤8 行"）。
+static UInt32 gPspSub4ccae = 0;
+static UInt32 gPspSub4c05b = 0;
+static UInt32 gPspSub56fff = 0;
+static mach_vm_address_t gOrgPspSub4ccae = 0;
+static mach_vm_address_t gOrgPspSub4c05b = 0;
+static mach_vm_address_t gOrgPspSub56fff = 0;
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3515,6 +3532,59 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
                                       static_cast<unsigned>(gPspEdxSev));
             if (nPsp > 0) { nredTraceLine(pspLine, nPsp); }
         }
+    }
+    return ret;
+}
+
+// ─── 批次 pspedx5：PSP ring create 的**子调用级**只读探针（`0x4ccae`／`0x4c05b`／`0x56fff`）──
+//  目的：edx=2 的返回路径有三条 ⇒ 用「入口/返回/耗时」区分是哪一条。
+//  ⚠ 零写、零寄存器访问、返回值原样透传；只在 `-NRedPspEdx` 开时输出。
+//  ⚠ 耗时用 `mach_absolute_time()` 差值（x86_64 上单位为 ns）÷1000 ⇒ µs。
+//  ⚠ 限流：每个函数各 2 行（合计 ≤6 行）。
+static void pspSubLine(const char* const fn, const UInt32 n, const int ret, const UInt64 us)
+{
+    static char line[96];
+    const int k = snprintf(line, sizeof(line), "[pspsub] fn=%s n=%u ret=%x us=%llu\n",
+                           fn, static_cast<unsigned>(n), static_cast<unsigned>(ret),
+                           static_cast<unsigned long long>(us));
+    if (k > 0) { nredTraceLine(line, k); }
+}
+
+// `0x4ccae(h, 165, 0)`：返回 0/2（读回调为 null 时立即返 2，**不是超时**）。
+static int wrapPspSub4ccae(void* const h, const UInt32 a, const UInt32 b)
+{
+    if (gOrgPspSub4ccae == 0) { return -1; }
+    const UInt64 t0 = mach_absolute_time();
+    const int ret = FunctionCast(wrapPspSub4ccae, gOrgPspSub4ccae)(h, a, b);
+    if (gPspEdxOn && gPspSub4ccae < 2) {
+        ++gPspSub4ccae;
+        pspSubLine("4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000);
+    }
+    return ret;
+}
+
+// `0x4c05b(*(h+16), 0x4c835, &desc, 5000)`：poll 等待，超时返 2。
+static int wrapPspSub4c05b(void* const a, void* const cb, void* const desc, const UInt32 timeoutUs)
+{
+    if (gOrgPspSub4c05b == 0) { return -1; }
+    const UInt64 t0 = mach_absolute_time();
+    const int ret = FunctionCast(wrapPspSub4c05b, gOrgPspSub4c05b)(a, cb, desc, timeoutUs);
+    if (gPspEdxOn && gPspSub4c05b < 2) {
+        ++gPspSub4c05b;
+        pspSubLine("4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000);
+    }
+    return ret;
+}
+
+// `0x56fff(h, type)`：内层 ring create；返回 2 表示内层 `0x4c05b` 超时。
+static int wrapPspSub56fff(void* const h, const UInt32 type)
+{
+    if (gOrgPspSub56fff == 0) { return -1; }
+    const UInt64 t0 = mach_absolute_time();
+    const int ret = FunctionCast(wrapPspSub56fff, gOrgPspSub56fff)(h, type);
+    if (gPspEdxOn && gPspSub56fff < 2) {
+        ++gPspSub56fff;
+        pspSubLine("56fff", gPspSub56fff, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
 }
@@ -9333,6 +9403,23 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             } else {
                 static char pspHookFail[] = "[pspedx] hook=resolve-failed\n";
                 nredTraceLine(pspHookFail, static_cast<int>(sizeof(pspHookFail) - 1));
+            }
+            // 批次 pspedx5：三个子调用的只读 hook（入口/返回/耗时）。
+            //  ⚠ 安装失败只记日志、不 panic；关态整块不执行。
+            if (const auto f1 = resolveProbe("psp-sub-4ccae", kPspSub4ccaePattern, nullptr,
+                                             arrsize(kPspSub4ccaePattern), 0x4CCAE)) {
+                hookProbe(f1, KernelPatcher::RouteRequest{nullptr, wrapPspSub4ccae, gOrgPspSub4ccae},
+                          "psp-sub-4ccae");
+            }
+            if (const auto f2 = resolveProbe("psp-sub-4c05b", kPspSub4c05bPattern, nullptr,
+                                             arrsize(kPspSub4c05bPattern), 0x4C05B)) {
+                hookProbe(f2, KernelPatcher::RouteRequest{nullptr, wrapPspSub4c05b, gOrgPspSub4c05b},
+                          "psp-sub-4c05b");
+            }
+            if (const auto f3 = resolveProbe("psp-sub-56fff", kPspSub56fffPattern, nullptr,
+                                             arrsize(kPspSub56fffPattern), 0x56FFF)) {
+                hookProbe(f3, KernelPatcher::RouteRequest{nullptr, wrapPspSub56fff, gOrgPspSub56fff},
+                          "psp-sub-56fff");
             }
         }
         if (const auto from = resolveProbe("ttl-allocA", kTtlInitAllocAPattern, kTtlInitAllocAPatternMask,
