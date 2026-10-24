@@ -67,6 +67,13 @@ static UInt32 gBringupStep      = 0;   // 末次 step（哨兵 0＝尚未走到�
 static SInt32 gBringupLastError = 0;   // 末次 last_error
 static UInt32 gBringupLoadToc   = 0;   // 末次 loadToc_resp
 static UInt32 gBringupTmrLoad   = 0;   // 末次 tmrLoad_resp
+// A 方案（-NRedPspRingReuse）：导出我方 KM ring 的关键信息，供 HWLibs.cpp 填苹果 ring 结构。
+//  ⚠ 刻意**非 static**（与上方 gBringup* 不同）：HWLibs.cpp 以 `extern` 引用，语义更直白。
+//    本头文件当前仅被 HWLibs.cpp 包含 ⇒ 无多重定义风险。
+UInt64 gBringupRingMc   = 0;   // ring 物理/总线地址（bringup 成功后写入）
+UInt32 gBringupRingSize = 0;   // ring 大小（kRingSizeBytes）
+UInt64 gBringupRingVa   = 0;   // ring 缓冲虚拟地址
+UInt32 gBringupRingWptr = 0;   // 当前 wptr
 
 // 232：本头文件内的 NRED_TRACE 改走 fwTrace（单份 static 行缓冲 + nredTraceLine，零 SYSLOG 栈）；
 //  push/pop 限定作用域 ⇒ HWLibs.cpp 其余区域仍用全局 NRED_TRACE。
@@ -372,6 +379,15 @@ static void nredBringupBody()
     {
         const fw::GfxCmdResp* const respP1 = fw::cmdBufGet(&ring);
         gBringupLoadToc = (respP1 != nullptr) ? respP1->resp_status : 0xFFFFFFFFu;
+    }
+    // A 方案：导出 ring 信息。
+    //  ⚠ 判据用 `ctx.last_step >= RingCreate`（8），不是 `rc == 0`：
+    //    ring create 成功但后续 TMR 失败时，ring 仍然存在，拦截仍应生效。
+    if (ctx.last_step >= fw::BringupStep::RingCreate) {
+        gBringupRingMc   = ringMc;
+        gBringupRingSize = fw::kRingSizeBytes;
+        gBringupRingVa   = reinterpret_cast<UInt64>(ringVa);
+        gBringupRingWptr = ring.wptr;
     }
     if (rc != 0) {
         NRED_TRACE("bringup: phase1 failed step=%u error=%d loadToc_resp=0x%X",

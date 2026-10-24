@@ -74,6 +74,12 @@ UInt32 gLastSub5 = 0xFFFFFFFFU;
 extern UInt32 gBringupEnterCount;
 extern UInt32 gBringupStep;
 extern SInt32 gBringupLastError;
+// 批次 pspringreuse（A 方案，`-NRedPspRingReuse`）：我方 KM ring 的关键信息（定义在
+//  FwBringup/NRedFwBringupHook.hpp；bringup 成功后写入，本处只读）。
+extern UInt64 gBringupRingMc;
+extern UInt32 gBringupRingSize;
+extern UInt64 gBringupRingVa;
+extern UInt32 gBringupRingWptr;
 extern UInt32 gBringupLoadToc;
 extern UInt32 gBringupTmrLoad;
 // P7c 包D：allocB 末两道判据与 0x9440f 的返回值（供 [ttlchain] 头部戳记读取）。
@@ -598,6 +604,10 @@ static UInt32 gPspSampleN = 0;         // 采样行计数（≤3；独立于 `gP
 //  ⚠ 限流：每次 ring create ≤1 次（`gPspRingDumps` 在 `wrapPspRingCreate` 入口重置）。
 static bool     gPspRingOn    = false;   // `-NRedPspRing`
 static unsigned gPspRingDumps = 0;       // 本轮 dump 次数（入口重置，≤1）
+// 批次 pspringreuse（A 方案，`-NRedPspRingReuse`，默认关）：拦截苹果 KM ring create，
+//  把 `h+1280` 指向我方 bringup 已建的 KM ring，并返回 0（不再调苹果原件）。
+//  ⚠ 关态 ⇒ 本块不执行，行为与改动前逐字一致。
+static bool gPspRingReuse = false;   // `-NRedPspRingReuse`
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3538,6 +3548,42 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         // 跳板未就绪（正常不会发生：wrapper 只在 hook 安装成功后才被调用）⇒ 记 skip=3。
         if (gPspEdxOn) { if (gPspEdxEnter < 255) { ++gPspEdxEnter; } gPspEdxSkip = 3; }
         return -1;
+    }
+    // 批次 pspringreuse（A 方案，-NRedPspRingReuse，默认关）：
+    //   我方 bringup 已建 KM ring（r293 step=12）⇒ 不再调用苹果原件，
+    //   直接把苹果的 KM ring 结构（h+1280）指向我方 ring，并返回 0。
+    //   ⚠ 只对 KM（type==1）生效；UM（type==2）仍走原件。
+    //   ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
+    //   ⚠ 前置：gBringupStep >= 8（RingCreate）且 gBringupRingMc != 0。
+    if (gPspRingReuse && type == 1 && gBringupStep >= 8 && gBringupRingMc != 0
+        && nredKernelPtrOk(h)) {
+        UInt8* const H = static_cast<UInt8*>(h);
+        UInt8* const R = H + 1280;                                  // 苹果 KM ring 结构
+        *reinterpret_cast<UInt32*>(R + 0)  = 1;                     // type = KM
+        *reinterpret_cast<UInt64*>(R + 8)  = gBringupRingMc;        // ring 地址（8 B 完整值）
+        *reinterpret_cast<UInt32*>(R + 24) = gBringupRingSize;      // size（4 B）
+        *reinterpret_cast<UInt32*>(R + 28) = static_cast<UInt32>(gBringupRingMc >> 32); // addr hi（4 B）
+        *reinterpret_cast<UInt32*>(R + 32) = gBringupRingWptr;      // wptr
+        *reinterpret_cast<UInt64*>(R + 40) = gBringupRingVa;        // 缓冲虚拟地址
+        *reinterpret_cast<UInt64*>(R + 48) = 0;                     // 语义未解出（U1）
+        for (int i = 0; i < 64; ++i) {                              // +56..+568 清零
+            *reinterpret_cast<UInt64*>(R + 56 + i * 8) = 0;
+        }
+        *reinterpret_cast<UInt64*>(R + 568) = 0;
+        if (gPspEdxOn) {
+            if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
+            gPspEdxRet = 0;
+            gPspEdxSkip = 0;
+            static char reuseLine[128];
+            const int nr = snprintf(reuseLine, sizeof(reuseLine),
+                                    "[pspreuse] mc=%llx size=%x wptr=%u va=%llx\n",
+                                    static_cast<unsigned long long>(gBringupRingMc),
+                                    static_cast<unsigned>(gBringupRingSize),
+                                    static_cast<unsigned>(gBringupRingWptr),
+                                    static_cast<unsigned long long>(gBringupRingVa));
+            if (nr > 0) { nredTraceLine(reuseLine, nr); }
+        }
+        return 0;
     }
     // 批次 pspedx5：作用域标志——子调用探针只在 `0x4cb8a` 内部生效。
     //  为什么需要：`0x4c05b` 全库有 **30 处**调用（通用 poll 助手），不限域会让 2 行配额
@@ -9173,6 +9219,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //    `nredExactBootArg` —— 同一位置既有约定（见上一行），且 `PE_parse_boot_argn` 是
     //    **前缀匹配**（`-NRedPspRingXxx` 会误开），与"精确 token"纪律冲突。已上报。
     gPspRingOn = nredExactBootArg("-NRedPspRing");
+    // 批次 pspringreuse（**默认关**）：A 方案 —— 拦截苹果 KM ring create，复用我方 ring。
+    //  精确 token，与相邻行同款。
+    gPspRingReuse = nredExactBootArg("-NRedPspRingReuse");
     // 批次 C3（**默认关**）：平台自检模式（四段标记 + 实际 flush）。精确 token。
     gTraceSelfTest = nredExactBootArg("-NRedTraceSelfTest");
     // 批次 pspstate（**默认关**）：PSP 只读状态（C2PMSG_81／C2PMSG_64）。精确 token。
