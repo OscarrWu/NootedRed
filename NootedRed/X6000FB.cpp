@@ -1298,8 +1298,12 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         SYSLOG("X6000FB", "pp-in: self=%llx gates=%d%d%d%d",
                static_cast<unsigned long long>(gPpHelperSelf),
                wantProbe ? 1 : 0, wantRegister ? 1 : 0, wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
-        NvMsgBuf::dumpNow();
-        // A-28：刷盘已并入 `dumpNow()` 的 stBusy 保护区（见 NvMsgBuf.hpp），
+        // 批次 F1-安全替代（2026-10-24）：改用**强制**刷盘——环空也写一片头部。
+        //  动机：`[p6]`／`[st1r]`／`[r1]`／`[p2b]` 等头部读数只在"有环行要写"时才被带出去；
+        //  本入口在**正常上下文**（panic 之前）⇒ 零 panic 写盘风险，且时点比 panic 更早。
+        //  ⚠ panic 路径的 `nredPPTrace` 仍用 `dumpNowForce()` 作兜底（F1 保留）。
+        NvMsgBuf::dumpNowForce();
+        // A-28：刷盘已并入 `dumpNowForce()` 的 stBusy 保护区（见 NvMsgBuf.hpp），
         //  此处**不再**单独调用（避免与 L2 周期拍并发写同一卷）。
     }
 
