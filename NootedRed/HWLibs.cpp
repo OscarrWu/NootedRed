@@ -3648,45 +3648,35 @@ static int wrapPspTmrLoadX6(void* const h, void* const a2)
     return FunctionCast(wrapPspTmrLoadX6, gOrgPspTmrLoadX6)(h, a2);
 }
 
-// ─── 批次 psptmrreuse v4：`0x4d6d0`（fence 等待）按 cmd_id 跳过 TMR ──────────────────────
+// ─── 批次 psptmrreuse v5：`0x4d6d0`（fence 等待）按 cmd_id 跳过 TMR ──────────────────────
 //  为什么：r322 证明 `0x140401`（fence 超时）先于 `0x4010020b`（TMR 失败）17833 ns ⇒ fence 是根。
 //  fence 实际值在 kext `__DATA`（`h+2784` → `0x47c5f`），PSP 不会写 ⇒ A 方案下永远等不到。
 //  ⚠ 函数入口是 `0x4d6d0`（**不是** `0x4d6d2`，后者是 `mov %rsp,%rbp` 的第 2 字节）。
-//  ⚠ 原件签名：`(h, const u32* ringIndex)`；`*(u32*)idx` = ring_index（0..15）。
+//  ⚠ 原件签名：`(h, const u32* ringIndex)`；`idx` 保留但**不用于** cmd_id 读取。
 //  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
 static mach_vm_address_t gOrgPspFenceWait = 0;
 static UInt32 gPspFenceDiag = 0;   // 诊断行计数（前 4 次）
 
 static int wrapPspFenceWait(void* const h, const void* const idx)
 {
-    // 批次 psptmrreuse v4（-NRedPspTmrReuse，默认关）：
-    //   在 fence 等待入口按 cmd_id 跳过 TMR（5）：我方 bringup 已完成 TMR，
-    //   苹果的 fence 等待无意义（实际值在 kext __DATA，PSP 不会写）。
+    // 批次 psptmrreuse v5（-NRedPspTmrReuse，默认关）：
+    //   cmd_id 在 `*(h+14032)+0`（命令缓冲虚拟地址），**不是** `h+1872+index*56`
+    //   （后者是 ring 槽的 MC 地址；r323 诊断实测 `slot=fefe000 ok=0` 已证伪）。
+    //   我方 bringup 已完成 TMR ⇒ 苹果的 fence 等待无意义，直接返回 0。
     //   ⚠ 只跳过 cmd_id==5；其他命令原样透传。
-    if (gPspTmrReuse && gBringupStep >= 11 && nredKernelPtrOk(h) && idx != nullptr) {
-        const UInt32 index = *static_cast<const UInt32*>(idx);
-        if (index < 16U) {
-            const UInt8* const H = static_cast<const UInt8*>(h);
-            // ⚠ **与文档 §3.1 的差异**：文档写 `cmdId = *(u32*)(h+1872+index*56)`；
-            //   但反汇编 `0x4d384` 是 `movq 1872(%rbx,%rax), %rsi`（**8 字节载入**），
-            //   且该值被当作参数传给提交 vtable ⇒ 该槽位存的是**指针**，不是内联 cmd_id。
-            //   直接读 u32 得到的是指针低半，**永远不会等于 5**（静默失效）。
-            //   此处按"槽位 → 指针 → cmd_id"解引用，并用 `nredKernelPtrOk` 守卫。
-            const UInt64 slot = *reinterpret_cast<const UInt64*>(
-                H + 1872 + static_cast<size_t>(index) * 56);
-            const bool slotOk = nredKernelPtrOk(reinterpret_cast<const void*>(slot));
-            const UInt32 cmdId = slotOk ? *reinterpret_cast<const UInt32*>(slot) : 0xFFFFFFFFU;
-            // 诊断行（前 4 次）：同时给出 index／槽位原值／解引用后的 cmd_id，
-            //  供下一轮判定"槽位是否指针"（若 slot 不像内核指针 ⇒ 文档公式可能才对）。
+    if (gPspTmrReuse && gBringupStep >= 11 && nredKernelPtrOk(h)) {
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const void* const cmdBuf = *reinterpret_cast<const void* const*>(H + 14032);
+        if (nredKernelPtrOk(cmdBuf)) {
+            const UInt32 cmdId = *reinterpret_cast<const UInt32*>(cmdBuf);
+            // 诊断行（前 4 次）：`cmd` = `*(h+14032)+0`；`ok` = (cmd == 5)。
             if (gPspFenceDiag < 4) {
                 ++gPspFenceDiag;
-                static char dLine[128];
+                static char dLine[96];
                 const int nd = snprintf(dLine, sizeof(dLine),
-                                        "[psptmr] fence idx=%u slot=%llx cmd=%x ok=%u\n",
-                                        static_cast<unsigned>(index),
-                                        static_cast<unsigned long long>(slot),
+                                        "[psptmr] fence cmd=%x ok=%u\n",
                                         static_cast<unsigned>(cmdId),
-                                        slotOk ? 1U : 0U);
+                                        (cmdId == 5U) ? 1U : 0U);
                 if (nd > 0) { nredTraceLine(dLine, nd); }
             }
             if (cmdId == 5U) {
