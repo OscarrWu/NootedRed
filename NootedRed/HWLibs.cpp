@@ -8340,7 +8340,8 @@ static bool nredP2bKindsOk(const UInt8* const e, const UInt32 cnt,
             const UInt64 base = (need[k] == 2)
                 ? *reinterpret_cast<const UInt64*>(e + 0x1E8)
                 : *reinterpret_cast<const UInt64*>(ent + 8);
-            const UInt64 size = *reinterpret_cast<const UInt64*>(ent + 0x10);
+            // 表项 size 在 +0x04（u32）；+0x10 是计算出的 base（反汇编 0x1ed59 的 0x1edb5）。
+            const UInt64 size = static_cast<UInt64>(*reinterpret_cast<const UInt32*>(ent + 4));
             if (base != 0 && size != 0) { found = true; break; }
         }
         if (!found) { return false; }
@@ -8431,11 +8432,19 @@ static void nredP2bFill(void* const obj, void* const clk, void* const desc)
             if ((gP2bMode == 1U || gP2bMode == 2U) && t0 != 0) {
                 if (build(e, 1U, static_cast<UInt64>(t0)) != 0) { gP2bErr = 4; }
             }
-            // kind 2：base = obj+0x200 + clk+0x58（本批 obj+0x200=0）。
+            // kind 2：base 实参 = *(u64*)(obj+0x200) + *(u64*)(obj+0x1E8)（苹果 0x201cf 的
+            //   0x203c3..0x203ca 逐字等价）；`obj+0x1E8` 由 0x201cf 的 0x203a3 写成 `*(obj+0x110)`。
+            //   ⚠ 0x1ebf1 自身**不读** +0x200／+0x1E8（反汇编：它只用第 3 实参），
+            //     这两个字段是**调用者** 0x201cf 用来算第 3 实参的。
+            //   ⚠ 0x201cf 在 0x20341..0x20357 有一处钳位（`*(u8*)(obj+0x118) & 8` 且
+            //     `*(obj+0x110) >= 0x40000001` ⇒ `obj+0x110 = 0x40000000`）。本批 4.1 已把
+            //     `e+0x118` 的 bit3 清掉 ⇒ 钳位不触发 ⇒ `obj+0x1E8 = obj+0x110 = a58`。
             //   ⚠ 0x1ebf1 的 kind 2 size = align(*(u64*)(obj+0x138) - base, 0x200000)；
             //     若 base >= +0x138（1 TB）会无符号下溢成巨大 size ⇒ 先挡（R7 随之为假、门 B 不开）。
-            if (a58 < 0x10000000000ULL) {
-                if (build(e, 2U, a58) != 0) { gP2bErr = 4; }
+            const UInt64 base2 = *reinterpret_cast<const UInt64*>(e + 0x200) + a58;
+            if (base2 < 0x10000000000ULL) {
+                *reinterpret_cast<UInt64*>(e + 0x1E8) = a58;   // 苹果 0x203a3 的等价写入
+                if (build(e, 2U, base2) != 0) { gP2bErr = 4; }
             } else {
                 gP2bErr = 4;
             }
@@ -8452,15 +8461,18 @@ static void nredP2bFill(void* const obj, void* const clk, void* const desc)
     // 5) 读回 + 门 B 求值
     const UInt32 cnt = *reinterpret_cast<const UInt32*>(e + 0x108);
     gP2bCnt = cnt;
+    //  表项布局（反汇编 0x1e9c8 的 0x1ea12..0x1ea1d 与 0x1ed59 的 0x1ed9a..0x1edb9）：
+    //    +0x00 kind(u32) / +0x04 size(u32) / +0x08 调用者 base 实参(u64) / +0x10 计算出的 base(u64)
+    //  ⚠ 原实现把 +0x10 当作 size —— 那是**计算出的 base**（如 kind0 的 0xF400000000）。
+    //    真正的 size 在 +0x04（u32）。已按反汇编修正（读数与门 B 的 size 判据同时纠正）。
     for (UInt32 i = 0; i < cnt && i < 8; ++i) {
         const UInt8* const ent = e + 0x48 + static_cast<size_t>(i) * 0x18;
         const UInt32 kind = *reinterpret_cast<const UInt32*>(ent);
-        if (kind == 0) { gP2bK0Base = *reinterpret_cast<const UInt64*>(ent + 8);
-                         gP2bK0Size = *reinterpret_cast<const UInt64*>(ent + 0x10); }
-        if (kind == 1) { gP2bK1Base = *reinterpret_cast<const UInt64*>(ent + 8);
-                         gP2bK1Size = *reinterpret_cast<const UInt64*>(ent + 0x10); }
-        if (kind == 2) { gP2bK2Base = *reinterpret_cast<const UInt64*>(e + 0x1E8);
-                         gP2bK2Size = *reinterpret_cast<const UInt64*>(ent + 0x10); }
+        const UInt64 sz   = static_cast<UInt64>(*reinterpret_cast<const UInt32*>(ent + 4));
+        if (kind == 0) { gP2bK0Base = *reinterpret_cast<const UInt64*>(ent + 8); gP2bK0Size = sz; }
+        if (kind == 1) { gP2bK1Base = *reinterpret_cast<const UInt64*>(ent + 8); gP2bK1Size = sz; }
+        // kind 2 的 base 由 helper 0x1ed59 从 `obj+0x1E8` 取（0x1edab 的 cmovne）⇒ 读该字段。
+        if (kind == 2) { gP2bK2Base = *reinterpret_cast<const UInt64*>(e + 0x1E8); gP2bK2Size = sz; }
     }
     const bool r4 = (*reinterpret_cast<const UInt64*>(e + 0x210) != 0);
     const bool r5 = (cnt > 0 && cnt <= 8);   // 0x1e9c8 的 cmp $7 上界
