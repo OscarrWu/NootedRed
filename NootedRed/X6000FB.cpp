@@ -182,6 +182,12 @@ static bool sWantR1Probe     = false;   // -NRedR1Probe
 static bool sWantSmnRead1    = false;   // -NRedSmnRead1
 static bool sWantProbePanic  = false;   // -NRedProbePanic
 static bool sWantProbePPLIB  = false;   // -NRedProbePPLIB
+// 批次 pspedx4：panic 前把内存环强制落盘（仅 `-NRedPspEdx`）。
+//  根因（R-pspedx4轮判读 §1.3）：`nredPPTrace` 里的 `dumpNowForce()` 位于
+//  `wrapHandleCriticalError` 的 `if (gPpHelperSelf != 0)` 块内，而 PP hook 只在
+//  `-NRedStagePanic6`／`-NRedRegisterHwSvc`／`-NRedAccelProbe`／`-NRedAccelLog` 时安装
+//  ⇒ 探针轮的 boot-args 不含这些 ⇒ 该块不执行 ⇒ panic 时**没有任何 flush**。
+static bool sWantPspEdxFlush = false;   // -NRedPspEdx（正常上下文预存；panic 路径只读）
 
 static void armPanicGateValues()
 {
@@ -192,6 +198,7 @@ static void armPanicGateValues()
     sWantSmnRead1    = checkKernelArgument("-NRedSmnRead1");
     sWantProbePanic  = checkKernelArgument("-NRedProbePanic");
     sWantProbePPLIB  = checkKernelArgument("-NRedProbePPLIB");
+    sWantPspEdxFlush = checkKernelArgument("-NRedPspEdx");
 }
 // ─── P3P14 复读通道（乙线 R1，S1；与 P5 的 panic 文本通道**同形但独立**）────────────
 //  立论与 P5 相同：PP 时刻（≈45–50 s）**写文件通道历代零命中**（151 归档）；
@@ -2765,6 +2772,13 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         return 0;   // suppress panic, let powerUp continue (probe P1)
     }
     // Default: call original (panic as usual, but failure detail already logged above)
+    // 批次 pspedx4：panic 前把内存环强制落盘（仅 `-NRedPspEdx`）。
+    //  为什么在这里：`nredPPTrace` 的 `dumpNowForce()` 只在 `gPpHelperSelf != 0` 时执行，
+    //  而 PP hook 只在 4 个特定 boot-arg 下安装 ⇒ 探针轮拿不到任何 panic 期 flush。
+    //  ⚠ 门控由 `armPanicGateValues()` 在正常上下文预存（panic 路径不调 `checkKernelArgument`）。
+    //  ⚠ 只在探针开关打开时执行 ⇒ 其它轮次的 panic 行为逐字不变。
+    if (sWantPspEdxFlush) { NvMsgBuf::dumpNowForce(); }
+
     return FunctionCast(wrapHandleCriticalError, singleton().orgHandleCriticalError)(self, fmt1, fmt2, fmt3);
 }
 

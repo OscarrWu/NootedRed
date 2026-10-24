@@ -9313,10 +9313,26 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
         //  ⚠ 安装失败只记日志、不 panic（`hookProbe` 内部已如此）。
         if (gPspEdxOn) {
-            if (const auto from = resolveProbe("psp-ring", kPspRingCreatePattern, nullptr,
-                                               arrsize(kPspRingCreatePattern), 0x4CB8A)) {
-                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapPspRingCreate, gOrgPspRingCreate},
-                          "psp-ring");
+            // 批次 pspedx4（R-pspedx4轮判读 §4）：**启动期安装确认行**——19 s 的 flush 必带出。
+            //  为什么需要：`resolveProbe` 的"预期偏移命中"走 `DBGLOG`（不进环），
+            //  失败才走 `NRED_TRACE`；两轮归档里都没有失败行 ⇒ 无法区分"装上了"与"块没执行"。
+            //  ⚠ 安装只发生一次 ⇒ 至多 1 行；关态整块不执行。
+            const auto from = resolveProbe("psp-ring", kPspRingCreatePattern, nullptr,
+                                           arrsize(kPspRingCreatePattern), 0x4CB8A);
+            if (from != 0) {
+                const bool ok = hookProbe(from,
+                                          KernelPatcher::RouteRequest{nullptr, wrapPspRingCreate, gOrgPspRingCreate},
+                                          "psp-ring");
+                static char pspHookLine[96];
+                const int nH = snprintf(pspHookLine, sizeof(pspHookLine),
+                                        "[pspedx] hook=%s at=%llx org=%llx\n",
+                                        ok ? "installed" : "route-failed",
+                                        static_cast<unsigned long long>(from),
+                                        static_cast<unsigned long long>(gOrgPspRingCreate));
+                if (nH > 0) { nredTraceLine(pspHookLine, nH); }
+            } else {
+                static char pspHookFail[] = "[pspedx] hook=resolve-failed\n";
+                nredTraceLine(pspHookFail, static_cast<int>(sizeof(pspHookFail) - 1));
             }
         }
         if (const auto from = resolveProbe("ttl-allocA", kTtlInitAllocAPattern, kTtlInitAllocAPatternMask,
