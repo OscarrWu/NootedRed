@@ -725,6 +725,19 @@ static constexpr UInt32 kDispP0RegVStartup      = 0x5046; // SEG2 + 0x1B86
 static constexpr UInt32 kDispP0RegVUpdate       = 0x5047; // SEG2 + 0x1B87
 static constexpr UInt32 kDispP0RegVReady        = 0x5048; // SEG2 + 0x1B88
 
+// ── 显示输出格式的 4 个只读点（审计 `tmp/tech/显示输出格式-审计-2026-10-24.md` §5.2 N1–N4）──
+//  坐标口径＝`Regs/DCN314.hpp` 的 `DCN_SEG2_BASE`(0x34C0)／`DCN_SEG3_BASE`(0x9000) ＋ 段内偏移；
+//  `static_assert` 把审计文档 §1.1 的**绝对地址**锁死 ⇒ 段基址/偏移被改动后会编译失败，不会静默错位。
+//  ⚠ 纯只读：本卡不写这四个寄存器（`0x55C9` 含 `DP_PIXEL_ENCODING`／`DP_DYNAMIC_RANGE`，**禁止盲写**）。
+static constexpr UInt32 kDispP0RegDpPixelFormat = DCN_SEG2_BASE + 0x2109;  // DP0_DP_PIXEL_FORMAT（bits24-26 分量位深）
+static constexpr UInt32 kDispP0RegFmtBitDepth   = DCN_SEG2_BASE + 0x1841;  // FMT0_FMT_BIT_DEPTH_CONTROL（truncation/dither）
+static constexpr UInt32 kDispP0RegMpcOut0Mux    = DCN_SEG3_BASE + 0x0580;  // MPC_OUT0_MUX（bits0-3）
+static constexpr UInt32 kDispP0RegOtgStatus     = DCN_SEG2_BASE + 0x1B49;  // OTG0_OTG_STATUS（bit0 V_BLANK／bit1 V_ACTIVE）
+static_assert(kDispP0RegDpPixelFormat == 0x55C9, "DP0_DP_PIXEL_FORMAT 绝对索引应为 0x55C9");
+static_assert(kDispP0RegFmtBitDepth   == 0x4D01, "FMT0_FMT_BIT_DEPTH_CONTROL 绝对索引应为 0x4D01");
+static_assert(kDispP0RegMpcOut0Mux    == 0x9580, "MPC_OUT0_MUX 绝对索引应为 0x9580");
+static_assert(kDispP0RegOtgStatus     == 0x5009, "OTG0_OTG_STATUS 绝对索引应为 0x5009");
+
 // ── 开关（首次进入时解析一次并缓存；显式守卫，不用带副作用的静态初始化）──
 struct DispP0Flags {
     bool init;
@@ -761,11 +774,14 @@ static void dispP0InitProbe(AMDRadeonX5000_AMDHWDisplay* const self)
         return;
     }
     SYSLOG("GFX9DCN314Display",
-           "[dispp0off-init] dto=%08x,%08x,%08x clk=%08x vtg=%08x h=%08x v=%08x vs=%08x,%08x,%08x",
+           "[dispp0off-init] dto=%08x,%08x,%08x clk=%08x vtg=%08x h=%08x v=%08x vs=%08x,%08x,%08x "
+           "dpfmt=%08x fmtbd=%08x mpcmux=%08x otgst=%08x",
            regs->read(kDispP0RegPixelRateCntl), regs->read(kDispP0RegDtoPhase), regs->read(kDispP0RegDtoModulo),
            regs->read(kDispP0RegOtgClock), regs->read(kDispP0RegVtg0Control), regs->read(kDispP0RegHTotal),
            regs->read(kDispP0RegVTotal), regs->read(kDispP0RegVStartup), regs->read(kDispP0RegVUpdate),
-           regs->read(kDispP0RegVReady));
+           regs->read(kDispP0RegVReady),
+           regs->read(kDispP0RegDpPixelFormat), regs->read(kDispP0RegFmtBitDepth),
+           regs->read(kDispP0RegMpcOut0Mux), regs->read(kDispP0RegOtgStatus));
 }
 
 // ── 写项与三档策略（需求文档 §4.3）──
@@ -931,11 +947,14 @@ static bool dispP0ConfigureDisplay(AMDRadeonX5000_AMDHWDisplay* const self, cons
 
     if (sDispP0Flags.probe) {
         SYSLOG("GFX9DCN314Display",
-               "[dispp0off] a=%u dto=%08x,%08x,%08x clk=%08x vtg=%08x h=%08x v=%08x vs=%08x,%08x,%08x", a,
+               "[dispp0off] a=%u dto=%08x,%08x,%08x clk=%08x vtg=%08x h=%08x v=%08x vs=%08x,%08x,%08x "
+               "dpfmt=%08x fmtbd=%08x mpcmux=%08x otgst=%08x", a,
                regs->read(kDispP0RegPixelRateCntl), regs->read(kDispP0RegDtoPhase), regs->read(kDispP0RegDtoModulo),
                regs->read(kDispP0RegOtgClock), regs->read(kDispP0RegVtg0Control), regs->read(kDispP0RegHTotal),
                regs->read(kDispP0RegVTotal), regs->read(kDispP0RegVStartup), regs->read(kDispP0RegVUpdate),
-               regs->read(kDispP0RegVReady));
+               regs->read(kDispP0RegVReady),
+               regs->read(kDispP0RegDpPixelFormat), regs->read(kDispP0RegFmtBitDepth),
+               regs->read(kDispP0RegMpcOut0Mux), regs->read(kDispP0RegOtgStatus));
         if (sDispP0Flags.write) {
             SYSLOG("GFX9DCN314Display", "[dispp0] -NRedDispP0Off 优先：本次零写");
         }
