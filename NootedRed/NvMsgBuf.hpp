@@ -87,7 +87,7 @@ extern "C" {
 //  @param secTag 秒级时间戳（写入文件名与首行标签 ⇒ 判读"最后一拍"可读到秒）
 int nredTraceFlush(int secTag);
 int nredTraceFlush();   // 无参兼容封装（既有 dumpNow 调用点）
-// 批次 F1（A 轮全零定因 §8.1）：强制入口——环空也写一片**头部**（只给 panic 路径用）。
+// 批次 挂起修复：force 入口保留（API 不变），但实现直接返回 0 ⇒ panic/挂起路径不写盘。
 int nredTraceFlushForce(int secTag);
 // 失败收容（-NRedFailReset，默认关）：失败点只留内存证据（零 I/O、零复位）。定义于 HWLibs.cpp。
 void nredFailResetMark(const char* where, int code, UInt64 a, UInt64 b);
@@ -200,10 +200,7 @@ namespace NvMsgBuf {
 	//  若与 stBusy 共用则一次 FS 阻塞会让 L2 周期拍全部跳过、唯一存活计时器失效）。
 	//  使用 UInt32 + OSCompareAndSwap 实现原子 test-and-set（防止 flush 重入写坏缓冲）。
 	inline UInt32          &stFlushBusy() { static UInt32 v = 0; return v; }
-	// 批次 pspsub：**force（panic 兜底）路径的独立互斥标志**。
-	//  为什么需要：若某次周期 flush 在写盘处挂住，`stFlushBusy` 永久为 1 ⇒ 后续（含 panic force）全部跳过。
-	//  force 用本标志 ⇒ 不被卡死的周期 flush 挡住；两者**不共用**（force 另有独立缓冲，见 `nredTraceFlushImpl`）。
-	inline UInt32          &stFlushBusyForce() { static UInt32 v = 0; return v; }
+	// （批次 挂起修复起：force 路径**不写盘** ⇒ 不再需要独立的 flush 互斥标志与独立缓冲。）
 
 	// 计算"自上次成功写出之后新增的部分"，填充 gBuf；成功则把本帧终点记入 stPendingEnd。
 	// ⚠️ **不推进 stLastBufx**（推进由 commit 完成）⇒ 写失败时下拍重算同一段（自然重试）。
@@ -444,22 +441,24 @@ namespace NvMsgBuf {
 	//   线程上。两条路径共用 `stBusy` 标志互斥，避免同时写同一卷（最坏只丢一拍，不影响流程）。
 	//   位置要求：必须定义在 `dumpIncrement`/`commitIncrement` **之后**（它们是同命名空间的
 	//   自由函数，使用前须已声明）。
-	// 批次 F1：`force` 只影响末尾那次环刷盘（环空也写头部）；其余行为逐字不变。
-	// 批次 pspsub：`force`（panic 兜底）路径**不看 `stBusy`**——若 L2 拍正持锁（或已挂住），
-	//  否则 force 会被直接跳过 ⇒ panic 期读数全丢。非 force 路径逐字不变。
+	// 批次 挂起修复（R-挂起修复 §1.2／§1.5-3）：**force（panic/挂起路径）不写盘**。
+	//  原因：存储栈挂起时写盘会阻塞 ⇒ 整机挂起（301/310 实测）。数据留在内存环，
+	//  由下一次**正常上下文**（L2 拍）的 flush 带出；接受"panic 时丢现场"。
 	inline void dumpNowImpl(const bool force) {
 		if (rootvnode == nullptr) return;
 		if (!force && stBusy()) return;
-		// ⚠ force 路径**完全不碰 `stBusy`**：若 L2 拍正持锁，置 true/false 会把它的锁"提前释放"。
 		if (!force) { stBusy() = true; }
-		const int n = dumpIncrement();
-		if (n > 0) {
-			char name[80];
-			snprintf(name, sizeof(name), "/var/log/NRedNow-%03d.txt", stSeq());
-			// 首行写本轮 uptime 指纹（第 87 轮判读 §4 建议 2）：判读侧据此判 L2 文件属主。
-			if (writeWithFingerprint(name, gBuf, static_cast<size_t>(n)) == 0) {
-				commitIncrement();
-				stSeq()++;
+		// 挂起修复：force（panic/挂起路径）不写盘；数据留内存环，由下次正常上下文带出。
+		if (!force) {
+			const int n = dumpIncrement();
+			if (n > 0) {
+				char name[80];
+				snprintf(name, sizeof(name), "/var/log/NRedNow-%03d.txt", stSeq());
+				// 首行写本轮 uptime 指纹（第 87 轮判读 §4 建议 2）：判读侧据此判 L2 文件属主。
+				if (writeWithFingerprint(name, gBuf, static_cast<size_t>(n)) == 0) {
+					commitIncrement();
+					stSeq()++;
+				}
 			}
 		}
 		// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之后**调用 ⇒
@@ -469,9 +468,9 @@ namespace NvMsgBuf {
 		else       { nredTraceFlush(stTick() * kTickSecs); }
 	}
 	inline void dumpNow() { dumpNowImpl(false); }
-	// 批次 F1（A 轮全零定因 §8.1）：panic 路径专用——环空也写一片头部，
-	//  使 `[p6]`／`[st1r]`／`[r1]`／`[p2b]` 等头部读数不再被"环有无内容"绑架。
+	// 批次 挂起修复：`dumpNowForce` 走 force 分支 ⇒ 零 I/O（`nredTraceFlushForce` 直接返回 0）。
 	inline void dumpNowForce() { dumpNowImpl(true); }
+
 
 	// 一拍：有增量就写一个文件；无论成败都排下一拍，直到用完 kMaxTicks 或写满 kMaxTotal。
 	// 由 thread_call 调用 ⇒ **独立线程上下文**（与 Lilu 的 debugDumpCall 同款），不在锁里、不阻塞调用者。

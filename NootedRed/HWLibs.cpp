@@ -1769,25 +1769,22 @@ static void nredMesBStamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { off += (static_cast<size_t>(n) < cap) ? static_cast<size_t>(n) : cap; }
 }
 
-// 批次 F1（A 轮全零定因 §8.1）：把实现抽成 impl，`force` 只放宽"环空"这一条早退。
-//  动机：头部读数（`[p6]`／`[st1r]`／`[r1]`／`[p2b]`）只在"有环行要写"时才被带出去 ⇒
-//  环空时头部读数永远落不了盘（A 轮唯一新鲜片 sec=20 早于 sw init 1–2 s 即此机制）。
-//  ⚠ `force` **不**放宽 `rootvnode` 判据（落盘前提）；也不改任何既有落盘时点/频率/正文格式。
+// 批次 F1（A 轮全零定因 §8.1）：把实现抽成 impl，`force` 原用于放宽"环空"这一条早退。
+//  批次 挂起修复起：`force` 语义**反转为"完全不写盘"**（panic/挂起路径禁止 I/O，301/310 实测）。
+//  ⚠ `force` 仍**不**放宽 `rootvnode` 判据；非 force 路径逐字不变。
 // 批次 SOS 采样：定义在文件后部（依赖 `pspStateEmit` 的读路径）⇒ 此处前置声明。
 static void pspStateSample(UInt32 t);
 static int nredTraceFlushImpl(const int secTag, const bool force)
 {
     if (rootvnode == nullptr) { return 0; }              // 落盘前提（force 也不放宽）
-    if (!force && gTraceRing.count == 0) { return 0; }   // 非 force：环空不写（既有行为）
+    // 批次 挂起修复（R-挂起修复 §1.2／§1.5-3）：**force（panic/挂起路径）不写盘**。
+    //  原因：存储栈挂起时写盘会阻塞 ⇒ 整机挂起（301/310 实测）。数据留在内存环，
+    //  由下一次**正常上下文**（L2 拍）的 flush 带出；接受"panic 时丢现场"。
+    if (force) { return 0; }
+    if (gTraceRing.count == 0) { return 0; }             // 环空不写（既有行为）
     // A-28 风险①处理：flush 用**独立** `stFlushBusy` 互斥（与 L2 的 `stBusy` 分开）⇒
     //  万一 FS 阻塞，只影响本 flush，不会让 L2 周期拍后续全部跳过（唯一存活计时器保住）。
-    // 批次 pspsub：force 路径用**独立互斥标志**——若某次周期 flush 在写盘处挂住，
-    //  `stFlushBusy` 永久为 1 ⇒ 后续（含 panic force）全部跳过。非 force 路径逐字不变。
-    if (force) {
-        if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusyForce())) { return 0; }
-    } else {
-        if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusy())) { return 0; }
-    }
+    if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusy())) { return 0; }
     static unsigned fseq = 0;
     char name[96];
     // A-28 风险②处理：文件名带 **slide**（认属主）+ 首行带 **uptime 指纹 + sec**（认本轮/秒级）。
@@ -1797,10 +1794,8 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     // 4096 B 上限修复（R-4096上限 §3.1）：头部随开关数量可达 5–6 KB，4 KB 连头部都放不下
     //  （r293/r294/r295/r297 实证：末行分别是 `[mesb]`／`[st1p]`／`[st1p] p`／`[st1c]`）。
     //  16 KB = 头部（≤6 KB）+ 环正文（≥10 KB，≈50 行）；静态 BSS，+12 KB。
-    // 批次 pspsub：force 用**独立缓冲**——避免与可能挂住的周期 flush 共用同一块（数据竞争）。
-    static char bodyNormal[16 * 1024];
-    static char bodyForce[16 * 1024];
-    char (&body)[16 * 1024] = force ? bodyForce : bodyNormal;
+
+    static char body[16 * 1024];
     size_t off = 0;
     // 首行指纹（复用 NvMsgBuf 的既有指纹格式）+ 秒级标签
     off += NvMsgBuf::formatFingerprint(body, sizeof(body));
@@ -2279,7 +2274,7 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
         off += len;
         body[off++] = '\n';
     }
-    if (off == 0) { if (force) { NvMsgBuf::stFlushBusyForce() = false; } else { NvMsgBuf::stFlushBusy() = false; } return 0; }
+    if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
     // B94 修复（s0-006 实测 4122B>4096 且 [flush-t30] 乱码）：snprintf 返回**应写长度**（截断时仍返回
     //  完整长度）⇒ `off += snprintf(...)` 在 off 接近上限时越界累加 ⇒ 越界写 body、FileIO 读越界。
     //  ⇒ 改用"实际写入长度"（min(返回值, 余量)）累加，off 恒 ≤ lim，文件大小 ≤ lim。
@@ -2308,18 +2303,20 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     if (err == 0) {
         gTraceRing.reset();
         ++fseq;
-        if (force) { NvMsgBuf::stFlushBusyForce() = false; } else { NvMsgBuf::stFlushBusy() = false; }
+        NvMsgBuf::stFlushBusy() = false;
         return static_cast<int>(n);
     }
-    if (force) { NvMsgBuf::stFlushBusyForce() = false; } else { NvMsgBuf::stFlushBusy() = false; }
+    NvMsgBuf::stFlushBusy() = false;
     return 0;
 }
 // 既有入口（行为逐字不变）：环空不写。
 int nredTraceFlush(const int secTag) { return nredTraceFlushImpl(secTag, false); }
 // 无参兼容封装（既有调用点 X6000FB.cpp 曾用）：秒级标签取"当前拍序号×kTickSecs"。
 int nredTraceFlush() { return nredTraceFlushImpl(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs, false); }
-// 批次 F1：强制入口——环空也写一片**头部**（正文区无环行）。只给 panic 路径用。
+// 批次 挂起修复：force 入口保留（调用方 API 不变），但 `nredTraceFlushImpl(force=true)` 直接返回 0
+//  ⇒ panic/挂起路径**不写盘**（数据留内存环，由下次正常上下文带出）。
 int nredTraceFlushForce(const int secTag) { return nredTraceFlushImpl(secTag, true); }
+
 
 // ── 失败收容（-NRedFailReset，默认关）：失败点只留内存证据，安全点落盘并复位 ──────────
 //  批次 F 重写（原实现在失败点直接刷盘＋复位，违反 :846-850 的深栈纪律）：
@@ -2330,6 +2327,9 @@ int nredTraceFlushForce(const int secTag) { return nredTraceFlushImpl(secTag, tr
 //  ⚠ 不写 NVRAM（避免与 gAppleEFIRuntimeBusy 争用）；不写任何内核全局。
 
 // 一次独立写（与内存环无关）；复用既有 nredTraceTruncateFile + FileIO::writeBufferToFile。
+//  ⚠ 批次 挂起修复（R-挂起修复 §1.2／§1.5-3）：**只允许在安全上下文调用**（当前唯一调用点是
+//     `nredFailResetService`，即 L2 周期拍——`stBusy` 已释放、`rootvnode` 已确认）。
+//     **禁止**在 panic／挂起路径调用：存储栈挂起时写盘会阻塞 ⇒ 整机挂起（301/310 实测）。
 static int nredFailResetWrite(const char* const stage)
 {
     char path[64];

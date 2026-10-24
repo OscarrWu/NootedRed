@@ -323,8 +323,9 @@ static void nredPPTrace(char* const buf, const int n)
 //
 //  MMIO 通道：`NRed::readReg32Raw` / `writeReg32Raw`（2026-09-29 新增的最小公开访问器；
 //  `rmmioPtr` 本身是**私有成员** —— `NRed.hpp:45` 在 `public:`(`:55`) 之前 —— 故必须走访问器。
-//  ⚠️ 刻意**不复用** `NRed::readReg32Ext`：那个原语缺锁、且无法注入 `SmnCallbacks`；
-//     本探针用 `SmnReadProbe.hpp` 的序列（写索引→回读校验→读数据），与 Linux 规范一致。
+//  ⚠️ 刻意**不复用** `NRed::readReg32Ext`：它无法注入 `SmnCallbacks`（判据需回传 err/blank 对照）；
+//     且本探针在 `handleCriticalError` 中执行，**不能**取锁（见下条）——而 `readReg32Ext` 自
+//     批次 挂起修复起已内置自旋锁（`gSmnLock`），在此上下文取锁有死锁风险。
 //
 //  ⚠️ 锁回调留空（`nullptr`）：本探针在 `handleCriticalError`（崩溃流程、多 CPU 已停、
 //     锁状态未知）中执行，**不能**在此取 IOLock（可能睡眠/死锁 —— 手册 §7.3 教训）。
@@ -349,8 +350,8 @@ static void smnProbeWriteReg(void*, const UInt32 off, const UInt32 val)
 //      （`readReg32Raw` / `writeReg32Raw`），用于 BIF_FB_EN 的"读原值 → 写 → 读回"。
 //      ⚠️ dword 索引 `0xE20` 已含段基址 `NBIO_BASE_2`（0xD20）⇒ 与 `readReg32Raw` 的
 //      `rmmioPtr[dwordOffset]` 语义**严格同口径**（本项目 `readReg32` 的窗口内分支亦然）。
-//    · `nbioFbEnReadExt`：**字节地址**口径的越窗间接读（`NRed::readReg32Ext`，`NRed.cpp:270`；
-//      与 Linux `RREG32_PCIE_EXT` 同形态：写 INDEX2 → 回读刷写 → 读 DATA2），
+//    · `nbioFbEnReadExt`：**字节地址**口径的越窗间接读（`NRed::readReg32Ext`，`NRed.cpp:295`；
+//      与 Linux `RREG32_PCIE_EXT` 同形态：写 INDEX2 → 回读刷写 → 读 DATA2；内部已加自旋锁），
 //      用于判据的越窗 2 点（真读点 / 阴性对照）。
 //    ⛔ 三者**只做转发**：不含窗口判断、不含锁、无重试、无日志（判据全部回传给序列函数）。
 static UInt32 nbioFbEnReadDw(void*, const UInt32 dwordOffset)
@@ -2582,22 +2583,24 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //  三条串的独有段分别是 R1 后紧跟空格、R1B30、R1Cwi，任意两者都不构成子串包含关系
     //  （已用穷举矩阵核验，见报告 §11）。
     if (gR1cwiProbeArmed) {
-        // 铁律：panic 实参只能是已求值的局部变量
+        // 探针读数：全部为已求值的局部标量（沿用原 panic 实参纪律，便于机械判读）。
         const UInt64 base   = gR1cwiBase;
         const UInt64 self   = gR1cwiSelf;
         const UInt64 f1e89  = gR1cwiF1E89;
-        const UInt64 f1e89l = gR1cwiF1E89Lo;
         const UInt64 f1a38  = gR1cwiF1A38;
         const UInt64 calls  = gR1cwiCalls;
         const UInt64 zMask  = gR1cwiF1E89ZeroMask;
         const UInt64 bit0   = f1e89 & 0x1ULL;   // 成功印记（0x62db 的 `orb $0x1,0x1e89`）
-        panic("NRed R1Cwi probe: calls=%llu base=%llx self=%llx "
-              "| f1e89=%llx f1e89Lo=%llx bit0=%llu zeroMask=%llu "
-              "| f1a38=%llx",
-              calls, base, self,
-              f1e89, f1e89l, bit0, zMask,
-              f1a38);
-        // panic 不返回
+        // 批次 挂起修复（R-挂起修复 §1.4／§1.5-4）：**探针不得 panic**（83 的教训）。
+        //  原实现用 `panic(...)` 输出读数 ⇒ 制造嵌套 panic ⇒ 触发 K2/K4 ⇒ 永不 `PEHaltRestart`。
+        //  改为 `nredTraceLine`（纯内存环）：读数由下一次正常上下文的 flush 带出。
+        {
+            char line[192];
+            const int n = snprintf(line, sizeof(line),
+                "[r1cwi] calls=%llu base=%llx self=%llx f1e89=%llx bit0=%llu zeroMask=%llu f1a38=%llx\n",
+                calls, base, self, f1e89, bit0, zMask, f1a38);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── R1'-EngTbl 探针（`-NRedEngTblProbe`，默认关）───────────────────────────
     //  判据与依据见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。

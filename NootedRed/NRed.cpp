@@ -280,9 +280,35 @@ void NRed::writeReg32(const UInt32 reg, const UInt32 value) const
 //      if (pcie_index_hi != 0) { writel(...); readl(...); }   // Phoenix 无 HI ⇒ 恒跳过（见 NRed.hpp 注释）
 //      r = readl(pcie_data_offset);
 //      if (pcie_index_hi != 0) { writel(0, ...); readl(...); }
+// 批次 挂起修复（R-挂起修复 §1.1／§1.5-2）：
+//  ① **加锁**：无锁共享 `PCIE_INDEX2/DATA2` 对在并发时 SMN 不响应 ⇒ 读挂起（76/127 实测）。
+//     锁内只做"写索引→回读→读数据"三步；锁外无 MMIO。
+//  ② **SMN 不可用时不读**：本机实测的"不可用"触发条件就是**并发争用**（同一对寄存器被两个上下文
+//     同时使用 ⇒ SMN 不响应）。故一旦观察到锁争用（有界自旋耗尽），即判 SMN 不可用并**永久停读**，
+//     之后直接返回哨兵、不再发起任何 MMIO。
+//  ⚠ "MMIO 硬超时"**不可做**（单条 load，总线不响应时 CPU 停住，软件无法超时）⇒ 只能靠"不读"。
+//  ⚠ 有界自旋（1000 次）而非无限等待：避免在挂起边缘把自己也挂住。
+static UInt32 gSmnLock = 0;              // 0=空闲，1=占用（OSCompareAndSwap 原子 test-and-set）
+static UInt32 gSmnLast = 0xFFFFFFFFU;    // 争用时的"上一次值"
+static UInt32 gSmnDead = 0;              // 1＝已判 SMN 不可用 ⇒ 之后不再发起 MMIO
+
 UInt32 NRed::readReg32Ext(const UInt32 addr) const
 {
+    if (gSmnDead != 0) { return 0xFFFFFFFFU; }   // SMN 已判不可用 ⇒ 不读（哨兵）
+    UInt32 spins = 0;
+    while (!OSCompareAndSwap(0, 1, &gSmnLock)) {
+        if (++spins >= 1000) {
+            // 争用耗尽 ⇒ 判 SMN 不可用（并发正是本机实测的挂起触发条件）⇒ 永久停读并记一行。
+            gSmnDead = 1;
+            static char smnLine[] = "[smn] unavailable: lock contention -> stop MMIO\n";
+            nredTraceLine(smnLine, static_cast<int>(sizeof(smnLine) - 1));
+            return gSmnLast;
+        }
+    }
     this->rmmioPtr[PCIE_INDEX2] = addr;
     (void)this->rmmioPtr[PCIE_INDEX2];   // ★ 回读刷写（volatile 读，编译器不会优化掉）
-    return this->rmmioPtr[PCIE_DATA2];
+    const UInt32 v = this->rmmioPtr[PCIE_DATA2];
+    gSmnLast = v;
+    gSmnLock = 0;
+    return v;
 }
