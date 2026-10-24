@@ -452,6 +452,12 @@ static const UInt8 kPspSub4c05bPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 
                                             0x49, 0x89, 0xF8, 0x48, 0x8D, 0x45, 0xE8, 0x48};
 static const UInt8 kPspSub56fffPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48,
                                             0x83, 0xEC, 0x20, 0x49, 0x89, 0xFE, 0x31, 0xC0};
+
+// 0x4b02d 前 15 B（批次 psptmrreuse：苹果 TMR 加载函数；`resolveProbe` 的 expected-offset 校验用）。
+//  取自 macho `__text`（VMA 0x4b02d，file off 0x4c02d）：55 48 89 e5 41 57 41 56 53 50 49 89 fe 48 8b
+//  （函数入口确认：0x4b02c 是上一条 `ret` 的 `c3`，0x4b02d 起为 `push %rbp; mov %rsp,%rbp; …`）。
+static const UInt8 kPspTmrLoadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                                           0x53, 0x50, 0x49, 0x89, 0xFE, 0x48, 0x8B};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -608,6 +614,10 @@ static unsigned gPspRingDumps = 0;       // 本轮 dump 次数（入口重置，
 //  把 `h+1280` 指向我方 bringup 已建的 KM ring，并返回 0（不再调苹果原件）。
 //  ⚠ 关态 ⇒ 本块不执行，行为与改动前逐字一致。
 static bool gPspRingReuse = false;   // `-NRedPspRingReuse`
+// 批次 psptmrreuse（`-NRedPspTmrReuse`，默认关）：拦截苹果 TMR 加载（`0x4b02d`）。
+//  我方 bringup 已加载 TMR（r293 step=12）；苹果再加载一次会 fence 超时（`0x140401`）。
+//  ⚠ 关态 ⇒ 本块不执行，行为与改动前逐字一致。
+static bool gPspTmrReuse = false;   // `-NRedPspTmrReuse`
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3534,6 +3544,33 @@ UInt8 X5000HWLibs::wrapP8Head(void* const a, UInt64 b, UInt64 c, UInt64 d)
     }
     if (singleton().orgP8Head == 0) { return 0; }
     return FunctionCast(wrapP8Head, singleton().orgP8Head)(a, b, c, d);
+}
+
+// ─── 批次 psptmrreuse：`0x4b02d`（苹果 TMR 加载）拦截 ──────────────────────────────────
+//  我方 bringup 已加载 TMR（r293 step=12）；苹果再加载一次会 fence 超时（`0x140401`）。
+//  ⚠ 只拦 TMR 加载，**不**拦提交入口 `0x4d2c4`（影响所有命令）、**不**拦 fence 等待 `0x4d6d2`。
+//  ⚠ 关态（未带开关）⇒ 调用原件，行为与改动前逐字一致。
+static mach_vm_address_t gOrgPspTmrLoad = 0;   // `0x4b02d` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
+
+static int wrapPspTmrLoad(void* const h, void* const rsi)
+{
+    // 批次 psptmrreuse（-NRedPspTmrReuse，默认关）：
+    //   我方 bringup 已加载 TMR（r293 step=12）；苹果 TMR 加载（0x4b02d）再加载一次
+    //   会 fence 超时（0x140401）⇒ 在 bringup 已过 TMR 时直接返回成功。
+    //   ⚠ 只拦 TMR 加载，不拦提交入口 0x4d2c4 / fence 等待 0x4d6d2。
+    //   ⚠ 关态（未带开关）⇒ 调用原件，行为与改动前逐字一致。
+    if (gPspTmrReuse && gBringupStep >= 11) {
+        if (gPspEdxOn) {
+            static char tmrLine[96];
+            const int n = snprintf(tmrLine, sizeof(tmrLine),
+                                   "[psptmr] skip tmr load step=%u\n",
+                                   static_cast<unsigned>(gBringupStep));
+            if (n > 0) { nredTraceLine(tmrLine, n); }
+        }
+        return 0;
+    }
+    if (gOrgPspTmrLoad == 0) { return -1; }
+    return FunctionCast(wrapPspTmrLoad, gOrgPspTmrLoad)(h, rsi);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
@@ -9225,6 +9262,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 批次 pspringreuse（**默认关**）：A 方案 —— 拦截苹果 KM ring create，复用我方 ring。
     //  精确 token，与相邻行同款。
     gPspRingReuse = nredExactBootArg("-NRedPspRingReuse");
+    // 批次 psptmrreuse（**默认关**）：拦截苹果 TMR 加载（`0x4b02d`）。精确 token，与相邻行同款。
+    gPspTmrReuse = nredExactBootArg("-NRedPspTmrReuse");
     // 批次 C3（**默认关**）：平台自检模式（四段标记 + 实际 flush）。精确 token。
     gTraceSelfTest = nredExactBootArg("-NRedTraceSelfTest");
     // 批次 pspstate（**默认关**）：PSP 只读状态（C2PMSG_81／C2PMSG_64）。精确 token。
@@ -9713,6 +9752,28 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                               "psp-sub-56fff");
                 pspSubInstallLine("56fff", f3, ok3, gOrgPspSub56fff);
             }
+            }
+        }
+        // 批次 psptmrreuse（`-NRedPspTmrReuse`，默认关）：`0x4b02d`（苹果 TMR 加载）拦截。
+        //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        //  ⚠ 独立于 `-NRedPspEdx`（拦截本身不需要探针开关；`[psptmr]` 行才需要）。
+        if (gPspTmrReuse) {
+            const auto fromTmr = resolveProbe("psp-tmr-load", kPspTmrLoadPattern, nullptr,
+                                              arrsize(kPspTmrLoadPattern), 0x4B02D);
+            bool okTmr = false;
+            if (fromTmr != 0) {
+                okTmr = hookProbe(fromTmr,
+                                  KernelPatcher::RouteRequest{nullptr, wrapPspTmrLoad, gOrgPspTmrLoad},
+                                  "psp-tmr-load");
+            }
+            if (gPspEdxOn) {
+                static char tmrHookLine[96];
+                const int nH = snprintf(tmrHookLine, sizeof(tmrHookLine),
+                                        "[psptmr] hook=%s at=%llx org=%llx\n",
+                                        (fromTmr == 0) ? "resolve-failed" : (okTmr ? "installed" : "route-failed"),
+                                        static_cast<unsigned long long>(fromTmr),
+                                        static_cast<unsigned long long>(gOrgPspTmrLoad));
+                if (nH > 0) { nredTraceLine(tmrHookLine, nH); }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
