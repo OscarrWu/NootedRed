@@ -576,6 +576,8 @@ static mach_vm_address_t gOrgPspSub4ccae = 0;
 static mach_vm_address_t gOrgPspSub4c05b = 0;
 static mach_vm_address_t gOrgPspSub56fff = 0;
 static bool gPspInRingCreate = false;   // 1＝正在 `0x4cb8a` 内（子调用探针的作用域限定）
+// 批次 pspsub：**失败行**用独立计数（总上限 8）——失败是判读重点，不能被"每函数 2 行"的配额吃掉。
+static UInt32 gPspSubFailN = 0;
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -1765,8 +1767,13 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     if (!force && gTraceRing.count == 0) { return 0; }   // 非 force：环空不写（既有行为）
     // A-28 风险①处理：flush 用**独立** `stFlushBusy` 互斥（与 L2 的 `stBusy` 分开）⇒
     //  万一 FS 阻塞，只影响本 flush，不会让 L2 周期拍后续全部跳过（唯一存活计时器保住）。
-    //  使用 OSCompareAndSwap 原子 test-and-set 防止 flush 重入写坏缓冲。
-    if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusy())) { return 0; }
+    // 批次 pspsub：force 路径用**独立互斥标志**——若某次周期 flush 在写盘处挂住，
+    //  `stFlushBusy` 永久为 1 ⇒ 后续（含 panic force）全部跳过。非 force 路径逐字不变。
+    if (force) {
+        if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusyForce())) { return 0; }
+    } else {
+        if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusy())) { return 0; }
+    }
     static unsigned fseq = 0;
     char name[96];
     // A-28 风险②处理：文件名带 **slide**（认属主）+ 首行带 **uptime 指纹 + sec**（认本轮/秒级）。
@@ -1776,7 +1783,10 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     // 4096 B 上限修复（R-4096上限 §3.1）：头部随开关数量可达 5–6 KB，4 KB 连头部都放不下
     //  （r293/r294/r295/r297 实证：末行分别是 `[mesb]`／`[st1p]`／`[st1p] p`／`[st1c]`）。
     //  16 KB = 头部（≤6 KB）+ 环正文（≥10 KB，≈50 行）；静态 BSS，+12 KB。
-    static char body[16 * 1024];
+    // 批次 pspsub：force 用**独立缓冲**——避免与可能挂住的周期 flush 共用同一块（数据竞争）。
+    static char bodyNormal[16 * 1024];
+    static char bodyForce[16 * 1024];
+    char (&body)[16 * 1024] = force ? bodyForce : bodyNormal;
     size_t off = 0;
     // 首行指纹（复用 NvMsgBuf 的既有指纹格式）+ 秒级标签
     off += NvMsgBuf::formatFingerprint(body, sizeof(body));
@@ -2249,7 +2259,7 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
         off += len;
         body[off++] = '\n';
     }
-    if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
+    if (off == 0) { if (force) { NvMsgBuf::stFlushBusyForce() = false; } else { NvMsgBuf::stFlushBusy() = false; } return 0; }
     // B94 修复（s0-006 实测 4122B>4096 且 [flush-t30] 乱码）：snprintf 返回**应写长度**（截断时仍返回
     //  完整长度）⇒ `off += snprintf(...)` 在 off 接近上限时越界累加 ⇒ 越界写 body、FileIO 读越界。
     //  ⇒ 改用"实际写入长度"（min(返回值, 余量)）累加，off 恒 ≤ lim，文件大小 ≤ lim。
@@ -2278,10 +2288,10 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     if (err == 0) {
         gTraceRing.reset();
         ++fseq;
-        NvMsgBuf::stFlushBusy() = false;
+        if (force) { NvMsgBuf::stFlushBusyForce() = false; } else { NvMsgBuf::stFlushBusy() = false; }
         return static_cast<int>(n);
     }
-    NvMsgBuf::stFlushBusy() = false;
+    if (force) { NvMsgBuf::stFlushBusyForce() = false; } else { NvMsgBuf::stFlushBusy() = false; }
     return 0;
 }
 // 既有入口（行为逐字不变）：环空不写。
@@ -3556,15 +3566,28 @@ static void pspSubLine(const char* const fn, const UInt32 n, const int ret, cons
     if (k > 0) { nredTraceLine(line, k); }
 }
 
+// 批次 pspsub：**失败必写**——`ret != 0` 时不受"每函数 2 行"配额限制（改用总上限 8）。
+//  为什么：失败是判读重点；若配额已被早期成功调用吃掉，失败行就永远看不到。
+static void pspSubEmit(const char* const fn, UInt32& perFn, const int ret, const UInt64 us)
+{
+    if (ret != 0) {
+        if (gPspSubFailN >= 8) { return; }
+        ++gPspSubFailN;
+        pspSubLine(fn, gPspSubFailN, ret, us);
+    } else if (perFn < 2) {
+        ++perFn;
+        pspSubLine(fn, perFn, ret, us);
+    }
+}
+
 // `0x4ccae(h, 165, 0)`：返回 0/2（读回调为 null 时立即返 2，**不是超时**）。
 static int wrapPspSub4ccae(void* const h, const UInt32 a, const UInt32 b)
 {
     if (gOrgPspSub4ccae == 0) { return -1; }
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub4ccae, gOrgPspSub4ccae)(h, a, b);
-    if (gPspEdxOn && gPspInRingCreate && gPspSub4ccae < 2) {
-        ++gPspSub4ccae;
-        pspSubLine("4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000);
+    if (gPspEdxOn && gPspInRingCreate) {
+        pspSubEmit("4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
 }
@@ -3575,9 +3598,8 @@ static int wrapPspSub4c05b(void* const a, void* const cb, void* const desc, cons
     if (gOrgPspSub4c05b == 0) { return -1; }
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub4c05b, gOrgPspSub4c05b)(a, cb, desc, timeoutUs);
-    if (gPspEdxOn && gPspInRingCreate && gPspSub4c05b < 2) {
-        ++gPspSub4c05b;
-        pspSubLine("4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000);
+    if (gPspEdxOn && gPspInRingCreate) {
+        pspSubEmit("4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
 }
@@ -3588,9 +3610,8 @@ static int wrapPspSub56fff(void* const h, const UInt32 type)
     if (gOrgPspSub56fff == 0) { return -1; }
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub56fff, gOrgPspSub56fff)(h, type);
-    if (gPspEdxOn && gPspInRingCreate && gPspSub56fff < 2) {
-        ++gPspSub56fff;
-        pspSubLine("56fff", gPspSub56fff, ret, (mach_absolute_time() - t0) / 1000);
+    if (gPspEdxOn && gPspInRingCreate) {
+        pspSubEmit("56fff", gPspSub56fff, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
 }

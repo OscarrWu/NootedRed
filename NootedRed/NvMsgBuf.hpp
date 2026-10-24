@@ -200,6 +200,10 @@ namespace NvMsgBuf {
 	//  若与 stBusy 共用则一次 FS 阻塞会让 L2 周期拍全部跳过、唯一存活计时器失效）。
 	//  使用 UInt32 + OSCompareAndSwap 实现原子 test-and-set（防止 flush 重入写坏缓冲）。
 	inline UInt32          &stFlushBusy() { static UInt32 v = 0; return v; }
+	// 批次 pspsub：**force（panic 兜底）路径的独立互斥标志**。
+	//  为什么需要：若某次周期 flush 在写盘处挂住，`stFlushBusy` 永久为 1 ⇒ 后续（含 panic force）全部跳过。
+	//  force 用本标志 ⇒ 不被卡死的周期 flush 挡住；两者**不共用**（force 另有独立缓冲，见 `nredTraceFlushImpl`）。
+	inline UInt32          &stFlushBusyForce() { static UInt32 v = 0; return v; }
 
 	// 计算"自上次成功写出之后新增的部分"，填充 gBuf；成功则把本帧终点记入 stPendingEnd。
 	// ⚠️ **不推进 stLastBufx**（推进由 commit 完成）⇒ 写失败时下拍重算同一段（自然重试）。
@@ -441,9 +445,13 @@ namespace NvMsgBuf {
 	//   位置要求：必须定义在 `dumpIncrement`/`commitIncrement` **之后**（它们是同命名空间的
 	//   自由函数，使用前须已声明）。
 	// 批次 F1：`force` 只影响末尾那次环刷盘（环空也写头部）；其余行为逐字不变。
+	// 批次 pspsub：`force`（panic 兜底）路径**不看 `stBusy`**——若 L2 拍正持锁（或已挂住），
+	//  否则 force 会被直接跳过 ⇒ panic 期读数全丢。非 force 路径逐字不变。
 	inline void dumpNowImpl(const bool force) {
-		if (rootvnode == nullptr || stBusy()) return;
-		stBusy() = true;
+		if (rootvnode == nullptr) return;
+		if (!force && stBusy()) return;
+		// ⚠ force 路径**完全不碰 `stBusy`**：若 L2 拍正持锁，置 true/false 会把它的锁"提前释放"。
+		if (!force) { stBusy() = true; }
 		const int n = dumpIncrement();
 		if (n > 0) {
 			char name[80];
@@ -456,7 +464,7 @@ namespace NvMsgBuf {
 		}
 		// A-28：把内存环里的早期 trace 行刷盘（**在 stBusy 释放之后**调用 ⇒
 		//  flush 耗时（含 FS 阻塞）不计入 stBusy 持有时间）。flush 用独立 stFlushBusy 互斥。
-		stBusy() = false;
+		if (!force) { stBusy() = false; }
 		if (force) { nredTraceFlushForce(stTick() * kTickSecs); }
 		else       { nredTraceFlush(stTick() * kTickSecs); }
 	}
