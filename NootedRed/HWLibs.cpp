@@ -434,6 +434,11 @@ static UInt32 gP8InOk = 0;                   // P5：1＝已采
 // 0xa25de 前 16 B（resolveProbe 的 expected-offset 校验用）
 static const UInt8 kP8HeadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
                                        0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x49, 0x89};
+// 0x4cb8a 前 15 B（PSP ring create 的类型化包装；`resolveProbe` 的 expected-offset 校验用）。
+//  取自 macho `__text`（VMA 0x4cb8a，file off 0x4db8a）：55 48 89 e5 41 57 41 56 53 50 89 f3 49 89 ff
+//  （第 16 字节起是 `callq *32176(%rdi)` 的 `ff 87 …`，故只取到指令边界）。
+static const UInt8 kPspRingCreatePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                                              0x53, 0x50, 0x89, 0xF3, 0x49, 0x89, 0xFF};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -536,6 +541,16 @@ static bool       gGc7HitSeen = false;
 static UInt32     gGc7xSlot = 0;
 static UInt64     gGc7xVal = 0;
 static UInt32     gGc7xSeen = 0;
+// 批次 PSP-edx（`-NRedPspEdx`，默认关）：苹果 PSP 事件环的**只读**探针。
+//  环布局（反汇编 `0x4c8a3`）：`h+0x3930`＝回绕标志(u8)、`h+0x3934`＝索引(u32,0..31)、
+//  条目 `h+0x3938+i*0x110`（+0 事件 ID u32／+4 严重度 u32／+8 返回码 edx u64）＋文本 256 B。
+//  ⚠ 零写、零寄存器访问、不改返回值；关态不安装 hook、不读环、不输出。
+static bool   gPspEdxOn  = false;             // `-NRedPspEdx`
+static UInt32 gPspEdxIdx = 0xFFFFFFFFU;       // 哨兵：尚未读到
+static UInt64 gPspEdxVal = 0;                 // 条目 +8（edx）
+static UInt32 gPspEdxEv  = 0;                 // 条目 +0（事件 ID）
+static UInt32 gPspEdxSev = 0;                 // 条目 +4（严重度）
+static mach_vm_address_t gOrgPspRingCreate = 0;   // `0x4cb8a` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -1799,6 +1814,17 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     if (gR1On && off < sizeof(body)) { nredR1Stamp(body, off, sizeof(body) - off); }
     // 批次 R1：P2b 数据面读数（仅 -NRedP2b）。紧跟 `[r1]` ⇒ 头部前部，免疫 4096 B 尾部截断。
     if (gP2bOn && off < sizeof(body)) { nredP2bStamp(body, off, sizeof(body) - off); }
+    // 批次 PSP-edx：苹果 PSP 事件环最后一条的返回码（仅 `-NRedPspEdx`；关态一字不变）。
+    //  放头部区 ⇒ 免疫正文区截断；`idx=ffffffff` 表示"尚未读到"（哨兵）。
+    if (gPspEdxOn && gPspEdxIdx != 0xFFFFFFFFU && off < sizeof(body)) {
+        const size_t capPsp = sizeof(body) - off;
+        const int nPsp = snprintf(body + off, capPsp, "[pspedx] idx=%u edx=%llx ev=%x sev=%u\n",
+                                  static_cast<unsigned>(gPspEdxIdx),
+                                  static_cast<unsigned long long>(gPspEdxVal),
+                                  static_cast<unsigned>(gPspEdxEv),
+                                  static_cast<unsigned>(gPspEdxSev));
+        if (nPsp > 0) { off += (static_cast<size_t>(nPsp) < capPsp) ? static_cast<size_t>(nPsp) : capPsp; }
+    }
     // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
     //  ab＝allocB 返回值（由既有 wrapTtlAllocB 写入）；n＝`0x929ac` 调用总计数；
     //  k=RA/sub/al＝第 k 次调用的三值（三槽按到达顺序、不覆盖；第 4 次起只计数）。
@@ -3415,6 +3441,32 @@ UInt8 X5000HWLibs::wrapP8Head(void* const a, UInt64 b, UInt64 c, UInt64 d)
     }
     if (singleton().orgP8Head == 0) { return 0; }
     return FunctionCast(wrapP8Head, singleton().orgP8Head)(a, b, c, d);
+}
+
+// ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
+//  原件返回后，环里必有刚写的条目 ⇒ 读"最后写入"的那一条的 `+8`（edx）。
+//  ⚠ 零写（只读 `h` 的字段）、零寄存器访问、**返回值原样透传**。
+//  ⚠ 只在 `ret != 0` 时读（成功不记，避免噪声）。
+//  ⚠ 文件作用域 static 而非类成员：`RouteRequest` 的 `org` 是 `mach_vm_address_t*`
+//     ⇒ 文件作用域变量即可，**无需改 `HWLibs.hpp`**。
+static int wrapPspRingCreate(void* const h, const UInt32 type)
+{
+    if (gOrgPspRingCreate == 0) { return -1; }
+    const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
+    if (gPspEdxOn && ret != 0 && nredKernelPtrOk(h)) {
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt32 idx     = *reinterpret_cast<const UInt32*>(H + 0x3934);
+        const UInt8  wrapped = *reinterpret_cast<const UInt8*>(H + 0x3930);
+        const UInt32 i       = (idx == 0) ? (wrapped ? 31U : 0U) : (idx - 1U);
+        if (i < 32U) {   // 索引越界（环被破坏）⇒ 不读，保持哨兵
+            const UInt8* const e = H + 0x3938 + static_cast<size_t>(i) * 0x110;
+            gPspEdxIdx = i;
+            gPspEdxEv  = *reinterpret_cast<const UInt32*>(e + 0);
+            gPspEdxSev = *reinterpret_cast<const UInt32*>(e + 4);
+            gPspEdxVal = *reinterpret_cast<const UInt64*>(e + 8);
+        }
+    }
+    return ret;
 }
 
 void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
@@ -8781,6 +8833,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 批次 M3-1（**默认关**）：模块 8 的 `#20` 恢复（调苹果 `0x6720b` 整段）。精确 token。
     //  ⚠ 开态会连带触发 `0x67423` 的槽调用（MMIO）⇒ 与 M4-1 必须一起授权。
     gSmu20On = nredExactBootArg("-NRedSmu20");
+    // 批次 PSP-edx（**默认关**）：苹果 PSP 事件环只读探针（hook `0x4cb8a`）。精确 token。
+    gPspEdxOn = nredExactBootArg("-NRedPspEdx");
     // 批次 S2（**默认关**）：我方 PSP bringup 跳过 RingCreate（只做 TMR），
     //  让苹果 PSP 驱动成为 KM ring 的正当所有者（M5-1 §7.2）。精确 token，避免前缀误开。
     //  ⚠ 解析一次存标量（bringup 内不调 checkKernelArgument）；关态 ⇒ Step 2 逐字不变。
@@ -9203,6 +9257,16 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                                arrsize(kP8HeadPattern), 0xA25DE)) {
                 hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapP8Head, this->orgP8Head},
                           "p8-head");
+            }
+        }
+        // 批次 PSP-edx（`-NRedPspEdx`，默认关）：`0x4cb8a` 只读 hook（读事件环最后一条的 edx）。
+        //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        //  ⚠ 安装失败只记日志、不 panic（`hookProbe` 内部已如此）。
+        if (gPspEdxOn) {
+            if (const auto from = resolveProbe("psp-ring", kPspRingCreatePattern, nullptr,
+                                               arrsize(kPspRingCreatePattern), 0x4CB8A)) {
+                hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapPspRingCreate, gOrgPspRingCreate},
+                          "psp-ring");
             }
         }
         if (const auto from = resolveProbe("ttl-allocA", kTtlInitAllocAPattern, kTtlInitAllocAPatternMask,
