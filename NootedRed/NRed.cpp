@@ -76,6 +76,9 @@ void NRed::init()
     Backlight::singleton().init();
 
     lilu.onKextLoadForce(&kextRadeonX6000Framebuffer);
+    // 批次 psptmrreuse v3：X6000 HWLibs（TMR 可能走这一侧）。`onKextLoadForce` 只注册回调
+    //  （不强制加载 kext），kext 自然加载时回调才触发 ⇒ 关态零影响。
+    lilu.onKextLoadForce(&kextRadeonX6000HWLibs);
     lilu.onKextLoadForce(&kextRadeonX5000HWLibs);
     lilu.onKextLoadForce(&kextRadeonX5000);
     lilu.onKextLoadForce(&kextAGDP);
