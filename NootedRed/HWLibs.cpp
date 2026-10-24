@@ -367,6 +367,14 @@ static UInt64 gP2bK2Base  = 0, gP2bK2Size = 0;
 static UInt32 gP2bFilled  = 0;       // 填充块已执行（幂等；部分失败时保持 0 以便重试）
 static UInt32 gP2bPre     = 0;       // pre 行已写（防重复）
 static UInt32 gP2bPost    = 0;       // post 行已写
+// 批次 R1（R-全量落盘 §5.1）：头部行所需的三个实参（原先只出现在环行里）。
+static UInt64 gP2bH   = 0;       // 第 1 实参（clone/H）
+static UInt64 gP2bE88 = 0;       // *(H+0xE88)（我方 e88 对象）
+static UInt64 gP2bClk = 0;       // 第 2 实参（clk）
+// 批次 R2（§5.2）：填充后的一次性环标记（使下一拍 L2 tick 必写一片）。
+static UInt32 gP2bDoneMark = 0;
+// 批次 §5.3：client5 叶入口一次性标记（区分"门关（叶未跑）"与"门开但叶早退"）。
+static UInt32 gLeafSeen = 0;
 // ─── 批次 P2c：门 B 放行与 desc 27 指针填充（默认关；关态仍 return 1）──────────────
 static bool   gP2cOn  = false;   // `-NRedP2c`（精确 token；B 轮必须与 -NRedP2b 同开）
 static UInt32 gP2cErr = 0;       // 0=无错；1=desc 填充失败
@@ -1300,6 +1308,33 @@ static void nredR1Stamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
 }
+// 批次 R1（R-全量落盘 §5.1）：P2b 数据面读数（仅 -NRedP2b；关态一字不变）。
+//  放头部**前部**（紧跟 `[r1]`）⇒ 不受正文区 4096 B"保头丢尾"截断影响。
+//  ⚠ 只读我方 BSS 标量：零解引用、零 SYSLOG、零 panic 文本。
+__attribute__((noinline))
+static void nredP2bStamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room,
+        "[p2b] H=%llx e88=%llx clk=%llx mode=%u t0=%u f108=%u T=%llx fn=%llx u7=%u\n",
+        static_cast<unsigned long long>(gP2bH), static_cast<unsigned long long>(gP2bE88),
+        static_cast<unsigned long long>(gP2bClk),
+        static_cast<unsigned>(gP2bMode), static_cast<unsigned>(gP2bType0),
+        static_cast<unsigned>(gP2bF108),
+        static_cast<unsigned long long>(gP2bT), static_cast<unsigned long long>(gP2bFn),
+        static_cast<unsigned>(gP2bU7));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+    n = snprintf(body + off, room,
+        "[p2b2] a210=%llx src=%u cnt=%u k0=%llx/%llx k1=%llx/%llx k2=%llx/%llx gb=%u err=%u\n",
+        static_cast<unsigned long long>(gP2bA210), static_cast<unsigned>(gP2bSrc),
+        static_cast<unsigned>(gP2bCnt),
+        static_cast<unsigned long long>(gP2bK0Base), static_cast<unsigned long long>(gP2bK0Size),
+        static_cast<unsigned long long>(gP2bK1Base), static_cast<unsigned long long>(gP2bK1Size),
+        static_cast<unsigned long long>(gP2bK2Base), static_cast<unsigned long long>(gP2bK2Size),
+        static_cast<unsigned>(gP2bGateB), static_cast<unsigned>(gP2bErr));
+    if (n > 0) { off += (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room; }
+}
 // 批次 P5：E3 定因探针读数（仅 -NRedE3Probe；关态一字不变）
 __attribute__((noinline))
 static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
@@ -1739,6 +1774,8 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     if (gR0On && off < sizeof(body)) { nredR0Stamp(body, off, sizeof(body) - off); }
     // 批次 R1：provider 层构造读数（仅 -NRedR1；关态一字不变）。放头部区 ⇒ 每片必现。
     if (gR1On && off < sizeof(body)) { nredR1Stamp(body, off, sizeof(body) - off); }
+    // 批次 R1：P2b 数据面读数（仅 -NRedP2b）。紧跟 `[r1]` ⇒ 头部前部，免疫 4096 B 尾部截断。
+    if (gP2bOn && off < sizeof(body)) { nredP2bStamp(body, off, sizeof(body) - off); }
     // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
     //  ab＝allocB 返回值（由既有 wrapTtlAllocB 写入）；n＝`0x929ac` 调用总计数；
     //  k=RA/sub/al＝第 k 次调用的三值（三槽按到达顺序、不覆盖；第 4 次起只计数）。
@@ -7932,6 +7969,16 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
         gSt1Try |= (1U << b);
         if (gSt1RunN < 255) { ++gSt1RunN; }
         if (singleton().orgMode9440f == 0) { return 0; }
+        // 批次 §5.3：client5 叶入口一次性标记（`-NRedSt1Pre` 门控，与文档一致）。
+        //  ⚠ 位置＝**门之后、叶调用之前**（文档给的两个位置都在门之前，无法区分
+        //    "门关（叶未跑）"与"门开但叶早退"——那正是本标记的目的）。
+        //  ⇒ 本行出现 ⇔ 叶**确实会被调用**；此时 `[qp] n=0` 即"叶早退"。
+        //  纯内存（nredTraceLine 不刷盘）⇒ 深栈安全；只写一次。
+        if (gSt1Pre && b == 5 && gLeafSeen == 0) {
+            static char kLeaf[] = "[leaf] c5-enter\n";
+            nredTraceLine(kLeaf, static_cast<int>(sizeof(kLeaf) - 1));
+            gLeafSeen = 1;
+        }
         const UInt32 retSt1 = FunctionCast(wrapMode9440f, singleton().orgMode9440f)(a, b, c, d);
         if (retSt1 == 0) { gSt1Ret0 |= (1U << b); }   // 叶返回失败也计入 ret0
         return retSt1;
@@ -8315,6 +8362,10 @@ static void nredP2bFill(void* const obj, void* const clk, void* const desc)
         gP2bErr = 2; return;
     }
     UInt8* const e = reinterpret_cast<UInt8*>(e88v);
+    // 批次 R1：三个实参存 BSS（原先只出现在环行里；头部行需要它们）。
+    gP2bH   = reinterpret_cast<UInt64>(obj);
+    gP2bE88 = e88v;
+    gP2bClk = reinterpret_cast<UInt64>(clk);
 
     // 1) 读 clk（叶第 1–12 步的真实输出；0x68 B）
     const UInt32 c4  = *reinterpret_cast<const UInt32*>(c + 0x04);
@@ -8435,6 +8486,13 @@ static void nredP2bFill(void* const obj, void* const clk, void* const desc)
             static_cast<unsigned long long>(gP2bK2Size),
             static_cast<unsigned>(gP2bGateB), static_cast<unsigned>(gP2bErr));
         if (n > 0) { nredTraceLine(line, n); gP2bPost = 1; }
+    }
+    // 批次 R2（R-全量落盘 §5.2）：一次性环标记 ⇒ 下一拍 L2 tick 必写一片
+    //  （头部前部含 `[p2b]`／`[p2b2]`）。纯内存（nredTraceLine 不刷盘）⇒ 深栈安全；只写一次。
+    if (gP2bDoneMark == 0) {
+        static char kP2bDone[] = "[p2b] st=done\n";
+        nredTraceLine(kP2bDone, static_cast<int>(sizeof(kP2bDone) - 1));
+        gP2bDoneMark = 1;
     }
 }
 
