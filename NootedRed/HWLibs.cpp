@@ -363,6 +363,9 @@ static UInt64 gP2bK2Base  = 0, gP2bK2Size = 0;
 static UInt32 gP2bFilled  = 0;       // 填充块已执行（幂等；部分失败时保持 0 以便重试）
 static UInt32 gP2bPre     = 0;       // pre 行已写（防重复）
 static UInt32 gP2bPost    = 0;       // post 行已写
+// ─── 批次 P2c：门 B 放行与 desc 27 指针填充（默认关；关态仍 return 1）──────────────
+static bool   gP2cOn  = false;   // `-NRedP2c`（精确 token；B 轮必须与 -NRedP2b 同开）
+static UInt32 gP2cErr = 0;       // 0=无错；1=desc 填充失败
 // ─── 批次 P7：golden 表有界性只读探针（`-NRedP7Probe`，默认关）──────────────────────────
 //  数据链：ctx→P5→clone→T→pair→device→p→q→r→s→t→recs（逐级 KPtr）。
 //  遍历：复刻 0x18f7c 的 recs 遍历；0x1a99e 只做算术，不 deref 结果地址。
@@ -8442,7 +8445,21 @@ SInt32 X5000HWLibs::wrapQpGvm5Init(void* const obj, void* const clk, void* const
     }
     // 批次 P2b：数据字段填充＋门 B 求值（默认关；关态零行为；之后仍 return 1）
     if (gP2bOn) { nredP2bFill(obj, clk, desc); }
-    return 1;   // ★ 恒非 0 ⇒ 叶子返回 0（失败）
+    // ── 批次 P2c（B 块）：desc 27 指针（W8-a）＋ desc+0x10（W7）──────────────────────────
+    //  这是叶第 14 步 `memcpy(P5+0x30, desc+0xf0, 0xd8)` 的**源**：不填 ⇒ P5+0x30.. 全 0
+    //  ⇒ 第 16/19 步 `call *0x38(P5)` 会 call *0 ⇒ trap。⇒ 放行前必须先填。
+    //  三个被调用槽的背书（可行性文档 §3.1）：P5+0x38=k1（0x1965c→我方 K1，已实现）、
+    //  P5+0x78=k9（0x197ee→我方 K2，已实现）、P5+0xE0=k22（0x199ac→e88+0x538，空方法返 0＝成功）。
+    //  ⚠ **B 轮前置（未满足不得发轮）**：第 20 步的 `*(slot1+0x2b8)`（Apple ctxFn）行为**未审计**
+    //    （可行性文档 G2）。若审计判定为 MMIO／不可证有界 ⇒ B 轮需最终用户授权或改设计。
+    //    本开关 `-NRedP2c` 是唯一的关闭手段：关 ⇒ 仍 return 1（截断在第 14 步）。
+    if (gP2cOn) {
+        if (!nredR1FillDesc(obj, desc)) { gP2cErr = 1; }
+    }
+    // 批次 P2c：门 B 放行。只开 -NRedP2c 而 -NRedP2b 关 ⇒ gP2bGateB 从未求值（＝0）⇒ 仍 return 1。
+    //  ⚠ `gP2cErr == 0` 不可省：desc 填充失败而仍返回 0 ⇒ 叶用未填的 desc 做 memcpy
+    //    ⇒ P5+0x30.. 全 0 ⇒ 第 16/19 步 call *0 ⇒ trap。⇒ 填充失败必须 fail-closed。
+    return (gP2cOn && gP2bGateB != 0 && gP2cErr == 0) ? 0 : 1;
 }
 
 // ─── (8,0) 失败点读点（2026-10-12 技术经理终审；深栈安全——只走 nredTraceLine）────────
@@ -8585,6 +8602,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gR2On          = nredExactBootArg("-NRedR2");
     // 批次 P2b（**默认关**）：数据字段填充＋门 B 求值。精确 token，避免前缀误开。
     gP2bOn         = nredExactBootArg("-NRedP2b");
+    // 批次 P2c（**默认关**）：门 B 放行＋desc 填充。B 轮必须与 -NRedP2b 同开。
+    gP2cOn         = nredExactBootArg("-NRedP2c");
     gP7On          = checkKernelArgument("-NRedP7Probe");   // P7：golden 表有界性（默认关）
     gP8On          = checkKernelArgument("-NRedP8Probe");   // P8：iproot/head 根因（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
