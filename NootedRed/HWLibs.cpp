@@ -1774,14 +1774,17 @@ static void nredMesBStamp(char* const body, size_t& off, const size_t cap)
 //  ⚠ `force` 仍**不**放宽 `rootvnode` 判据；非 force 路径逐字不变。
 // 批次 SOS 采样：定义在文件后部（依赖 `pspStateEmit` 的读路径）⇒ 此处前置声明。
 static void pspStateSample(UInt32 t);
-static int nredTraceFlushImpl(const int secTag, const bool force)
+// 批次 挂起修复补丁2（7.5）：新增 `headerOnly` —— 正常上下文专用的"只写头部"模式
+//  （环空也写；不写环正文；**不 reset 环**）。`force` 仍为 panic/挂起路径的零 I/O 开关。
+static int nredTraceFlushImpl(const int secTag, const bool force, const bool headerOnly = false)
 {
     if (rootvnode == nullptr) { return 0; }              // 落盘前提（force 也不放宽）
     // 批次 挂起修复（R-挂起修复 §1.2／§1.5-3）：**force（panic/挂起路径）不写盘**。
     //  原因：存储栈挂起时写盘会阻塞 ⇒ 整机挂起（301/310 实测）。数据留在内存环，
     //  由下一次**正常上下文**（L2 拍）的 flush 带出；接受"panic 时丢现场"。
     if (force) { return 0; }
-    if (gTraceRing.count == 0) { return 0; }             // 环空不写（既有行为）
+    // 环空不写（既有行为）；headerOnly 例外——它的目的正是"环空也写一片头部"。
+    if (!headerOnly && gTraceRing.count == 0) { return 0; }
     // A-28 风险①处理：flush 用**独立** `stFlushBusy` 互斥（与 L2 的 `stBusy` 分开）⇒
     //  万一 FS 阻塞，只影响本 flush，不会让 L2 周期拍后续全部跳过（唯一存活计时器保住）。
     if (!OSCompareAndSwap(0, 1, &NvMsgBuf::stFlushBusy())) { return 0; }
@@ -2253,26 +2256,29 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     const size_t lim = force ? (8 * 1024) : sizeof(body);
     const size_t kTailReserve = 192;
     size_t avail = (off + kTailReserve < lim) ? (lim - off - kTailReserve) : 0;
-    uint32_t start = n;
-    {
-        size_t need = 0;
-        while (start > 0) {
-            const char* line = nullptr;
-            const uint32_t len = gTraceRing.get(start - 1, &line);
-            if (len == 0 || line == nullptr) { --start; continue; }
-            if (need + len + 1 > avail) { break; }
-            need += len + 1;
-            --start;
+    // 批次 挂起修复补丁2（7.5）：`headerOnly` ⇒ **跳过环正文**（只写头部区 + 尾部两行）。
+    if (!headerOnly) {
+        uint32_t start = n;
+        {
+            size_t need = 0;
+            while (start > 0) {
+                const char* line = nullptr;
+                const uint32_t len = gTraceRing.get(start - 1, &line);
+                if (len == 0 || line == nullptr) { --start; continue; }
+                if (need + len + 1 > avail) { break; }
+                need += len + 1;
+                --start;
+            }
         }
-    }
-    for (uint32_t i = start; i < n; ++i) {
-        const char* line = nullptr;
-        const uint32_t len = gTraceRing.get(i, &line);
-        if (len == 0 || line == nullptr) { continue; }
-        if (off + len + 1 > lim) { break; }   // 理论上不会触发（已按 avail 算过）
-        __builtin_memcpy(body + off, line, len);
-        off += len;
-        body[off++] = '\n';
+        for (uint32_t i = start; i < n; ++i) {
+            const char* line = nullptr;
+            const uint32_t len = gTraceRing.get(i, &line);
+            if (len == 0 || line == nullptr) { continue; }
+            if (off + len + 1 > lim) { break; }   // 理论上不会触发（已按 avail 算过）
+            __builtin_memcpy(body + off, line, len);
+            off += len;
+            body[off++] = '\n';
+        }
     }
     if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
     // B94 修复（s0-006 实测 4122B>4096 且 [flush-t30] 乱码）：snprintf 返回**应写长度**（截断时仍返回
@@ -2301,10 +2307,12 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     nredTraceTruncateFile(name);
     const int err = FileIO::writeBufferToFile(name, body, off);
     if (err == 0) {
-        gTraceRing.reset();
+        // 批次 挂起修复补丁2（7.5）：`headerOnly` **不 reset 环**（环正文没写出去，
+        //  reset 会丢内容）⇒ 由下一次正常 flush 带出。
+        if (!headerOnly) { gTraceRing.reset(); }
         ++fseq;
         NvMsgBuf::stFlushBusy() = false;
-        return static_cast<int>(n);
+        return headerOnly ? static_cast<int>(off) : static_cast<int>(n);
     }
     NvMsgBuf::stFlushBusy() = false;
     return 0;
@@ -2316,6 +2324,10 @@ int nredTraceFlush() { return nredTraceFlushImpl(NvMsgBuf::stTick() * NvMsgBuf::
 // 批次 挂起修复：force 入口保留（调用方 API 不变），但 `nredTraceFlushImpl(force=true)` 直接返回 0
 //  ⇒ panic/挂起路径**不写盘**（数据留内存环，由下次正常上下文带出）。
 int nredTraceFlushForce(const int secTag) { return nredTraceFlushImpl(secTag, true); }
+// 批次 挂起修复补丁2（7.5）：正常上下文专用的"只写头部"入口。
+//  只写头部（指纹/ident/stamp/各头部行）+ 尾部两行，不写环正文；**环空也写**；不 reset 环。
+//  ⚠ 仅限正常上下文（L2 拍／PP 入口）；panic/挂起路径禁止调用（零 I/O 纪律，见 `force`）。
+int nredTraceFlushHeader(const int secTag) { return nredTraceFlushImpl(secTag, false, /*headerOnly=*/true); }
 
 
 // ── 失败收容（-NRedFailReset，默认关）：失败点只留内存证据，安全点落盘并复位 ──────────
@@ -8306,6 +8318,8 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
                 static_cast<int>(gGvm5DRet), static_cast<unsigned>(gGvm5DStep),
                 static_cast<unsigned long long>(gGvm5DP1), static_cast<unsigned>(gGvm5DLocal68),
                 static_cast<int>(gGvm5EarlyStartRc));
+            // ⚠ 本 panic 是失败断言（不是探针输出）：不得改为 nredTraceLine（会掩盖失败）。
+            //    探针路径禁止 panic（83 的教训）；失败断言路径必须 panic（不掩盖失败）。
             panic("%s", (pn > 0) ? gGvm5PanicBuf : "NRed: gvm5 client5 stage1 failed (late path)");
         }
         return rc;

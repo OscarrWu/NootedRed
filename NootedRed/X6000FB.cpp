@@ -1228,10 +1228,22 @@ void* X6000FB::wrapDcClkMgrCreate(void* const ctx, void* const ppSmu, void* cons
         const UInt64 d = reinterpret_cast<UInt64>(dccg);
         const UInt64 v58 = p58, v30 = p30, v118 = b118, v0 = pp0, v8 = pp8, v10 = pp10, v18 = pp18;
         const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
-        panic("NRed clk_mgr probe: ctx=%llx ctx58=%llx ctx58_30=%llx b118=%llx "
-              "| pp_smu=%llx [0]=%llx [8]=%llx [10]=%llx [18]=%llx | dccg=%llx "
-              "| ma calls=%llu iri=%llu dummy=%llu",
-              c, v58, v30, v118, pp, v0, v8, v10, v18, d, vCalls, vIri, vDummy);
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] clk-mgr: ctx=%llx ctx58=%llx ctx58_30=%llx b118=%llx\n",
+                  c, v58, v30, v118);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] clk-mgrb: pp_smu=%llx [0]=%llx [8]=%llx [10]=%llx [18]=%llx\n",
+                  pp, v0, v8, v10, v18);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] clk-mgrc: dccg=%llx | ma calls=%llu iri=%llu dummy=%llu\n",
+                  d, vCalls, vIri, vDummy);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
 
     void* const ret = FunctionCast(wrapDcClkMgrCreate, singleton().orgDcClkMgrCreate)(ctx, ppSmu, dccg);
@@ -1277,9 +1289,22 @@ void* X6000FB::wrapPpSmuFill(void* const ctx, void* const ppSmu)
         v70 = load64(pp, 0x70);
     }
     const UInt64 rv = reinterpret_cast<UInt64>(ret);
-    panic("NRed pp_smu fill probe: ctx=%llx pp=%llx ret=%llx | [0]=%llx [8]=%llx [18]=%llx [20]=%llx "
-          "[28]=%llx [30]=%llx [40]=%llx [48]=%llx [60]=%llx [70]=%llx",
-          c, pp, rv, v0, v8, v18, v20, v28, v30, v40, v48, v60, v70);
+    // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+    {
+        char line[192];
+        int n = snprintf(line, sizeof(line),
+              "[probe] pp-smu-fill: ctx=%llx pp=%llx ret=%llx\n",
+              c, pp, rv);
+        if (n > 0) { nredTraceLine(line, n); }
+        n = snprintf(line, sizeof(line),
+              "[probe] pp-smu-fillb: [0]=%llx [8]=%llx [18]=%llx [20]=%llx [28]=%llx [30]=%llx\n",
+              v0, v8, v18, v20, v28, v30);
+        if (n > 0) { nredTraceLine(line, n); }
+        n = snprintf(line, sizeof(line),
+              "[probe] pp-smu-fillc: [40]=%llx [48]=%llx [60]=%llx [70]=%llx\n",
+              v40, v48, v60, v70);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
 
     return ret;
 }
@@ -1309,13 +1334,9 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
                wantProbe ? 1 : 0, wantRegister ? 1 : 0, wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
         // 批次 F1-安全替代（2026-10-24）：本入口在**正常上下文**（panic 之前）⇒ 提前把读数落盘。
         //  动机：`[p6]`／`[st1r]`／`[r1]`／`[p2b]` 等头部读数只在"有环行要写"时才被带出去。
-        //  批次 挂起修复（2026-10-25）：`dumpNowForce()` 语义已反转为**零 I/O**（panic 路径专用）
-        //  ⇒ 本处（正常上下文、目的是落盘）改用**非 force** 入口 `dumpNow()`。
-        //  ⚠ 代价：F1 的"环空也写一片头部"能力随 force 语义反转一并消失（环空时本处不落盘）。
-        //    已在交付报告 §7.5 上报，待上级裁决是否补一个"正常上下文专用"的头部入口。
-        NvMsgBuf::dumpNow();
-        // A-28：刷盘已并入 `dumpNow()` 的 stBusy 保护区（见 NvMsgBuf.hpp），
-        //  此处**不再**单独调用（避免与 L2 周期拍并发写同一卷）。
+        //  批次 挂起修复补丁2（7.5）：正常上下文、目的是"环空也写头部" ⇒ 用 header-only 入口
+        //  （`nredTraceFlushHeader`：环空也写、不写环正文、不 reset 环）。
+        nredTraceFlushHeader(static_cast<int>(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs));
     }
 
     if (wantProbe || wantRegister || wantAccelProbe || wantAccelLog) {
@@ -1503,9 +1524,18 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         if (wantAccelProbe) {
             const UInt64 vCtl = o20, vPci = pci, vLhws = lHws, vLctl = lCtl, vLacc = lAcc;
             const UInt64 v7960 = c7960, vMagic = magicRead, vD8 = hsD8;
-            panic("NRed accel probe: ctl=%llx pci=%llx LoadHwSvc=%llu LoadCtl=%llu LoadAccel=%llu "
-                  "| c7960=%llx hsD8=%llx | READCHK magic=%llx[exp=a5a5a5a512345678]",
-                  vCtl, vPci, vLhws, vLctl, vLacc, v7960, vD8, vMagic);
+            // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+            {
+                char line[192];
+                int n = snprintf(line, sizeof(line),
+                      "[probe] accel: ctl=%llx pci=%llx LoadHwSvc=%llu LoadCtl=%llu LoadAccel=%llu\n",
+                      vCtl, vPci, vLhws, vLctl, vLacc);
+                if (n > 0) { nredTraceLine(line, n); }
+                n = snprintf(line, sizeof(line),
+                      "[probe] accelb: c7960=%llx hsD8=%llx | READCHK magic=%llx[exp=a5a5a5a512345678]\n",
+                      v7960, vD8, vMagic);
+                if (n > 0) { nredTraceLine(line, n); }
+            }
         }
 
         // ─── 通道 A（**推荐**）：日志通道（门控 `-NRedAccelLog`，零挂死风险）────────
@@ -1888,12 +1918,15 @@ IOReturn X6000FB::wrapCallPlatformFunctionFromDrvr(void* const self, const UInt3
                static_cast<unsigned long long>(v4), static_cast<unsigned long long>(v7960));
     }
 
-    // ─── 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；**高风险，慎用**）────
-    //  ⚠️ 加 `selector == 0` 过滤（2026-09-26）：无过滤地 panic 可能落在极早阶段
-    //     （任何平台函数调用都会进来），破坏"panic 后自动重启"。格式串本身未改（已投产）。
+    // ─── 通道 B：内存环通道（门控 `-NRedAccelProbe`，默认关闭）────────────────────
+    //  ⚠️ 加 `selector == 0` 过滤（2026-09-26）：无过滤会落在极早阶段（任何平台函数调用都会进来）。
+    //  批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
     if (selector == 0 && checkKernelArgument("-NRedAccelProbe")) {
-        panic("NRed accel drvr probe: self=%llx sel=%llu a2=%llx a3=%llx a4=%llx c7960=%llx", vSelf, vSel, v2, v3, v4,
-              v7960);
+        char line[192];
+        const int n = snprintf(line, sizeof(line),
+              "[probe] accel-drvr: self=%llx sel=%llu a2=%llx a3=%llx a4=%llx c7960=%llx\n",
+              vSelf, vSel, v2, v3, v4, v7960);
+        if (n > 0) { nredTraceLine(line, n); }
     }
 
     return FunctionCast(wrapCallPlatformFunctionFromDrvr,
@@ -1950,9 +1983,18 @@ UInt32 X6000FB::wrapDalHelperPowerUp(void* const self)
         const UInt64 nvSync  = (stBits & StageMark::kStatusSyncOk) ? 1 : 0;
         const UInt64 nvUsed  = (stBits & StageMark::kStatusUsed) ? 1 : 0;
         const UInt64 vSelf = selfAddr, v48 = p48, v58 = p58, v30 = p30, v118 = b118;
-        panic("NRed DalHelper probe: self=%llx f48=%llx f58=%llx f30=%llx b118=%llx "
-              "| nvram init=%llu write=%llu sync=%llu used=%llu",
-              vSelf, v48, v58, v30, v118, nvInit, nvWrite, nvSync, nvUsed);
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] dal-helper: self=%llx f48=%llx f58=%llx f30=%llx b118=%llx\n",
+                  vSelf, v48, v58, v30, v118);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] dal-helperb: nvram init=%llu write=%llu sync=%llu used=%llu\n",
+                  nvInit, nvWrite, nvSync, nvUsed);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
 
     const auto ret = FunctionCast(wrapDalHelperPowerUp, singleton().orgDalHelperPowerUp)(self);
@@ -2014,7 +2056,27 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         //   实测规律（2026-09-27）—— 2 字段（第 7 轮）正常自动重启；6 字段（第 8/9/11 轮）均
         //   出现"快照头正常但机器不自动重启"。原因未查明前，一律用最小字段数。
         const int dn = NvMsgBuf::dumpTail(want, off);
-        panic("NRed msgdump off=%d n=%d:\n%s", off, dn, NvMsgBuf::gBuf);
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        //  ⚠ 多行格式串 ⇒ 按任务卡"拆两行"：第 1 行数值头，第 2 行快照正文。
+        //  ⚠ 环行上限 `kLineBytes = 192`（`NRedTraceRing.hpp:33`）⇒ 正文只能带出前 180 B
+        //    （32 KB 快照无法完整进环）。已在交付报告 §7.6 上报：本探针是"转储工具"而非
+        //    "读数探针"，改走内存环后其原有用途（带出整段 msgbuf）结构性失效。
+        {
+            char line[192];
+            const int n = snprintf(line, sizeof(line), "[probe] msgdump off=%d n=%d\n", off, dn);
+            if (n > 0) { nredTraceLine(line, n); }
+            if (dn > 0) {
+                char blk[192];
+                int k = 0;
+                while (k < dn && k < 180) {
+                    const char c = NvMsgBuf::gBuf[k];
+                    blk[k] = (c == '\n' || c == '\t') ? ' ' : c;
+                    ++k;
+                }
+                blk[k] = '\n';
+                nredTraceLine(blk, k + 1);
+            }
+        }
     }
 
     // ─── `probe` 所需属性名探针（门控 `-NRedAccelExist3`，默认关闭）─────────────────
@@ -2035,8 +2097,18 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         const char* nameB = nullptr;
         if (symA >= 0xffffff7f80000000ULL) { nameA = reinterpret_cast<OSSymbol*>(symA)->getCStringNoCopy(); }
         if (symB >= 0xffffff7f80000000ULL) { nameB = reinterpret_cast<OSSymbol*>(symB)->getCStringNoCopy(); }
-        panic("NRed accel exist3: slide=%llx | A=%llx symA=%llx nameA=%s | B=%llx symB=%llx nameB=%s", gX5000Slide,
-              candA, symA, nameA != nullptr ? nameA : "(null)", candB, symB, nameB != nullptr ? nameB : "(null)");
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] accel-exist3: slide=%llx | A=%llx symA=%llx nameA=%s\n",
+                  gX5000Slide, candA, symA, nameA != nullptr ? nameA : "(null)");
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] accel-exist3b: B=%llx symB=%llx nameB=%s\n",
+                  candB, symB, nameB != nullptr ? nameB : "(null)");
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
 
     // ─── 加速器类注册状态探针（门控 `-NRedAccelExist2`，默认关闭）──────────────────
@@ -2090,9 +2162,18 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         const UInt64 vPProv    = gAccelProbeProv;
         if (symCls != nullptr) { symCls->release(); }
         if (symBase != nullptr) { symBase->release(); }
-        panic("NRed accel exist2: metaCls=%llx metaBase=%llx accel=%llx accelCls=%llx c7960=%llx "
-              "| probe calls=%llu ret=%llx in=%llx out=%llx prov=%llx",
-              metaCls, metaBase, vAccel, vAccelCls, f7960, vPCalls, vPRet, vPIn, vPOut, vPProv);
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] accel-exist2: metaCls=%llx metaBase=%llx accel=%llx accelCls=%llx c7960=%llx\n",
+                  metaCls, metaBase, vAccel, vAccelCls, f7960);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] accel-exist2b: probe calls=%llu ret=%llx in=%llx out=%llx prov=%llx\n",
+                  vPCalls, vPRet, vPIn, vPOut, vPProv);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
 
     // ─── 加速器实例存在性探针（门控 `-NRedAccelExist`，默认关闭）────────────────────
@@ -2133,8 +2214,18 @@ UInt32 X6000FB::wrapControllerPowerUp(void* const self)
         const UInt64 vCtrl     = probeSvc("AMDRadeonX6000_AmdRadeonControllerNavi10");
         const UInt64 vHwsvc    = probeSvc("AMDRadeonX5000_AMDRadeonHWServicesVega");
         const UInt64 vKextIdx  = kextRadeonX5000.loadIndex;
-        panic("NRed accel exist: ctl=%llx c7960=%llx accel=%llx accelCls=%llx ctrl=%llx hwsvc=%llx kextIdx=%llu",
-              ctlAddr, f7960, vAccel, vAccelCls, vCtrl, vHwsvc, vKextIdx);
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] accel-exist: ctl=%llx c7960=%llx accel=%llx accelCls=%llx\n",
+                  ctlAddr, f7960, vAccel, vAccelCls);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] accel-existb: ctrl=%llx hwsvc=%llx kextIdx=%llu\n",
+                  vCtrl, vHwsvc, vKextIdx);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
 
     auto& m_flags  = getMember<UInt8>(self, 0x5F18);
@@ -2387,9 +2478,10 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //  门控（2026-10-02，第 89 轮判读修复）：`sP5ReadoutValid && wantP5` —— **两个条件都要**
     //    `sP5ReadoutValid` = 采集侧确实装填过；`wantP5` = 本轮显式带了 `-NRedP5Readout`
     //    （`wantP5` 由正常上下文预存的静态量给出，见上方；**不在此处**调门控解析函数）。
-    //    为什么必须加 `wantP5`：本函数三个 panic 块 `P5 → P3P14 → NBIO` 中 `panic()` 不返回
+    //    为什么必须加 `wantP5`：本函数三个输出块 `P5 → P3P14 → NBIO` 原用 `panic()`（不返回）
     //    ⇒ 若 P5 仅凭 `sP5ReadoutValid` 触发（它可由 `-NRedAccelLog` 等**固定集常带**门控间接置位），
     //    就会**永久挡住**后两块 ⇒ 第 89 轮 P3P14/NBIO 零产出。加门控后三者可独立启用。
+    //    （批次 挂起修复补丁2 起三块改走 `nredTraceLine` ⇒ **不再互相遮挡**；`wantP5` 门控保留不变。）
     //  未启用（`sP5ReadoutValid == 0` 或 `wantP5 == false`）⇒ 本块零输出、**不 panic**
     //    （不改变 Apple 的原失败语义）。
     if (sP5ReadoutValid && wantP5) {
@@ -2397,9 +2489,15 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 p5Node = sP5ReadoutNode;
         const UInt64 p5Cail = sP5ReadoutCail;
         const UInt64 p5Ttl  = sP5ReadoutTtl;
-        panic("P5 panic readout: self=%llx node=%llx cail=%llx ttl=%llx",
-              p5Self, p5Node, p5Cail, p5Ttl);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        //  ⚠ 改后三块（P5／P3P14／NBIO）**不再互相遮挡**（原 `panic()` 不返回 ⇒ 只出第一块）。
+        {
+            char line[192];
+            const int n = snprintf(line, sizeof(line),
+                  "[probe] p5-readout: self=%llx node=%llx cail=%llx ttl=%llx\n",
+                  p5Self, p5Node, p5Cail, p5Ttl);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── ★ P3P14 复读值的 panic 文本通道（乙线 R1，S1；`-NRedP3P14Mark`）────────────
     //  数据来源：`wrapPpHelperPowerUp` 的复读块写入的文件静态量 `sP3P14Re*`（纯内存，无落盘）。
@@ -2419,9 +2517,18 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         // P3 判据（与 `0x72ded cmp $0xffff,%ax` 同一口径）：DevId == 0xffff ⇒ 配置空间不可访问。
         // P14 判据：`f30d == 1`（P3 曾走过）且 `f44 == 1`（P7 走通）。
         const UInt64 p3Fail = (rCalled != 0 && rDevId == 0xFFFFULL) ? 1u : 0u;
-        panic("P3P14 panic re: hw=%llx f30d=%llx wreg=%llx f44=%llx devid=%llx vend=%llx called=%llu p3Fail=%llu",
-              rHw, rF30D, rHwReg, rF44, rDevId, rVendId, rCalled, p3Fail);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] p3p14: hw=%llx f30d=%llx wreg=%llx f44=%llx\n",
+                  rHw, rF30D, rHwReg, rF44);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] p3p14b: devid=%llx vend=%llx called=%llu p3Fail=%llu\n",
+                  rDevId, rVendId, rCalled, p3Fail);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── ★ NBIO 写入探针的 panic 文本通道（乙线 B 方案·序①；`-NRedNbioFbEn`）──────────
     //  数据来源：`wrapPpHelperPowerUp` 的写入块缓存进 `sNbioWrReadings`（纯内存，无落盘）。
@@ -2452,16 +2559,31 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 wCount   = sNbioWrReadings.writeCount;
         const UInt64 wRetries = sNbioWrReadings.retries;
         const UInt64 wP3Fail  = (sP3P14ReCalled != 0 && sP3P14ReDevId == 0xFFFFULL) ? 1u : 0u;
-        panic("NBIO write re: armed=%llu rmmio=%llu before=%llx wr=%llx after=%llx | reg=%llx val=%llx err=%llu "
-              "| blank=%llx val=%llx err=%llu same=%llu | posIdx=%llu wr=%llx rb=%llx posData=%llx | "
-              "wc=%llu retries=%llu | p3Fail=%llu",
-              wArmed, wRmmio, wBefore, wWrite, wAfter,
-              wRegA, wRegV, wRegE,
-              wBlkA, wBlkV, wBlkE, wSame,
-              wPosIdx, wPosWr, wPosRb, wPosData,
-              wCount, wRetries,
-              wP3Fail);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        //  ⚠ 环行上限 192 B ⇒ 本串超长，按字段边界**拆三行**（字段与顺序逐字保留）。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] nbio-write: armed=%llu rmmio=%llu before=%llx wr=%llx after=%llx\n",
+                  wArmed, wRmmio, wBefore, wWrite, wAfter);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] nbio-writeb: reg=%llx val=%llx err=%llu\n",
+                  wRegA, wRegV, wRegE);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] nbio-writec: blank=%llx val=%llx err=%llu same=%llu\n",
+                  wBlkA, wBlkV, wBlkE, wSame);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] nbio-writed: posIdx=%llu wr=%llx rb=%llx posData=%llx\n",
+                  wPosIdx, wPosWr, wPosRb, wPosData);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] nbio-writee: wc=%llu retries=%llu | p3Fail=%llu\n",
+                  wCount, wRetries, wP3Fail);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── ★ G3 探针的输出（`-NRedPluginNode`，默认关；排在 P5/P3P14/NBIO 三块**之后**）────
     //  规格 = `tmp/R91规格-G3探针.md`；判据与偏移见上方 extern 处的说明。
@@ -2484,10 +2606,18 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         // ⚠️ **前缀 `NRed HwSvc node:` 保持不变**（第 91 轮判读方按该前缀检索）；
         //   R92 只在**其后追加** `ttlVt` / `cailVt` 两字段 ⇒ 旧字段名与顺序逐字未动，
         //   第 91 轮的读数行仍是本串的**前缀子集**，可逐字段对照（追加不改语义）。
-        panic("NRed HwSvc node: hwsvc=%llx plugin=%llx ttlFld=%llx cailFld=%llx hwsvcVt=%llx "
-              "ttlVt=%llx cailVt=%llx",
-              gHwsvc, gPlugin, gTtl, gCail, gHwsvcVt, gTtlVt, gCailVt);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] hwsvc-node: hwsvc=%llx plugin=%llx ttlFld=%llx cailFld=%llx\n",
+                  gHwsvc, gPlugin, gTtl, gCail);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] hwsvc-nodeb: hwsvcVt=%llx ttlVt=%llx cailVt=%llx\n",
+                  gHwsvcVt, gTtlVt, gCailVt);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── ★ TtlAsm 输出（`-NRedTtlAsm`，默认关；排既有四块 panic **最后**，即第五块）──────
     //  权威规格照办；数据来源 = `wrapPpHelperPowerUp` 内捕获块写入的 `sTtlAsm*`（纯内存）。
@@ -2501,9 +2631,14 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 tM   = sTtlAsmHttl;
         const UInt64 tP   = sTtlAsmPSetPs;
         const UInt64 tF   = sTtlAsmF970;
-        panic("NRed TtlAsm: ttl=%llx vt=%llx mHttl=%llx pSetPs=%llx f970=%llx",
-              tTtl, tVt, tM, tP, tF);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        {
+            char line[192];
+            const int n = snprintf(line, sizeof(line),
+                  "[probe] ttl-asm: ttl=%llx vt=%llx mHttl=%llx pSetPs=%llx f970=%llx\n",
+                  tTtl, tVt, tM, tP, tF);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── R1' 最小读数探针（`-NRedR1Probe`，默认关）─────────────────────────────
     //  判据见 X5000.cpp 全局量处的说明（失败出口 ↔ 特征字段的对应表）。
@@ -2527,16 +2662,23 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 vt1a38  = gR1bObj1A38Vtable;
         const UInt64 keyF0   = gR1bKeyObjFirstField;
 
-        panic("NRed R1 probe: calls=%llu retNZ=%llu lastRet=%llu self=%llx prov=%llx | zeroMask=%llx "
-              "| f1f40=%llx f1f28=%llx f1f30=%llx f1a68=%llx f1a40=%llx f1a38=%llx "
-              "| f1f10=%llx f1e88=%llx f368=%llx | vt1a38=%llx keyF0=%llx",
-              calls, retNZ, lastRet,
-              cfgSelf, cfgProv,
-              zeroMsk,
-              f1f40, f1f28, f1f30, f1a68, f1a40, f1a38,
-              f1f10, f1e88, f368,
-              vt1a38, keyF0);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        //  ⚠ 环行上限 192 B ⇒ 本串超长，按字段边界**拆两行**（字段与顺序逐字保留）。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] r1: calls=%llu retNZ=%llu lastRet=%llu self=%llx prov=%llx | zeroMask=%llx\n",
+                  calls, retNZ, lastRet, cfgSelf, cfgProv, zeroMsk);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] r1b: f1f40=%llx f1f28=%llx f1f30=%llx f1a68=%llx f1a40=%llx f1a38=%llx\n",
+                  f1f40, f1f28, f1f30, f1a68, f1a40, f1a38);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] r1c: f1f10=%llx f1e88=%llx f368=%llx | vt1a38=%llx keyF0=%llx\n",
+                  f1f10, f1e88, f368, vt1a38, keyF0);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── R1'-B30 身份探针（`-NRedR1B30Probe`，默认关）─────────────────────────
     //  判据与设计见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
@@ -2568,16 +2710,32 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         // 判读锚点（离线手工比对用，**不是**被测值）：
         //   `mcV` 以"长度<<56 | 前 11 字节大端"编码 ⇒ `"IOAccelerator"`（13 字节）应为
         //   `0x0d` 后接 `49 4f 41 63 63 65 6c 65 72 61 74`（"IOAccelerat"）⇒ `mcV = 0x0d494f416363656c65657261ULL`。
-        panic("NRed R1B30 probe: base=%llx | selfVt=%llx selfZvm=%llx "
-              "| b20T=%llx b20Z=%llx b28T=%llx b28Z=%llx b30T=%llx b30Z=%llx "
-              "| v1a68=%llx v1a68Z=%llx v1a40=%llx v1a40Z=%llx f1a38=%llx "
-              "| prov=%llx mcD=%llu mcK=%llu mcV=%llx auxD=%llu auxK=%llu auxV=%llx auxOk=%llu",
-              base,
-              selfVt, selfZvm,
-              sB20T, sB20Z, sB28T, sB28Z, sB30T, sB30Z,
-              v1a68, v1a68Z, v1a40, v1a40Z, f1a38,
-              prov, mcD, mcK, mcV, auxD, auxK, auxV, auxOk);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        //  ⚠ 环行上限 192 B ⇒ 本串超长，按字段边界**拆三行**（字段与顺序逐字保留）。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] r1b30: base=%llx | selfVt=%llx selfZvm=%llx\n",
+                  base, selfVt, selfZvm);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] r1b30b: b20T=%llx b20Z=%llx b28T=%llx b28Z=%llx b30T=%llx b30Z=%llx\n",
+                  sB20T, sB20Z, sB28T, sB28Z, sB30T, sB30Z);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] r1b30c: v1a68=%llx v1a68Z=%llx v1a40=%llx v1a40Z=%llx f1a38=%llx\n",
+                  v1a68, v1a68Z, v1a40, v1a40Z, f1a38);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] r1b30d: prov=%llx mcD=%llu mcK=%llu mcV=%llx\n",
+                  prov, mcD, mcK, mcV);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] r1b30e: auxD=%llu auxK=%llu auxV=%llx auxOk=%llu\n",
+                  auxD, auxK, auxV, auxOk);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
+
     }
     // ─── R1'-Cwi 探针（`-NRedR1CwiProbe`，默认关）─────────────────────────────
     //  判据与依据见 X5000.cpp 全局量处的说明；本块只做"预读局部标量 → 一次 panic"。
@@ -2625,14 +2783,27 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         const UInt64 s04 = gEngTblSlot[4],  s05 = gEngTblSlot[5],  s06 = gEngTblSlot[6],  s07 = gEngTblSlot[7];
         const UInt64 s08 = gEngTblSlot[8],  s09 = gEngTblSlot[9],  s10 = gEngTblSlot[10], s11 = gEngTblSlot[11];
         const UInt64 s12 = gEngTblSlot[12], s13 = gEngTblSlot[13], s14 = gEngTblSlot[14], s15 = gEngTblSlot[15];
-        panic("NRed EngTbl probe: calls=%llu base=%llx self=%llx | hw=%llx hwVt=%llx hwZvm=%llx "
-              "| nonNull=%llu readFail=%llu | s0..3=%llx %llx %llx %llx | s4..7=%llx %llx %llx %llx "
-              "| s8..11=%llx %llx %llx %llx | s12..15=%llx %llx %llx %llx",
-              calls, base, self, hw, hwVt, hwZvm,
-              nonnul, rfail,
-              s00, s01, s02, s03, s04, s05, s06, s07,
-              s08, s09, s10, s11, s12, s13, s14, s15);
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        //  ⚠ 环行上限 192 B ⇒ 本串超长，按字段边界**拆三行**（字段与顺序逐字保留）。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] engtbl: calls=%llu base=%llx self=%llx | hw=%llx hwVt=%llx hwZvm=%llx\n",
+                  calls, base, self, hw, hwVt, hwZvm);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] engtbl-n: nonNull=%llu readFail=%llu\n",
+                  nonnul, rfail);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] engtblb: s0..3=%llx %llx %llx %llx | s4..7=%llx %llx %llx %llx\n",
+                  s00, s01, s02, s03, s04, s05, s06, s07);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] engtblc: s8..11=%llx %llx %llx %llx | s12..15=%llx %llx %llx %llx\n",
+                  s08, s09, s10, s11, s12, s13, s14, s15);
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
     // ─── 乙线「只读单点规范 SMN 访问」探针（门控 `-NRedSmnRead1`，默认关）─────────────
     //  目的（规格书 §4.3 的二分问题）：**"按规范序列、单点、不回读索引，读一个已知寄存器，
@@ -2689,12 +2860,19 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
             const UInt64 vSame     = (vRegVal == vBlankVal) ? 1u : 0u;   // 对照守则：必须为 0
 
             // ⛔ 新开格式串（一次性定稿，此后冻结）。字段刻意压到最少（手册 §4.3 分片余量纪律）。
-            panic("NRed SmnRead1: reg(off=%x addr=%x)=%x err=%u | blank(off=%x addr=%x)=%x err=%u "
-                  "| same=%u retries=%u",
-                  vRegOff, vRegAddr, vRegVal, static_cast<UInt32>(vRegErr),
-                  vBlankOff, vBlankAddr, vBlankVal, static_cast<UInt32>(vBlankErr),
-                  static_cast<UInt32>(vSame), static_cast<UInt32>(vRetries));
-            // panic 不返回
+            // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+            {
+                char line[192];
+                const int n = snprintf(line, sizeof(line),
+                      "[probe] smn-read1: reg(off=%x addr=%x)=%x err=%u | blank(off=%x addr=%x)=%x err=%u "
+                      "| same=%u retries=%u\n",
+                      static_cast<UInt32>(vRegOff), static_cast<UInt32>(vRegAddr), static_cast<UInt32>(vRegVal),
+                      static_cast<UInt32>(vRegErr),
+                      static_cast<UInt32>(vBlankOff), static_cast<UInt32>(vBlankAddr), static_cast<UInt32>(vBlankVal),
+                      static_cast<UInt32>(vBlankErr),
+                      static_cast<UInt32>(vSame), static_cast<UInt32>(vRetries));
+                if (n > 0) { nredTraceLine(line, n); }
+            }
         }
     }
     // ─── ⛔ 已删除：乙线 T7 寄存器探针族（`-NRedFwProbe` / `-NRedFwProbe2` / `-NRedFwProbe3`）───
@@ -2756,21 +2934,36 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
         // 第 3 批次：D3 计数（判别性对照的判据——关掉 D3 后 dummy 应为 0；iri 恒 0 则 D3 从未拦到 IRI）
         const UInt64 vCalls = gMaCalls, vIri = gMaIri, vDummy = gMaDummy;
 
-        panic("NRed SMU13 state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x "
-              "fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x | PB tm=%x pmfw=%x dif=%x "
-              "blank=%x inv=%x rw=%x arg=%x | FB c0=%x c1=%x c2=%x c3=%x bar0=%llx | "
-              "RESP hi=%x lo=%x xfer=%x | "
-              "ma calls=%llu iri=%llu dummy=%llu | "
-              "orig1:%s | orig2:%s | orig3:%s",
-            probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91,
-            rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer,
-            gProbeResp[0], gProbeResp[1], gProbeResp[2],
-            gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6],
-            rFbC0, rFbC1, rFbC2, rFbC3, rBar0,
-            respHi, respLo, respXfer,
-            vCalls, vIri, vDummy,
-            fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
-        // panic 不返回
+        // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
+        //  ⚠ 环行上限 192 B ⇒ 本串超长，按字段边界**拆四行**（字段与顺序逐字保留）。
+        {
+            char line[192];
+            int n = snprintf(line, sizeof(line),
+                  "[probe] smu13-state: state=%llx | fwflag28=%x fwflag24=%x c2p66=%x c2p82=%x c2p90=%x c2p91=%x\n",
+                  probeState, rFwFlags, rFwFlags24, rMsg66, rMsg82, rMsg90, rMsg91);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] smu13b: fbOffRaw=%x fbOff=%llx scratch4=%x mp1s0=%x fwver=%x\n",
+                  rFbOffRaw, fbOff, rScratch4, rMp1Scratch0, rFwVer);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] smu13b2: PB tm=%x pmfw=%x dif=%x blank=%x inv=%x rw=%x arg=%x\n",
+                  gProbeResp[0], gProbeResp[1], gProbeResp[2],
+                  gProbeResp[3], gProbeResp[4], gProbeResp[5], gProbeResp[6]);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] smu13c: FB c0=%x c1=%x c2=%x c3=%x bar0=%llx\n",
+                  rFbC0, rFbC1, rFbC2, rFbC3, rBar0);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] smu13c2: RESP hi=%x lo=%x xfer=%x | ma calls=%llu iri=%llu dummy=%llu\n",
+                  respHi, respLo, respXfer, vCalls, vIri, vDummy);
+            if (n > 0) { nredTraceLine(line, n); }
+            n = snprintf(line, sizeof(line),
+                  "[probe] smu13d: orig1:%s | orig2:%s | orig3:%s\n",
+                  fmt1 ? fmt1 : "(null)", fmt2 ? fmt2 : "(null)", fmt3 ? fmt3 : "(null)");
+            if (n > 0) { nredTraceLine(line, n); }
+        }
     }
 
     // Probe P1 behaviour (suppress panic) only under -NRedProbePPLIB on Phoenix

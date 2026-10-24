@@ -1210,11 +1210,20 @@ bool X5000::wrapAccelStart(void* const self, void* const provider)
                static_cast<unsigned long long>(f140Before), static_cast<unsigned long long>(f148Before));
     }
 
-    // 通道 B：panic 通道（门控 `-NRedAccelProbe`，默认关闭；高风险，慎用）。格式串未改（已投产）。
+    // 通道 B：内存环通道（门控 `-NRedAccelProbe`，默认关闭）。
+    //  批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训）⇒ 改走 `nredTraceLine`。
     if (checkKernelArgument("-NRedAccelProbe")) {
-        panic("NRed accel start probe: self=%llx provider=%llx ret=%llu | f140=%llx f148=%llx f158=%llx f160=%llx", s,
-              vProv, vRet, f140, f148, f158, f160);
+        char line[192];
+        int n = snprintf(line, sizeof(line),
+              "[probe] accel-start: self=%llx provider=%llx ret=%llu\n",
+              s, vProv, vRet);
+        if (n > 0) { nredTraceLine(line, n); }
+        n = snprintf(line, sizeof(line),
+              "[probe] accel-startb: f140=%llx f148=%llx f158=%llx f160=%llx\n",
+              f140, f148, f158, f160);
+        if (n > 0) { nredTraceLine(line, n); }
     }
+
 
     return ret;
 }
@@ -1350,6 +1359,8 @@ bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
         extern int nredGvm5EarlyInject(void* self);
         const int earlyRc = nredGvm5EarlyInject(self);
         if (earlyRc == 0) {
+            // ⚠ 本 panic 是失败断言（不是探针输出）：不得改为 nredTraceLine（会掩盖失败）。
+            //    探针路径禁止 panic（83 的教训）；失败断言路径必须 panic（不掩盖失败）。
             panic("NRed: gvm5 client5 stage1 failed (early inject, kernel_task)");
         }
     }

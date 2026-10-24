@@ -457,7 +457,13 @@ static void seqStageProbe(UInt32 stage, UInt32 stages)
     }
     if (!want) { return; }
     const UInt64 vStage = stage, vStages = stages;
-    panic("NRed display-init probe: stage %llu done (stages=0x%llx)", vStage, vStages);
+    // 批次 挂起修复补丁2（7.1）：探针**不得 panic**（83 的教训：探针 panic ⇒ 嵌套 panic ⇒ K2/K4）。
+    {
+        char line[128];
+        const int n = snprintf(line, sizeof(line),
+            "[probe] display-init: stage %llu done (stages=0x%llx)\n", vStage, vStages);
+        if (n > 0) { nredTraceLine(line, n); }
+    }
 }
 
 // 显示初始化编排入口：由 `init` 调用一次（守卫在 init 里）。

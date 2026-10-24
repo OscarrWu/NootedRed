@@ -89,6 +89,9 @@ int nredTraceFlush(int secTag);
 int nredTraceFlush();   // 无参兼容封装（既有 dumpNow 调用点）
 // 批次 挂起修复：force 入口保留（API 不变），但实现直接返回 0 ⇒ panic/挂起路径不写盘。
 int nredTraceFlushForce(int secTag);
+// 批次 挂起修复补丁2（7.5）：正常上下文专用的"只写头部"入口（环空也写；不写环正文；不 reset 环）。
+//  ⚠ 仅限正常上下文；panic/挂起路径禁止调用。
+int nredTraceFlushHeader(int secTag);
 // 失败收容（-NRedFailReset，默认关）：失败点只留内存证据（零 I/O、零复位）。定义于 HWLibs.cpp。
 void nredFailResetMark(const char* where, int code, UInt64 a, UInt64 b);
 // 安全点（L2 拍）：有待处理失败时落盘并 PEHaltRestart(1)。返回 true ⇒ 已发起复位。
