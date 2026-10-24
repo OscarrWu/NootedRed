@@ -3557,7 +3557,12 @@ UInt8 X5000HWLibs::wrapP8Head(void* const a, UInt64 b, UInt64 c, UInt64 d)
 //  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
 static mach_vm_address_t gOrgPspSelector = 0;   // `0x4a988` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
 
-static int wrapPspSelector(void* const h, const UInt32 selector)
+//  ⚠ **4 参数**（不是文档 §6.1 的 2 参数）：反汇编 `0x4a988` 的 case 处理器读 `%rdx`／`%rcx`
+//    （如 `0x4a9fd: mov %rdx,%rsi ; mov %rcx,%rdx ; call …`）⇒ 原件实际收 4 个参数。
+//    若按 2 参数透传，`%rdx`／`%rcx` 会是垃圾 ⇒ **所有 selector≠5 的命令都会被破坏**。
+//    `%r8`／`%r9` 在原件内只作**出参**（日志调用前写入），从不作入参读 ⇒ 4 参数足够。
+static int wrapPspSelector(void* const h, const UInt32 selector,
+                           const UInt64 a3, const UInt64 a4)
 {
     // 批次 psptmrreuse v2（-NRedPspTmrReuse，默认关）：
     //   在 selector 分派器（0x4a988）入口拦截 selector 5（SETUP_TMR）。
@@ -3570,7 +3575,7 @@ static int wrapPspSelector(void* const h, const UInt32 selector)
         return 0;
     }
     if (gOrgPspSelector == 0) { return -1; }
-    return FunctionCast(wrapPspSelector, gOrgPspSelector)(h, selector);
+    return FunctionCast(wrapPspSelector, gOrgPspSelector)(h, selector, a3, a4);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
