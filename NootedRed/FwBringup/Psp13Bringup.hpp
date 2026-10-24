@@ -83,6 +83,15 @@ enum class BringupStep : uint32_t {
     static unsigned sGTmrLoadEnter    = 0;  // bringupRunTmrLoad 入口计数（phase2）
     #endif
 
+// 批次 S2（M5-1 §7.2）：跳过我方 PSP RingCreate（`-NRedPspSkipRing`，默认关）。
+//  动机：我方 bringup 已建 KM ring ⇒ 苹果 PSP 驱动再建被拒（`0x40100209`）。
+//  开 ⇒ 只做 TMR 相关步骤，让苹果驱动成为 KM ring 的正当所有者。
+//  ⚠ 默认关 ⇒ 行为与改动前逐字一致（Step 2 的 last_step／调用／错误返回都不变）。
+//  ⚠ header 内 static：与上方计数器同一约定（仅 HWLibs.cpp TU 调用本链 ⇒ 运行期一份）。
+//    由 HWLibs.cpp 的 boot-arg 解析处调用 `pspSetSkipRing` 置位（不在 bringup 内解析）。
+static bool sGPspSkipRing = false;
+inline void pspSetSkipRing(const bool v) { sGPspSkipRing = v; }
+
 // =============================================================================
 // 带回溯的寄存器序列记录接口
 // =============================================================================
@@ -871,9 +880,16 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
     }
 
     // ========== Step 2: Ring create ==========
-    ctx->last_step = BringupStep::RingCreate;
-    ctx->last_error = ringCreate(sink, ring_mc_addr, kRingSizeBytes, PSP_RING_TYPE__KM);
-    if (ctx->last_error != 0) return ctx->last_error;
+    // 批次 S2（`-NRedPspSkipRing`，默认关）：开 ⇒ **跳过** CREATE_RING，只做后续 TMR 步骤，
+    //   让苹果 PSP 驱动成为 KM ring 的正当所有者（M5-1 §7.2）。
+    //   关 ⇒ 与改动前逐字一致（last_step／调用／错误返回都不变）。
+    if (sGPspSkipRing) {
+        NRED_TRACE("[psp] skip-ring=1 prev_step=%u\n", static_cast<unsigned>(ctx->last_step));
+    } else {
+        ctx->last_step = BringupStep::RingCreate;
+        ctx->last_error = ringCreate(sink, ring_mc_addr, kRingSizeBytes, PSP_RING_TYPE__KM);
+        if (ctx->last_error != 0) return ctx->last_error;
+    }
 
     // ========== Step 3: Update fw reservation ==========
     ctx->last_step = BringupStep::UpdateFwReserve;

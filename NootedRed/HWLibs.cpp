@@ -8698,6 +8698,10 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // A-1 固件层第一增量门控（默认关）：开启后在 C2（wrapSmuInitFunctionPointerList 出口）执行
     // PSP bringup（fw::nredFwBringupHook）+ 置有效 smuCtxCache。解析一次存标量。
     singleton().smu13FwBringupEnabled = checkKernelArgument("-NRedFwBringup");
+    // 批次 S2（**默认关**）：我方 PSP bringup 跳过 RingCreate（只做 TMR），
+    //  让苹果 PSP 驱动成为 KM ring 的正当所有者（M5-1 §7.2）。精确 token，避免前缀误开。
+    //  ⚠ 解析一次存标量（bringup 内不调 checkKernelArgument）；关态 ⇒ Step 2 逐字不变。
+    fw::pspSetSkipRing(nredExactBootArg("-NRedPspSkipRing"));
     // D-3 只读仪表门控（默认关）：SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位读数。
     // 解析一次存标量，仅观测、不写、不发送。
     singleton().smu13SegReadoutEnabled = checkKernelArgument("-NRedSegReadout");
