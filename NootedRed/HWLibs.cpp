@@ -342,7 +342,27 @@ static UInt64 gR1M570  = 0;       // *(e88+0x570)
 static UInt64 gR1A210  = 0;       // *(e88+0x210)
 static UInt32 gR1Tbl   = 0;       // *(u32*)(e88+0x108)（aperture 表项数）
 static UInt32 gR1Sc    = 0;       // 27 指针自检结果（1=通过）
+static UInt32 gR1ReadyA = 0;      // 门 A 就绪（只含 stage0 可判项 A1–A5）
 static UInt32 gP6ObjSize[4] = {0,0,0,0};   // 每个对象的**实际分配尺寸**（释放用；0=未知）
+// ─── 批次 P2b：数据字段填充与两级门（默认关；关态零行为）──────────────────────────
+static bool   gP2bOn      = false;   // `-NRedP2b`（精确 token）
+static UInt32 gP2bGateB   = 0;       // 门 B 求值结果（1=全真；0=有假项）
+static UInt32 gP2bErr     = 0;       // 0=无错；1=指针非法；2=对象不符；3=表满；4=构建失败
+static UInt32 gP2bSrc     = 0;       // 0=未填；1=fill（候选值）；2=read（真实读数）
+static UInt64 gP2bA210    = 0;       // 写入 +0x210 的值
+static UInt32 gP2bCnt     = 0;       // 表项数（填后）
+static UInt32 gP2bMode    = 0;       // (clk+4 >> 7) & 3
+static UInt32 gP2bType0   = 0;       // clk+0x20
+static UInt32 gP2bF108    = 0;       // P5+0x108 bit0
+static UInt64 gP2bT       = 0;       // *(H+0xE48)
+static UInt64 gP2bFn      = 0;       // *(T+0x40)
+static UInt32 gP2bU7      = 0;       // 0=未知；1=X6；2=X5
+static UInt64 gP2bK0Base  = 0, gP2bK0Size = 0;
+static UInt64 gP2bK1Base  = 0, gP2bK1Size = 0;
+static UInt64 gP2bK2Base  = 0, gP2bK2Size = 0;
+static UInt32 gP2bFilled  = 0;       // 填充块已执行（幂等；部分失败时保持 0 以便重试）
+static UInt32 gP2bPre     = 0;       // pre 行已写（防重复）
+static UInt32 gP2bPost    = 0;       // post 行已写
 // ─── 批次 P7：golden 表有界性只读探针（`-NRedP7Probe`，默认关）──────────────────────────
 //  数据链：ctx→P5→clone→T→pair→device→p→q→r→s→t→recs（逐级 KPtr）。
 //  遍历：复刻 0x18f7c 的 recs 遍历；0x1a99e 只做算术，不 deref 结果地址。
@@ -1253,14 +1273,14 @@ static void nredR1Stamp(char* const body, size_t& off, const size_t cap)
 {
     size_t room = cap;
     int n = snprintf(body + off, room,
-                     "[r1] obj=%llx sz=%x m528=%llx m570=%llx a210=%llx tbl=%u sc=%u ready=%u\n",
+                     "[r1] obj=%llx sz=%x m528=%llx m570=%llx a210=%llx tbl=%u sc=%u ready=%u ra=%u\n",
                      static_cast<unsigned long long>(gR1Obj),
                      static_cast<unsigned>(gP6ObjSize[1]),
                      static_cast<unsigned long long>(gR1M528),
                      static_cast<unsigned long long>(gR1M570),
                      static_cast<unsigned long long>(gR1A210),
                      static_cast<unsigned>(gR1Tbl), static_cast<unsigned>(gR1Sc),
-                     static_cast<unsigned>(gR1Ready));
+                     static_cast<unsigned>(gR1Ready), static_cast<unsigned>(gR1ReadyA));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
 }
@@ -6742,7 +6762,7 @@ static bool nredStage1Guard5(const void* const ctx)
         //  ⚠ 越界纪律：只有"我方 0x600 对象"才读 +0x210/+0x528/+0x570；
         //    P6 的 0x88 壳一律不读（与 R0 同一条纪律）。
         if (gR1On) {
-            gR1Ready = 0; gR1Obj = 0; gR1M528 = 0; gR1M570 = 0;
+            gR1Ready = 0; gR1ReadyA = 0; gR1Obj = 0; gR1M528 = 0; gR1M570 = 0;
             gR1A210 = 0; gR1Tbl = 0;
             gR1Obj = e88;
             if (nredKernelPtrOk(reinterpret_cast<const void*>(e88)) &&
@@ -6761,8 +6781,10 @@ static bool nredStage1Guard5(const void* const ctx)
                            *reinterpret_cast<const UInt64*>(s1 + 0x268) != 0 &&
                            *reinterpret_cast<const UInt64*>(s1 + 0x2B8) != 0;
                 }
-                gR1Ready = (ok528 && ok570 && gR1A210 != 0 && gR1Tbl > 0 &&
-                            okS1 && gR1Sc != 0 && gR2On) ? 1U : 0U;
+                // 批次 P2b／C3：门 A 只含 stage0 可判项（A1–A5）；R4/R5（a210/表）属门 B。
+                gR1ReadyA = (ok528 && ok570 && okS1 && gR1Sc != 0) ? 1U : 0U;
+                gR1Ready  = (ok528 && ok570 && gR1A210 != 0 && gR1Tbl > 0 &&
+                             okS1 && gR1Sc != 0 && gR2On) ? 1U : 0U;
             }
         }
         // 批次 P2／P2-2b：`-NRedQp` 开 ⇒ 第 14 步被截断 ⇒ 0x1aef4/0x1dde1/0x3d1b5
@@ -6907,7 +6929,10 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
             gSt1G5Verdict = v ? 1U : 0U;
             // 批次 R1：门＝(Q′ 已武装) ∧ (R1 关 或 就绪判定为真)。
             //  ⚠ R1 恒未就绪（a210=0／表空／R2 未开）⇒ 门不开 ⇒ 叶不跑（安全出口）。
-            const bool gate = (gQp && gQpArmed) && (!gR1On || gR1Ready != 0);
+            // 批次 P2b／C3：门 A 用 gR1ReadyA（stage0 可判项）＋ gR2On/gP2bOn；
+            //  `gR1On==false` 时表达式与改动前逐字一致（P 形态）。
+            const bool gate = (gQp && gQpArmed) &&
+                              (!gR1On || (gR1ReadyA != 0 && gR2On && gP2bOn));
             ok = gate ? v : false;
             break;
         }
@@ -8158,6 +8183,203 @@ UInt32 X5000HWLibs::wrapMode9440f(void* const a, UInt32 const b, UInt32 const c,
     return ret;
 }
 
+// ─── 批次 P2b：用叶的真实 clk 填 e88 的数据字段（默认关；关态零行为）──────────────
+//  依据：需求文档 §4–§7；A2 主报告 §1/§2；A2 补充 §1/§2。
+//  ⚠ 本块**不调用** 0x1ee30／Apple init handler／0x201ce（分别含 read_reg／寄存器写）。
+//  ⚠ 只调纯函数 0x1ebf1（kind 分支＋size 常量；其调用目标只有 0x1a5a9/0x1e9c8）。
+//  ⚠ 深栈纪律：只走 nredTraceLine；不刷盘、不 SYSLOG、不分配内存。
+//  ⚠ 本块之后仍 return 1（截断在第 14 步）——越过第 14 步属下一批。
+
+// U7 判定：读 fn 前 6 字节，与两套表的已知序言比对（只读代码字节，不调用）。
+//   X6 0x929b8：55 48 89 e5 41 57 …（push rbp; mov rsp,rbp; push r15; push r14）
+//   X5 0x9225f：55 48 89 e5 53 50 …（push rbp; mov rsp,rbp; push rbx; push rax）
+//   第 4 字节即分叉（0x41 vs 0x53），比 6 字节足够且不受后续指令差异影响。
+static UInt32 nredP2bU7(const UInt64 fn)
+{
+    if (fn == 0) { return 0; }
+    const UInt8* const p = reinterpret_cast<const UInt8*>(fn);
+    static const UInt8 kX6[6] = {0x55,0x48,0x89,0xe5,0x41,0x57};
+    static const UInt8 kX5[6] = {0x55,0x48,0x89,0xe5,0x53,0x50};
+    bool x6 = true, x5 = true;
+    for (unsigned i = 0; i < 6; ++i) {
+        if (p[i] != kX6[i]) { x6 = false; }
+        if (p[i] != kX5[i]) { x5 = false; }
+    }
+    return x6 ? 1U : (x5 ? 2U : 0U);
+}
+
+// R6：mode × type[0] 覆盖（需求 §5.3）
+static bool nredP2bModeCovers(const UInt32 mode, const UInt32 t0)
+{
+    if (mode == 2) { return true; }                 // 0,1,2 全建
+    if (mode == 0) { return (t0 == 0); }            // 只建 0,2
+    if (mode == 1) { return (t0 == 1); }            // 只建 1,2
+    return false;                                   // mode 3：只建 2
+}
+
+// R7：被查询 kind 存在且 base/size 非 0（需求 §5.4）
+static bool nredP2bKindsOk(const UInt8* const e, const UInt32 cnt,
+                           const UInt32 t0, const UInt32 f108)
+{
+    UInt32 need[3] = {2U, 0xFFFFFFFFU, 0xFFFFFFFFU};   // kind 2 恒查
+    unsigned n = 1;
+    if (f108 != 0) {
+        need[n++] = (t0 < 3) ? ((t0 == 1) ? 1U : 0U) : 8U;   // DAT_42da78 = {0,1,0}
+    }
+    if (t0 == 2) { need[n++] = 1U; }
+    for (unsigned k = 0; k < n; ++k) {
+        bool found = false;
+        for (UInt32 i = 0; i < cnt && i < 8; ++i) {
+            const UInt8* const ent = e + 0x48 + static_cast<size_t>(i) * 0x18;
+            if (*reinterpret_cast<const UInt32*>(ent) != need[k]) { continue; }
+            const UInt64 base = (need[k] == 2)
+                ? *reinterpret_cast<const UInt64*>(e + 0x1E8)
+                : *reinterpret_cast<const UInt64*>(ent + 8);
+            const UInt64 size = *reinterpret_cast<const UInt64*>(ent + 0x10);
+            if (base != 0 && size != 0) { found = true; break; }
+        }
+        if (!found) { return false; }
+    }
+    return true;
+}
+
+__attribute__((noinline))
+static void nredP2bFill(void* const obj, void* const clk, void* const desc)
+{
+    if (!nredKernelPtrOk(obj) || !nredKernelPtrOk(clk) || !nredKernelPtrOk(desc)) {
+        gP2bErr = 1; return;
+    }
+    UInt8* const H = static_cast<UInt8*>(obj);
+    const UInt8* const c = static_cast<const UInt8*>(clk);
+    const UInt64 e88v = *reinterpret_cast<const UInt64*>(H + 0xE88);
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(e88v)) ||
+        e88v != gP6ObjAddr[1] || gP6Mode[1] != 2 || gP6ObjSize[1] < kNRedR1ObjBytes) {
+        gP2bErr = 2; return;
+    }
+    UInt8* const e = reinterpret_cast<UInt8*>(e88v);
+
+    // 1) 读 clk（叶第 1–12 步的真实输出；0x68 B）
+    const UInt32 c4  = *reinterpret_cast<const UInt32*>(c + 0x04);
+    const UInt32 t0  = *reinterpret_cast<const UInt32*>(c + 0x20);
+    const UInt64 a30 = *reinterpret_cast<const UInt64*>(c + 0x30);
+    const UInt64 a38 = *reinterpret_cast<const UInt64*>(c + 0x38);
+    const UInt32 a50 = *reinterpret_cast<const UInt32*>(c + 0x50);
+    const UInt64 a58 = *reinterpret_cast<const UInt64*>(c + 0x58);
+    gP2bMode  = (c4 >> 7) & 3U;
+    gP2bType0 = t0;
+    gP2bF108  = (nredKernelPtrOk(reinterpret_cast<const void*>(gSt1G5P)))
+        ? (static_cast<UInt32>(*reinterpret_cast<const UInt8*>(
+              reinterpret_cast<const UInt8*>(gSt1G5P) + 0x108)) & 1U) : 0U;
+
+    // 2) provider 表（只读指针）
+    gP2bT = *reinterpret_cast<const UInt64*>(H + 0xE48);
+    gP2bFn = (nredKernelPtrOk(reinterpret_cast<const void*>(gP2bT)))
+        ? *reinterpret_cast<const UInt64*>(reinterpret_cast<const UInt8*>(gP2bT) + 0x40) : 0;
+    gP2bU7 = nredP2bU7(gP2bFn);
+
+    // 3) pre 行（在任何写/调用之前）
+    if (gP2bPre == 0) {
+        char line[192];
+        const int n = snprintf(line, sizeof(line),
+            "[p2b] H=%llx e88=%llx clk=%llx mode=%u t0=%u f108=%u T=%llx fn=%llx u7=%u\n",
+            static_cast<unsigned long long>(reinterpret_cast<UInt64>(obj)),
+            static_cast<unsigned long long>(e88v),
+            static_cast<unsigned long long>(reinterpret_cast<UInt64>(clk)),
+            static_cast<unsigned>(gP2bMode), static_cast<unsigned>(t0),
+            static_cast<unsigned>(gP2bF108),
+            static_cast<unsigned long long>(gP2bT),
+            static_cast<unsigned long long>(gP2bFn),
+            static_cast<unsigned>(gP2bU7));
+        if (n > 0) { nredTraceLine(line, n); gP2bPre = 1; }
+    }
+
+    // 4) 幂等门：本批只填一次（gP2bFilled）；表已非空则不覆盖（cnt0 != 0 ⇒ 只读）
+    const UInt32 cnt0 = *reinterpret_cast<const UInt32*>(e + 0x108);
+    if (gP2bFilled == 0) {
+        // 4.1 clk 派生字段（与 init handler 0x1f0e6 逐字一致）
+        *reinterpret_cast<UInt32*>(e + 0x0C) = (c4 & 0x1FFU) | ((c4 >> 2) & 0x3E00U);
+        *reinterpret_cast<UInt32*>(e + 0x18) = *reinterpret_cast<const UInt32*>(c + 0x10);
+        *reinterpret_cast<UInt32*>(e + 0x1C) = t0;
+        *reinterpret_cast<UInt64*>(e + 0x20) = *reinterpret_cast<const UInt64*>(c + 0x28);
+        *reinterpret_cast<UInt64*>(e + 0x28) = a30;
+        *reinterpret_cast<UInt64*>(e + 0x30) = a38;
+        *reinterpret_cast<UInt64*>(e + 0x38) = *reinterpret_cast<const UInt64*>(c + 0x40);
+        *reinterpret_cast<UInt64*>(e + 0x40) = *reinterpret_cast<const UInt64*>(c + 0x48);
+        *reinterpret_cast<UInt32*>(e + 0x10C) = a50;
+        *reinterpret_cast<UInt64*>(e + 0x110) = a58;
+        *reinterpret_cast<UInt32*>(e + 0x118) =
+            (*reinterpret_cast<const UInt32*>(e + 0x118) & ~0xCU) | 0x4U;   // 清 bits2-3，置 bit2
+        // 4.2 Apple create 的默认 VA 常量（0x1ebad；纯常量，不调用）
+        *reinterpret_cast<UInt64*>(e + 0x128) = 0x8000000ULL;
+        *reinterpret_cast<UInt64*>(e + 0x130) = 0xC00000000ULL;
+        *reinterpret_cast<UInt64*>(e + 0x138) = 0x10000000000ULL;
+        *reinterpret_cast<UInt64*>(e + 0x140) = 0xF400000000ULL;
+        // 4.3 aperture 表：调苹果纯函数 0x1ebf1（kind, base）；表已非空则不覆盖
+        if (cnt0 == 0 && gHwlibsSlide != 0) {
+            using P2bBuild = UInt32 (*)(void*, UInt32, UInt64);
+            const auto build = reinterpret_cast<P2bBuild>(gHwlibsSlide + 0x1EBF1);
+            if (build(e, 0U, a30) != 0) { gP2bErr = 4; }
+            if ((gP2bMode == 1U || gP2bMode == 2U) && t0 != 0) {
+                if (build(e, 1U, static_cast<UInt64>(t0)) != 0) { gP2bErr = 4; }
+            }
+            // kind 2：base = obj+0x200 + clk+0x58（本批 obj+0x200=0）。
+            //   ⚠ 0x1ebf1 的 kind 2 size = align(*(u64*)(obj+0x138) - base, 0x200000)；
+            //     若 base >= +0x138（1 TB）会无符号下溢成巨大 size ⇒ 先挡（R7 随之为假、门 B 不开）。
+            if (a58 < 0x10000000000ULL) {
+                if (build(e, 2U, a58) != 0) { gP2bErr = 4; }
+            } else {
+                gP2bErr = 4;
+            }
+        } else if (gHwlibsSlide == 0) {
+            gP2bErr = 4;
+        }
+        // 4.4 +0x210：候选 4 GB（src=fill；真实读数留待 U2/U3 判定后）
+        gP2bA210 = 0x100000000ULL;
+        gP2bSrc  = 1;
+        *reinterpret_cast<UInt64*>(e + 0x210) = gP2bA210;
+        gP2bFilled = 1;
+    }
+
+    // 5) 读回 + 门 B 求值
+    const UInt32 cnt = *reinterpret_cast<const UInt32*>(e + 0x108);
+    gP2bCnt = cnt;
+    for (UInt32 i = 0; i < cnt && i < 8; ++i) {
+        const UInt8* const ent = e + 0x48 + static_cast<size_t>(i) * 0x18;
+        const UInt32 kind = *reinterpret_cast<const UInt32*>(ent);
+        if (kind == 0) { gP2bK0Base = *reinterpret_cast<const UInt64*>(ent + 8);
+                         gP2bK0Size = *reinterpret_cast<const UInt64*>(ent + 0x10); }
+        if (kind == 1) { gP2bK1Base = *reinterpret_cast<const UInt64*>(ent + 8);
+                         gP2bK1Size = *reinterpret_cast<const UInt64*>(ent + 0x10); }
+        if (kind == 2) { gP2bK2Base = *reinterpret_cast<const UInt64*>(e + 0x1E8);
+                         gP2bK2Size = *reinterpret_cast<const UInt64*>(ent + 0x10); }
+    }
+    const bool r4 = (*reinterpret_cast<const UInt64*>(e + 0x210) != 0);
+    const bool r5 = (cnt > 0 && cnt <= 8);   // 0x1e9c8 的 cmp $7 上界
+    const bool r6 = nredP2bModeCovers(gP2bMode, t0);
+    const bool r7 = nredP2bKindsOk(e, cnt, t0, gP2bF108);
+    const bool r8 = (gP2bT != 0 && gP2bFn != 0 &&
+                     *reinterpret_cast<const UInt64*>(
+                         reinterpret_cast<const UInt8*>(gP2bT) + 8) != 0);
+    gP2bGateB = (r4 && r5 && r6 && r7 && r8) ? 1U : 0U;
+
+    // 6) post 行
+    if (gP2bPost == 0) {
+        char line[192];
+        const int n = snprintf(line, sizeof(line),
+            "[p2b2] a210=%llx src=%u cnt=%u k0=%llx/%llx k1=%llx/%llx k2=%llx/%llx gb=%u err=%u\n",
+            static_cast<unsigned long long>(gP2bA210), static_cast<unsigned>(gP2bSrc),
+            static_cast<unsigned>(cnt),
+            static_cast<unsigned long long>(gP2bK0Base),
+            static_cast<unsigned long long>(gP2bK0Size),
+            static_cast<unsigned long long>(gP2bK1Base),
+            static_cast<unsigned long long>(gP2bK1Size),
+            static_cast<unsigned long long>(gP2bK2Base),
+            static_cast<unsigned long long>(gP2bK2Size),
+            static_cast<unsigned>(gP2bGateB), static_cast<unsigned>(gP2bErr));
+        if (n > 0) { nredTraceLine(line, n); gP2bPost = 1; }
+    }
+}
+
 // ─── 批次 Q′：client5 stage1 叶第 14 步的截断器（`-NRedQp`，默认关）────────────────────────
 //  目的：让苹果叶 0x985d0 真实执行第 1–13 步（纯对象/字段操作，**零 MMIO**），
 //        在第 14 步（0x987e0 CALL RCX，RCX = *(P5+0x18) = 0x1936e）之前截断并返回失败。
@@ -8218,6 +8440,8 @@ SInt32 X5000HWLibs::wrapQpGvm5Init(void* const obj, void* const clk, void* const
             }
         }
     }
+    // 批次 P2b：数据字段填充＋门 B 求值（默认关；关态零行为；之后仍 return 1）
+    if (gP2bOn) { nredP2bFill(obj, clk, desc); }
     return 1;   // ★ 恒非 0 ⇒ 叶子返回 0（失败）
 }
 
@@ -8359,6 +8583,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     // 批次 R1（**默认关**）：provider 层构造。精确 token，避免前缀误开。
     gR1On          = nredExactBootArg("-NRedR1");
     gR2On          = nredExactBootArg("-NRedR2");
+    // 批次 P2b（**默认关**）：数据字段填充＋门 B 求值。精确 token，避免前缀误开。
+    gP2bOn         = nredExactBootArg("-NRedP2b");
     gP7On          = checkKernelArgument("-NRedP7Probe");   // P7：golden 表有界性（默认关）
     gP8On          = checkKernelArgument("-NRedP8Probe");   // P8：iproot/head 根因（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
