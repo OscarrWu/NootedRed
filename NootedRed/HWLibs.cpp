@@ -9476,7 +9476,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         // 批次 PSP-edx（`-NRedPspEdx`，默认关）：`0x4cb8a` 只读 hook（读事件环最后一条的 edx）。
         //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
         //  ⚠ 安装失败只记日志、不 panic（`hookProbe` 内部已如此）。
-        if (gPspEdxOn) {
+        // 批次 pspstate：`-NRedPspState` 也复用本 hook ⇒ 两者任一开都要安装。
+        //  ⚠ 否则 `-NRedPspState` 单独开时 hook 不装 ⇒ 探针静默无效（会浪费一轮真机）。
+        if (gPspEdxOn || gPspStateOn) {
             // 批次 pspedx4（R-pspedx4轮判读 §4）：**启动期安装确认行**——19 s 的 flush 必带出。
             //  为什么需要：`resolveProbe` 的"预期偏移命中"走 `DBGLOG`（不进环），
             //  失败才走 `NRED_TRACE`；两轮归档里都没有失败行 ⇒ 无法区分"装上了"与"块没执行"。
@@ -9487,19 +9489,23 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                 const bool ok = hookProbe(from,
                                           KernelPatcher::RouteRequest{nullptr, wrapPspRingCreate, gOrgPspRingCreate},
                                           "psp-ring");
-                static char pspHookLine[96];
-                const int nH = snprintf(pspHookLine, sizeof(pspHookLine),
-                                        "[pspedx] hook=%s at=%llx org=%llx\n",
-                                        ok ? "installed" : "route-failed",
-                                        static_cast<unsigned long long>(from),
-                                        static_cast<unsigned long long>(gOrgPspRingCreate));
-                if (nH > 0) { nredTraceLine(pspHookLine, nH); }
-            } else {
+                // 安装确认行只属 `-NRedPspEdx`（`-NRedPspState` 单独开时不输出 `[pspedx]` 行）。
+                if (gPspEdxOn) {
+                    static char pspHookLine[96];
+                    const int nH = snprintf(pspHookLine, sizeof(pspHookLine),
+                                            "[pspedx] hook=%s at=%llx org=%llx\n",
+                                            ok ? "installed" : "route-failed",
+                                            static_cast<unsigned long long>(from),
+                                            static_cast<unsigned long long>(gOrgPspRingCreate));
+                    if (nH > 0) { nredTraceLine(pspHookLine, nH); }
+                }
+            } else if (gPspEdxOn) {
                 static char pspHookFail[] = "[pspedx] hook=resolve-failed\n";
                 nredTraceLine(pspHookFail, static_cast<int>(sizeof(pspHookFail) - 1));
             }
             // 批次 pspedx5：三个子调用的只读 hook（入口/返回/耗时）。
-            //  ⚠ 安装失败只记日志、不 panic；关态整块不执行。
+            //  ⚠ 只属 `-NRedPspEdx`（`-NRedPspState` 单独开时不装，避免无谓开销）。
+            if (gPspEdxOn) {
             // 批次 S2（观测装置一次性方案 §2）：三个子调用 hook 的**安装行**。
             //  ⚠ 必须在 `gPspInRingCreate` 作用域**外**写（启动期该标志为假）。
             //  ⚠ 至多 3 行；`static char[96]` 不占栈。
@@ -9526,6 +9532,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                     hookProbe(f3, KernelPatcher::RouteRequest{nullptr, wrapPspSub56fff, gOrgPspSub56fff},
                               "psp-sub-56fff");
                 pspSubInstallLine("56fff", f3, ok3, gOrgPspSub56fff);
+            }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
