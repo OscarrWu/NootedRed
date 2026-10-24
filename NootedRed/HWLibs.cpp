@@ -593,8 +593,8 @@ static UInt32 gPspSampleN = 0;         // 采样行计数（≤3；独立于 `gP
 // 批次 pspring（G3 §C，`-NRedPspRing`，默认关）：PSP 事件环**全量** dump（32 条）。
 //  为什么：`[pspedx]` 只带最后一条，无法判断"何时死、死前有哪些事件"。
 //  ⚠ 纯内存（只走 `nredTraceLine`，不刷盘、不 panic）；关态零读零输出。
-//  ⚠ 位置（G3 §C 位置修正）：`pspSubEmit` 的 `ret != 0` 分支内 —— 主 hook
-//    `wrapPspRingCreate` 可能整轮不被调用，而子调用 hook 会命中。
+//  ⚠ 位置（G3 §C 入口版）：`pspSubEmit` **入口**（`ret` 判断之前）—— r313/r314 两轮
+//    `4ccae ret=0`（成功）⇒ 放在 `ret != 0` 分支内不会执行。
 //  ⚠ 限流：每次 ring create ≤1 次（`gPspRingDumps` 在 `wrapPspRingCreate` 入口重置）。
 static bool     gPspRingOn    = false;   // `-NRedPspRing`
 static unsigned gPspRingDumps = 0;       // 本轮 dump 次数（入口重置，≤1）
@@ -3680,42 +3680,55 @@ static void pspStateSample(const UInt32 t)
 }
 static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const int ret, const UInt64 us)
 {
+    // 批次 pspring（G3 §C 入口版）：PSP 事件环全量 dump（32 条），纯内存、零 MMIO。
+    //  为什么放入口：r313/r314 两轮 `4ccae ret=0`（成功）⇒ 失败分支的块不执行。
+    //  ⚠ 只在每轮 ring create 第一次子调用时 dump（`gPspRingDumps` 在 wrapper 入口重置）。
+    //  ⚠ 环有效判据：`idx <= 32`、`wrapped <= 1`；无效 ⇒ 写 skip 行，不读环。
+    //  ⚠ `h` 判空：`4c05b` 的 `h` 来自 `desc+0`，可能为空。
+    if (gPspRingOn && gPspRingDumps < 1) {
+        ++gPspRingDumps;
+        static char ringLine[128];
+        if (!nredKernelPtrOk(h)) {
+            const int ns = snprintf(ringLine, sizeof(ringLine),
+                                    "[pspring] skip reason=invalid idx=0 wrap=0\n");
+            if (ns > 0) { nredTraceLine(ringLine, ns); }
+        } else {
+            const UInt8* const H = static_cast<const UInt8*>(h);
+            const UInt32 idx = *reinterpret_cast<const UInt32*>(H + 0x3934);
+            const UInt8  wrapped = *reinterpret_cast<const UInt8*>(H + 0x3930);
+            if (idx > 32U || wrapped > 1U) {
+                const int ns = snprintf(ringLine, sizeof(ringLine),
+                                        "[pspring] skip reason=invalid idx=%u wrap=%u\n",
+                                        static_cast<unsigned>(idx),
+                                        static_cast<unsigned>(wrapped));
+                if (ns > 0) { nredTraceLine(ringLine, ns); }
+            } else {
+                const UInt32 n = wrapped ? 32U : idx;
+                const UInt32 first = wrapped ? (idx % 32U) : 0U;
+                for (UInt32 k = 0; k < n; ++k) {
+                    const UInt32 i = (first + k) % 32U;          // 从最旧到最新
+                    const UInt8* const e = H + 0x3938 + static_cast<size_t>(i) * 0x110;
+                    const int nr = snprintf(ringLine, sizeof(ringLine),
+                                            "[pspring] i=%u ev=%x sev=%u code=%llx\n",
+                                            static_cast<unsigned>(i),
+                                            static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 0)),
+                                            static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 4)),
+                                            static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(e + 8)));
+                    if (nr > 0) { nredTraceLine(ringLine, nr); }
+                }
+                const int ne = snprintf(ringLine, sizeof(ringLine),
+                                        "[pspring] end n=%u wrap=%u idx=%u\n",
+                                        static_cast<unsigned>(n),
+                                        static_cast<unsigned>(wrapped),
+                                        static_cast<unsigned>(idx));
+                if (ne > 0) { nredTraceLine(ringLine, ne); }
+            }
+        }
+    }
     if (ret != 0) {
         if (gPspSubFailN < 8) {
             ++gPspSubFailN;
             pspSubLine(fn, gPspSubFailN, ret, us);
-        }
-        // 批次 pspring（G3 §C 位置修正）：PSP 事件环全量 dump（32 条），纯内存、零 MMIO。
-        //  为什么放这里：主 hook `wrapPspRingCreate` 本轮未调用（`[pspedx] enter=0`），
-        //  而子调用 hook 命中（`[pspsub] fn=4ccae n=1`）⇒ 探针必须跟着会跑的 hook 走。
-        //  ⚠ 只在失败分支 dump：失败才是判读重点；成功分支不刷环。
-        //  ⚠ 限流：每次 ring create 一次（`gPspRingDumps` 在 `wrapPspRingCreate` 入口重置）。
-        //  ⚠ `h` 判空：`4c05b` 的 `h` 来自 `desc+0`，可能为空。
-        if (gPspRingOn && gPspRingDumps < 1 && nredKernelPtrOk(h)) {
-            ++gPspRingDumps;
-            const UInt8* const H = static_cast<const UInt8*>(h);
-            const UInt32 idx = *reinterpret_cast<const UInt32*>(H + 0x3934);
-            const UInt8  wrapped = *reinterpret_cast<const UInt8*>(H + 0x3930);
-            const UInt32 n = wrapped ? 32U : ((idx > 32U) ? 32U : idx);
-            const UInt32 first = wrapped ? (idx % 32U) : 0U;
-            static char ringLine[128];
-            for (UInt32 k = 0; k < n; ++k) {
-                const UInt32 i = (first + k) % 32U;          // 从最旧到最新
-                const UInt8* const e = H + 0x3938 + static_cast<size_t>(i) * 0x110;
-                const int nr = snprintf(ringLine, sizeof(ringLine),
-                                        "[pspring] i=%u ev=%x sev=%u code=%llx\n",
-                                        static_cast<unsigned>(i),
-                                        static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 0)),
-                                        static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 4)),
-                                        static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(e + 8)));
-                if (nr > 0) { nredTraceLine(ringLine, nr); }
-            }
-            const int ne = snprintf(ringLine, sizeof(ringLine),
-                                    "[pspring] end n=%u wrap=%u idx=%u\n",
-                                    static_cast<unsigned>(n),
-                                    static_cast<unsigned>(wrapped ? 1U : 0U),
-                                    static_cast<unsigned>(idx));
-            if (ne > 0) { nredTraceLine(ringLine, ne); }
         }
         // 批次 pspstate v2：**先读状态并写行**，再 flush ⇒ force 片必含两行。
         pspStateEmit(h, fn);
