@@ -370,6 +370,15 @@ static UInt32 gP2bPost    = 0;       // post 行已写
 // ─── 批次 P2c：门 B 放行与 desc 27 指针填充（默认关；关态仍 return 1）──────────────
 static bool   gP2cOn  = false;   // `-NRedP2c`（精确 token；B 轮必须与 -NRedP2b 同开）
 static UInt32 gP2cErr = 0;       // 0=无错；1=desc 填充失败
+// ─── 批次 P3：逐 client 放行开关（默认全关；精确 token）────────────────────────────
+//  语义：guard 照常运行（读数不变），**放行**被开关门控 ⇒ 单变量控制。
+//  ⚠ 关态：即使 guard 通过也不放行 ⇒ 可观测行为与现状一致（[st1r] mask 不变）。
+static bool   gSt1C2  = false;   // `-NRedSt1C2`
+static bool   gSt1C6  = false;   // `-NRedSt1C6`
+static bool   gSt1C7  = false;   // `-NRedSt1C7`
+static bool   gSt1C9  = false;   // `-NRedSt1C9`
+static bool   gSt1C14 = false;   // `-NRedSt1C14`
+static bool   gSt1C8  = false;   // `-NRedSt1C8`（commit 3 才接入）
 // ─── 批次 P7：golden 表有界性只读探针（`-NRedP7Probe`，默认关）──────────────────────────
 //  数据链：ctx→P5→clone→T→pair→device→p→q→r→s→t→recs（逐级 KPtr）。
 //  遍历：复刻 0x18f7c 的 recs 遍历；0x1a99e 只做算术，不 deref 结果地址。
@@ -6932,7 +6941,8 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 {
     bool ok = false;
     switch (client) {
-        case 2: ok = nredStage1Guard2(ctx); break;
+        // 批次 P3：guard 照常运行（读数不变），放行被开关门控（默认关 ⇒ 与现状一致）。
+        case 2:  { const bool v = nredStage1Guard2(ctx);  ok = gSt1C2  && v; break; }
         case 3: ok = nredStage1Guard3(ctx); break;
         case 5: {
             // 批次 P／P-7：判定与放行解耦——照常跑完全部检查并记录读数。
@@ -6961,8 +6971,8 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
             ok = gate ? v : false;
             break;
         }
-        case 6: ok = nredStage1Guard6(ctx); break;
-        case 7: ok = nredStage1Guard7(ctx); break;
+        case 6:  { const bool v = nredStage1Guard6(ctx);  ok = gSt1C6  && v; break; }
+        case 7:  { const bool v = nredStage1Guard7(ctx);  ok = gSt1C7  && v; break; }
         case 8: {
             // 批次 P4／P4-1：client 8（SMU）的**观测护栏**。
             //   ⚠ 恒不放行：client8 的 MMIO 经运行期函数指针（*(*(h+8)+0x40/+0xC0)），
@@ -6975,8 +6985,8 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
             gSt1G8Verdict = v8 ? 1U : 0U;
             return false;
         }
-        case 9: ok = nredStage1Guard9(ctx); break;
-        case 14: ok = nredStage1Guard14(ctx); break;
+        case 9:  { const bool v = nredStage1Guard9(ctx);  ok = gSt1C9  && v; break; }
+        case 14: { const bool v = nredStage1Guard14(ctx); ok = gSt1C14 && v; break; }
         default: return false;   // 8（暂缓）及其它 client：继续 fail-closed
     }
     if (!ok) { return false; }
@@ -8626,6 +8636,13 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gP2bOn         = nredExactBootArg("-NRedP2b");
     // 批次 P2c（**默认关**）：门 B 放行＋desc 填充。B 轮必须与 -NRedP2b 同开。
     gP2cOn         = nredExactBootArg("-NRedP2c");
+    // 批次 P3（**默认关**）：逐 client 放行。精确 token，避免前缀误开。
+    gSt1C2         = nredExactBootArg("-NRedSt1C2");
+    gSt1C6         = nredExactBootArg("-NRedSt1C6");
+    gSt1C7         = nredExactBootArg("-NRedSt1C7");
+    gSt1C9         = nredExactBootArg("-NRedSt1C9");
+    gSt1C14        = nredExactBootArg("-NRedSt1C14");
+    gSt1C8         = nredExactBootArg("-NRedSt1C8");
     gP7On          = checkKernelArgument("-NRedP7Probe");   // P7：golden 表有界性（默认关）
     gP8On          = checkKernelArgument("-NRedP8Probe");   // P8：iproot/head 根因（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
