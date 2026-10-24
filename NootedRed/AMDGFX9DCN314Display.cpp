@@ -548,6 +548,9 @@ void AMDRadeonX5000_AMDGFX9DCN314Display::applyInitialDisplaySequence(AMDRadeonX
 // init 覆写：先走基类 init（super chain：原版 init → isDCN → initDCNRegOffs 经 vft slot 0 分发到本类），
 // 完成后（initDCNRegOffs 之后、首次 flip 之前）执行**一次**完整的显示初始化编排。
 // 守卫: sDisplayInitSeqApplied 保证只执行一次（模式变更入口，勿随每帧 flip 重复）。
+// 批次 O2（离线批次 O1+O2）：显示读回前移——定义在文件后部的 P0 段（依赖开关与寄存器常量）。
+static void dispP0InitProbe(AMDRadeonX5000_AMDHWDisplay* self);
+
 bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* const _self, void* const hwInterface,
                                                void* const fbParams)
 {
@@ -556,6 +559,10 @@ bool AMDRadeonX5000_AMDGFX9DCN314Display::init(AMDRadeonX5000_AMDHWDisplay* cons
         StageMark::mark("disp-init-basefail");
         return false;
     }
+    // 批次 O2：显示读回前移（一次性；仅 `-NRedDispP0Off`）。零写、零等待、零循环。
+    //  位置＝superInit 成功之后、applyInitialDisplaySequence（时序编程）之前 ⇒ 读的是初始值。
+    dispP0InitProbe(_self);
+
 
     if (!sDisplayInitSeqApplied) {
         sDisplayInitSeqApplied = true;
@@ -732,6 +739,33 @@ static void dispP0LoadFlags()
     sDispP0Flags.init  = true;
     sDispP0Flags.probe = checkKernelArgument("-NRedDispP0Off");
     sDispP0Flags.write = checkKernelArgument("-NRedDispP0");
+}
+
+// 批次 O2（离线批次 O1+O2）：显示读回前移——在显示对象 init 内一次性读 10 个 dword。
+//  动机：`configureDisplay`（槽 0x138）的读回发生在 super 之后，读数已被苹果写时序污染；
+//        init（槽 0x1F8）在时序编程之前 ⇒ 读的是"初始值／通道是否可用"。
+//  ⚠ 零写、零等待、零循环；只用 `self->getHWRegisters()`（`this+0x28`），**不碰 `fbParams`**
+//     （同一通道在 init 内已被 applyInitialDisplaySequence 使用 ⇒ 此刻有效）。
+//  ⚠ 仅 `-NRedDispP0Off`；一次性标志 ⇒ 每 boot 至多一行。关态零行为。
+static bool sDispP0InitProbeDone = false;
+
+static void dispP0InitProbe(AMDRadeonX5000_AMDHWDisplay* const self)
+{
+    if (sDispP0InitProbeDone) { return; }
+    dispP0LoadFlags();
+    if (!sDispP0Flags.probe) { return; }
+    sDispP0InitProbeDone = true;
+    auto* const regs = self->getHWRegisters();
+    if (regs == nullptr) {
+        SYSLOG("GFX9DCN314Display", "[dispp0off-init] HW registers unavailable, skipped");
+        return;
+    }
+    SYSLOG("GFX9DCN314Display",
+           "[dispp0off-init] dto=%08x,%08x,%08x clk=%08x vtg=%08x h=%08x v=%08x vs=%08x,%08x,%08x",
+           regs->read(kDispP0RegPixelRateCntl), regs->read(kDispP0RegDtoPhase), regs->read(kDispP0RegDtoModulo),
+           regs->read(kDispP0RegOtgClock), regs->read(kDispP0RegVtg0Control), regs->read(kDispP0RegHTotal),
+           regs->read(kDispP0RegVTotal), regs->read(kDispP0RegVStartup), regs->read(kDispP0RegVUpdate),
+           regs->read(kDispP0RegVReady));
 }
 
 // ── 写项与三档策略（需求文档 §4.3）──

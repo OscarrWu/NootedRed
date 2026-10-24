@@ -202,6 +202,13 @@ static UInt64 gSt1P3   = 0;   // 255：*(ctx+0x20)（client 7 stage1 唯一硬 f
 static UInt64 gSt1B3P3  = 0;  // 258：client 3 分支读到的 P3（供 `[st1b3]` 头部行）
 // 259：剩余 client 放行的观测值（P 与关键二级指针；头部行零解引用）。
 static UInt64 gSt1G2P = 0, gSt1G2Key = 0;
+// ─── 批次 O1：client2/7/9 叶前一刻的只读探针（零写、零调用；仅 -NRedStage1）──────────────
+//  `P3+0x40`：叶内 `call *0x40(P3)`（`0x97450` 等）⇒ 为 0 即 `call *0` fault（CR2=0）。
+//  `P2+0x2C..+0x38`：client2 的 4 组计数（由 creator `0x9a75d` 写入 `0x9a87c/0x9a890/0x9a8af/0x9a8b6`）。
+//  `P9+0x28`：client9 的 cnt（creator `0x9fce6` 写入 `0x9fd8b`；判据 `0x9fd46/0x9fd49`）。
+static UInt64 gSt1P3V40 = 0;              // *(P3+0x40)
+static UInt32 gSt1G2C[4] = {0, 0, 0, 0};  // client2 的 c0..c3
+static UInt32 gSt1G9Cnt = 0;              // client9 的 cnt
 static UInt64 gSt1G5P = 0, gSt1G5Ip = 0, gSt1G5Ipr = 0;
 static UInt64 gSt1G5P20 = 0, gSt1G5P21 = 0, gSt1G5P22 = 0, gSt1G5P23 = 0;   // 步20-23 四级指针
 // ─── 批次 P：client5 护栏的中间量与判定结果（只写 BSS，由 [st1g5x/y/z] 输出）──────────────
@@ -1168,10 +1175,14 @@ __attribute__((noinline))
 static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
 {
     size_t room = cap;
-    int n = snprintf(body + off, room, "[st1g2] p2=%llx key=%llx p3=%llx\n",
+    int n = snprintf(body + off, room,
+                     "[st1g2] p2=%llx key=%llx p3=%llx v40=%llx c0=%u c1=%u c2=%u c3=%u\n",
                      static_cast<unsigned long long>(gSt1G2P),
                      static_cast<unsigned long long>(gSt1G2Key),
-                     static_cast<unsigned long long>(gSt1P3));
+                     static_cast<unsigned long long>(gSt1P3),
+                     static_cast<unsigned long long>(gSt1P3V40),
+                     static_cast<unsigned>(gSt1G2C[0]), static_cast<unsigned>(gSt1G2C[1]),
+                     static_cast<unsigned>(gSt1G2C[2]), static_cast<unsigned>(gSt1G2C[3]));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
     n = snprintf(body + off, room, "[st1g5] p5=%llx ip=%llx ipr=%llx\n",
@@ -1210,14 +1221,18 @@ static void nredSt1GuardsStamp(char* const body, size_t& off, const size_t cap)
                  static_cast<unsigned long long>(gSt1G6P), static_cast<unsigned long long>(gSt1G6Key));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
-    n = snprintf(body + off, room, "[st1g7] p7=%llx p3=%llx\n",
-                 static_cast<unsigned long long>(gSt1P7), static_cast<unsigned long long>(gSt1P3));
+    n = snprintf(body + off, room, "[st1g7] p7=%llx p3=%llx v40=%llx\n",
+                 static_cast<unsigned long long>(gSt1P7),
+                 static_cast<unsigned long long>(gSt1P3),
+                 static_cast<unsigned long long>(gSt1P3V40));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
-    n = snprintf(body + off, room, "[st1g9] p9=%llx key=%llx p3=%llx\n",
+    n = snprintf(body + off, room, "[st1g9] p9=%llx key=%llx p3=%llx v40=%llx cnt=%u\n",
                  static_cast<unsigned long long>(gSt1G9P),
                  static_cast<unsigned long long>(gSt1G9Key),
-                 static_cast<unsigned long long>(gSt1P3));
+                 static_cast<unsigned long long>(gSt1P3),
+                 static_cast<unsigned long long>(gSt1P3V40),
+                 static_cast<unsigned>(gSt1G9Cnt));
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
     // 批次 P4：client 8（SMU）观测护栏读数（**仅 -NRedSt1G8**；关态一字不变）
@@ -6649,6 +6664,7 @@ __attribute__((noinline))
 static bool nredStage1Guard2(const void* const ctx)
 {
     gSt1G2P = 0; gSt1G2Key = 0;
+    gSt1P3V40 = 0; gSt1G2C[0] = 0; gSt1G2C[1] = 0; gSt1G2C[2] = 0; gSt1G2C[3] = 0;
     gSt1P3 = 0;   // 批次 P4：与 guard7 一致——本 guard 未跑到 P3 检查时，读数不得残留上一个 guard 的值
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(2, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x18);
@@ -6673,6 +6689,11 @@ static bool nredStage1Guard2(const void* const ctx)
         static_cast<const UInt8*>(ctx) + 0x20);
     gSt1P3 = reinterpret_cast<UInt64>(p3);
     if (!nredKernelPtrOk(p3)) { nredStage1GfMark(2, 8); return false; }
+    // 批次 O1：叶前一刻只读（零写、零调用）。P3 已过 KPtr ⇒ 读 +0x40 安全。
+    gSt1P3V40 = *reinterpret_cast<const UInt64*>(p3 + 0x40);
+    for (unsigned i = 0; i < 4; ++i) {
+        gSt1G2C[i] = *reinterpret_cast<const UInt32*>(p2 + 0x2C + i * 4);
+    }
     return true;
 }
 
@@ -6978,6 +6999,7 @@ __attribute__((noinline))
 static bool nredStage1Guard7(const void* const ctx)
 {
     gSt1P7 = 0;
+    gSt1P3V40 = 0;
     gSt1P3 = 0;
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(7, 1); return false; }
     const UInt8* const p7 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x40);
@@ -6988,6 +7010,8 @@ static bool nredStage1Guard7(const void* const ctx)
     const UInt8* const p3 = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x20);
     gSt1P3 = reinterpret_cast<UInt64>(p3);
     if (!nredKernelPtrOk(p3)) { nredStage1GfMark(7, 5); return false; }
+    // 批次 O1：叶前一刻只读（零写、零调用）。
+    gSt1P3V40 = *reinterpret_cast<const UInt64*>(p3 + 0x40);
     return true;
 }
 
@@ -6995,6 +7019,7 @@ __attribute__((noinline))
 static bool nredStage1Guard9(const void* const ctx)
 {
     gSt1G9P = 0; gSt1G9Key = 0;
+    gSt1P3V40 = 0; gSt1G9Cnt = 0;
     gSt1P3 = 0;   // 批次 P4：与 guard7 一致（见 guard2 入口注释）
     if (!nredKernelPtrOk(ctx)) { nredStage1GfMark(9, 1); return false; }
     const UInt8* q = *reinterpret_cast<const UInt8* const*>(static_cast<const UInt8*>(ctx) + 0x50);
@@ -7014,6 +7039,10 @@ static bool nredStage1Guard9(const void* const ctx)
         static_cast<const UInt8*>(ctx) + 0x20);
     gSt1P3 = reinterpret_cast<UInt64>(p3);
     if (!nredKernelPtrOk(p3)) { nredStage1GfMark(9, 7); return false; }
+    // 批次 O1：叶前一刻只读（零写、零调用）。
+    //  `P9+0x28` 是 cnt（creator `0x9fce6` 的 `0x9fd8b` 写入；判据 `0x9fd46/0x9fd49`）。
+    gSt1P3V40 = *reinterpret_cast<const UInt64*>(p3 + 0x40);
+    gSt1G9Cnt = *reinterpret_cast<const UInt32*>(p9 + 0x28);
     return true;
 }
 
