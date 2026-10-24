@@ -3552,10 +3552,11 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     // 批次 pspringreuse（A 方案，-NRedPspRingReuse，默认关）：
     //   我方 bringup 已建 KM ring（r293 step=12）⇒ 不再调用苹果原件，
     //   直接把苹果的 KM ring 结构（h+1280）指向我方 ring，并返回 0。
-    //   ⚠ 只对 KM（type==1）生效；UM（type==2）仍走原件。
+    //   ⚠ 只对 KM（type==2）生效；UM（type==1）仍走原件。
+    //     （r316 实测：`[pspreuse]` 0 命中而 `[pspsub]` 5 命中 ⇒ 原 `type == 1` 写反。）
     //   ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
     //   ⚠ 前置：gBringupStep >= 8（RingCreate）且 gBringupRingMc != 0。
-    if (gPspRingReuse && type == 1 && gBringupStep >= 8 && gBringupRingMc != 0
+    if (gPspRingReuse && type == 2 && gBringupStep >= 8 && gBringupRingMc != 0
         && nredKernelPtrOk(h)) {
         UInt8* const H = static_cast<UInt8*>(h);
         UInt8* const R = H + 1280;                                  // 苹果 KM ring 结构
@@ -3576,7 +3577,8 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
             gPspEdxSkip = 0;
             static char reuseLine[128];
             const int nr = snprintf(reuseLine, sizeof(reuseLine),
-                                    "[pspreuse] mc=%llx size=%x wptr=%u va=%llx\n",
+                                    "[pspreuse] step=%u mc=%llx size=%x wptr=%u va=%llx\n",
+                                    static_cast<unsigned>(gBringupStep),
                                     static_cast<unsigned long long>(gBringupRingMc),
                                     static_cast<unsigned>(gBringupRingSize),
                                     static_cast<unsigned>(gBringupRingWptr),
@@ -3628,8 +3630,9 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         if (gPspEdxEnter <= 4) {
             static char pspLine[128];
             const int nPsp = snprintf(pspLine, sizeof(pspLine),
-                                      "[pspedx] enter=%u ret=%x idx=%u wrap=%u skip=%u edx=%llx ev=%x sev=%u\n",
+                                      "[pspedx] enter=%u type=%u ret=%x idx=%u wrap=%u skip=%u edx=%llx ev=%x sev=%u\n",
                                       static_cast<unsigned>(gPspEdxEnter),
+                                      static_cast<unsigned>(type),
                                       static_cast<unsigned>(gPspEdxRet),
                                       static_cast<unsigned>(gPspEdxRawIdx),
                                       static_cast<unsigned>(gPspEdxWrapped),
