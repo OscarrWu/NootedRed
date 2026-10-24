@@ -6936,7 +6936,7 @@ static bool nredStage1Guard9(const void* const ctx)
 __attribute__((noinline))
 static bool nredStage1Guard14(const void* const ctx);   // 定义在后（264：通过即放行）
 
-// ─── 259/264：各 client 的 guard 分派（白名单 {2,3,5,6,7,9,14}；8 仍 fail-closed）────────────
+// ─── 259/264：各 client 的 guard 分派（白名单 {2,3,5,6,7,9,14}；8 需 -NRedSt1G8＋-NRedSt1C8）──
 static bool nredStage1Guard(const void* const ctx, const UInt32 client)
 {
     bool ok = false;
@@ -6974,20 +6974,21 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
         case 6:  { const bool v = nredStage1Guard6(ctx);  ok = gSt1C6  && v; break; }
         case 7:  { const bool v = nredStage1Guard7(ctx);  ok = gSt1C7  && v; break; }
         case 8: {
-            // 批次 P4／P4-1：client 8（SMU）的**观测护栏**。
-            //   ⚠ 恒不放行：client8 的 MMIO 经运行期函数指针（*(*(h+8)+0x40/+0xC0)），
-            //     不可离线证明有界（R279 §5 建议 3）⇒ 本批只观测。
+            // 批次 P4／P4-1：client 8（SMU）的**观测护栏**；批次 P3（commit 3）起可被开关放行。
+            //   ⚠ client8 的 MMIO 经运行期函数指针（*(*(h+8)+0x40/+0xC0)），不可离线证明有界
+            //     （R279 §5 建议 3）⇒ 放行需**单独授权**；`-NRedSt1C8` 默认关。
             //   ⚠ `-NRedSt1G8` 默认关：`nredStage1GfMark` 只记**首个**失败，
             //     client8 的失败会遮蔽 client5 的 `c=5`（r279 的既有形态）。
-            //   ⚠ 直接 `return false` 而不走 `ok`：既不放行，也不置 `gSt1Try` 的 bit8。
+            //   ⚠ 两个开关都关 ⇒ 走 `return false`（与改动前逐字一致：不放行、不置 `gSt1Try` 的 bit8）。
             if (!gSt1G8) { return false; }
             const bool v8 = nredStage1Guard8(ctx);
             gSt1G8Verdict = v8 ? 1U : 0U;
-            return false;
+            ok = gSt1C8 && v8;                        // 新增放行开关（默认关）
+            break;                                    // 不再无条件 return false
         }
         case 9:  { const bool v = nredStage1Guard9(ctx);  ok = gSt1C9  && v; break; }
         case 14: { const bool v = nredStage1Guard14(ctx); ok = gSt1C14 && v; break; }
-        default: return false;   // 8（暂缓）及其它 client：继续 fail-closed
+        default: return false;   // 其它 client：继续 fail-closed
     }
     if (!ok) { return false; }
     gSt1Try |= (1U << client);
