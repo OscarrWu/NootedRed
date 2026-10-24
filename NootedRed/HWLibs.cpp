@@ -583,6 +583,10 @@ static bool gPspSubFlushed = false;   // 批次 S4：本轮 ring create 已因�
 //  启动期写四段标记并实际调用 `dumpNow()`／`dumpNowForce()`，用于验证"环→flush→落盘"整条链。
 //  ⚠ 独立于 `-NRedPspEdx`；不触发 panic。
 static bool gTraceSelfTest = false;
+// 批次 pspstate（`-NRedPspState`，默认关）：PSP 只读状态（C2PMSG_81／C2PMSG_64）。
+//  ⚠ 关态零读、零输出；单次读、无循环、无写。
+static bool   gPspStateOn = false;
+static UInt32 gPspStateN  = 0;   // 已输出行数（≤2）
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3553,6 +3557,34 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
                                       static_cast<unsigned>(gPspEdxEv),
                                       static_cast<unsigned>(gPspEdxSev));
             if (nPsp > 0) { nredTraceLine(pspLine, nPsp); }
+        }
+    }
+    // 批次 pspstate（`-NRedPspState`，默认关）：PSP 只读状态——区分"活着但未 ready"与"没起来"。
+    //  路径＝苹果自己的读回调 `*(*(h+8)+64)`，签名 `(ctx, reg, timeout)`，`ctx = *(*(h+8)+8)`；
+    //  索引＝`base + 128`（C2PMSG_64）／`base + 145`（C2PMSG_81），`base = *(u32*)(h+92)`。
+    //  ⚠ **单次读、无循环、无写**；不新增裸 SMN 探针（复用苹果路径）。
+    //  ⚠ 关态：不读、不输出。限流 ≤2 行。
+    if (gPspStateOn && ret != 0 && gPspStateN < 2 && nredKernelPtrOk(h)) {
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
+        if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
+            const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
+            const UInt64 readReg = *reinterpret_cast<const UInt64*>(IF + 64);
+            const UInt64 ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
+            if (readReg != 0) {
+                using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
+                const auto fn = reinterpret_cast<PspReadReg>(readReg);
+                const UInt32 base  = *reinterpret_cast<const UInt32*>(H + 92);
+                const UInt32 c2p64 = fn(ctx, base + 128U, 75U);   // C2PMSG_64
+                const UInt32 c2p81 = fn(ctx, base + 145U, 75U);   // C2PMSG_81
+                ++gPspStateN;
+                static char stLine[96];
+                const int nSt = snprintf(stLine, sizeof(stLine),
+                                         "[pspstate] alive=%x ready=%x c2p81=%x c2p64=%x\n",
+                                         (c2p81 != 0) ? 1U : 0U,
+                                         ((c2p64 & 0x80000000U) != 0) ? 1U : 0U, c2p81, c2p64);
+                if (nSt > 0) { nredTraceLine(stLine, nSt); }
+            }
         }
     }
     return ret;
@@ -9015,6 +9047,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gPspEdxOn = nredExactBootArg("-NRedPspEdx");
     // 批次 C3（**默认关**）：平台自检模式（四段标记 + 实际 flush）。精确 token。
     gTraceSelfTest = nredExactBootArg("-NRedTraceSelfTest");
+    // 批次 pspstate（**默认关**）：PSP 只读状态（C2PMSG_81／C2PMSG_64）。精确 token。
+    gPspStateOn = nredExactBootArg("-NRedPspState");
     // 批次 S2（**默认关**）：我方 PSP bringup 跳过 RingCreate（只做 TMR），
     //  让苹果 PSP 驱动成为 KM ring 的正当所有者（M5-1 §7.2）。精确 token，避免前缀误开。
     //  ⚠ 解析一次存标量（bringup 内不调 checkKernelArgument）；关态 ⇒ Step 2 逐字不变。
