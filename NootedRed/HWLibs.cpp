@@ -578,6 +578,11 @@ static mach_vm_address_t gOrgPspSub56fff = 0;
 static bool gPspInRingCreate = false;   // 1＝正在 `0x4cb8a` 内（子调用探针的作用域限定）
 // 批次 pspsub：**失败行**用独立计数（总上限 8）——失败是判读重点，不能被"每函数 2 行"的配额吃掉。
 static UInt32 gPspSubFailN = 0;
+static bool gPspSubFlushed = false;   // 批次 S4：本轮 ring create 已因失败强制 flush 过
+// 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
+//  启动期写四段标记并实际调用 `dumpNow()`／`dumpNowForce()`，用于验证"环→flush→落盘"整条链。
+//  ⚠ 独立于 `-NRedPspEdx`；不触发 panic。
+static bool gTraceSelfTest = false;
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3503,6 +3508,7 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     //  为什么需要：`0x4c05b` 全库有 **30 处**调用（通用 poll 助手），不限域会让 2 行配额
     //  被无关调用吃掉 ⇒ 看不到 PSP ring create 路径上的真实读数。
     gPspInRingCreate = true;
+    gPspSubFlushed = false;   // 批次 S4：每轮 ring create 只允许失败点强制 flush 一次
     const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
     gPspInRingCreate = false;
     if (gPspEdxOn) {
@@ -3571,13 +3577,38 @@ static void pspSubLine(const char* const fn, const UInt32 n, const int ret, cons
 static void pspSubEmit(const char* const fn, UInt32& perFn, const int ret, const UInt64 us)
 {
     if (ret != 0) {
-        if (gPspSubFailN >= 8) { return; }
-        ++gPspSubFailN;
-        pspSubLine(fn, gPspSubFailN, ret, us);
+        if (gPspSubFailN < 8) {
+            ++gPspSubFailN;
+            pspSubLine(fn, gPspSubFailN, ret, us);
+        }
+        // 批次 S4（观测装置一次性方案 §3）：**首次**非 0 返回 ⇒ 立即强制 flush。
+        //  ⚠ 顺序：先写环行（上面），再 flush ⇒ 新片必含该行。
+        //  ⚠ 每轮 ring create 只 flush 一次（`wrapPspRingCreate` 入口重置）。
+        if (!gPspSubFlushed) {
+            gPspSubFlushed = true;
+            NvMsgBuf::dumpNowForce();
+        }
     } else if (perFn < 2) {
         ++perFn;
         pspSubLine(fn, perFn, ret, us);
     }
+}
+
+// 批次 S2（观测装置一次性方案 §2）：子调用 hook 的**安装行**（至多 3 行；作用域外写）。
+static void pspSubInstallLine(const char* const fn, const mach_vm_address_t at, const bool ok,
+                              const mach_vm_address_t org)
+{
+    static char line[96];
+    int k;
+    if (at == 0) {
+        k = snprintf(line, sizeof(line), "[pspsub] hook=failed fn=%s reason=resolve\n", fn);
+    } else if (!ok) {
+        k = snprintf(line, sizeof(line), "[pspsub] hook=failed fn=%s reason=route\n", fn);
+    } else {
+        k = snprintf(line, sizeof(line), "[pspsub] hook=installed fn=%s at=%llx org=%llx\n",
+                     fn, static_cast<unsigned long long>(at), static_cast<unsigned long long>(org));
+    }
+    if (k > 0) { nredTraceLine(line, k); }
 }
 
 // `0x4ccae(h, 165, 0)`：返回 0/2（读回调为 null 时立即返 2，**不是超时**）。
@@ -8982,6 +9013,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSmu20On = nredExactBootArg("-NRedSmu20");
     // 批次 PSP-edx（**默认关**）：苹果 PSP 事件环只读探针（hook `0x4cb8a`）。精确 token。
     gPspEdxOn = nredExactBootArg("-NRedPspEdx");
+    // 批次 C3（**默认关**）：平台自检模式（四段标记 + 实际 flush）。精确 token。
+    gTraceSelfTest = nredExactBootArg("-NRedTraceSelfTest");
     // 批次 S2（**默认关**）：我方 PSP bringup 跳过 RingCreate（只做 TMR），
     //  让苹果 PSP 驱动成为 KM ring 的正当所有者（M5-1 §7.2）。精确 token，避免前缀误开。
     //  ⚠ 解析一次存标量（bringup 内不调 checkKernelArgument）；关态 ⇒ Step 2 逐字不变。
@@ -9433,21 +9466,49 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             }
             // 批次 pspedx5：三个子调用的只读 hook（入口/返回/耗时）。
             //  ⚠ 安装失败只记日志、不 panic；关态整块不执行。
-            if (const auto f1 = resolveProbe("psp-sub-4ccae", kPspSub4ccaePattern, nullptr,
-                                             arrsize(kPspSub4ccaePattern), 0x4CCAE)) {
-                hookProbe(f1, KernelPatcher::RouteRequest{nullptr, wrapPspSub4ccae, gOrgPspSub4ccae},
-                          "psp-sub-4ccae");
+            // 批次 S2（观测装置一次性方案 §2）：三个子调用 hook 的**安装行**。
+            //  ⚠ 必须在 `gPspInRingCreate` 作用域**外**写（启动期该标志为假）。
+            //  ⚠ 至多 3 行；`static char[96]` 不占栈。
+            {
+                const auto f1 = resolveProbe("psp-sub-4ccae", kPspSub4ccaePattern, nullptr,
+                                             arrsize(kPspSub4ccaePattern), 0x4CCAE);
+                const bool ok1 = (f1 != 0) &&
+                    hookProbe(f1, KernelPatcher::RouteRequest{nullptr, wrapPspSub4ccae, gOrgPspSub4ccae},
+                              "psp-sub-4ccae");
+                pspSubInstallLine("4ccae", f1, ok1, gOrgPspSub4ccae);
             }
-            if (const auto f2 = resolveProbe("psp-sub-4c05b", kPspSub4c05bPattern, nullptr,
-                                             arrsize(kPspSub4c05bPattern), 0x4C05B)) {
-                hookProbe(f2, KernelPatcher::RouteRequest{nullptr, wrapPspSub4c05b, gOrgPspSub4c05b},
-                          "psp-sub-4c05b");
+            {
+                const auto f2 = resolveProbe("psp-sub-4c05b", kPspSub4c05bPattern, nullptr,
+                                             arrsize(kPspSub4c05bPattern), 0x4C05B);
+                const bool ok2 = (f2 != 0) &&
+                    hookProbe(f2, KernelPatcher::RouteRequest{nullptr, wrapPspSub4c05b, gOrgPspSub4c05b},
+                              "psp-sub-4c05b");
+                pspSubInstallLine("4c05b", f2, ok2, gOrgPspSub4c05b);
             }
-            if (const auto f3 = resolveProbe("psp-sub-56fff", kPspSub56fffPattern, nullptr,
-                                             arrsize(kPspSub56fffPattern), 0x56FFF)) {
-                hookProbe(f3, KernelPatcher::RouteRequest{nullptr, wrapPspSub56fff, gOrgPspSub56fff},
-                          "psp-sub-56fff");
+            {
+                const auto f3 = resolveProbe("psp-sub-56fff", kPspSub56fffPattern, nullptr,
+                                             arrsize(kPspSub56fffPattern), 0x56FFF);
+                const bool ok3 = (f3 != 0) &&
+                    hookProbe(f3, KernelPatcher::RouteRequest{nullptr, wrapPspSub56fff, gOrgPspSub56fff},
+                              "psp-sub-56fff");
+                pspSubInstallLine("56fff", f3, ok3, gOrgPspSub56fff);
             }
+        }
+        // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
+        //  四段标记 + 实际调用 `dumpNow()`／`dumpNowForce()`，验证"环→flush→落盘"整条链。
+        //  ⚠ 独立于 `-NRedPspEdx`；不触发 panic；关态零输出、零额外 flush。
+        if (gTraceSelfTest) {
+            static char stLine[64];
+            int stN = snprintf(stLine, sizeof(stLine), "[selftest] stage=install\n");
+            if (stN > 0) { nredTraceLine(stLine, stN); }
+            stN = snprintf(stLine, sizeof(stLine), "[selftest] stage=ring\n");
+            if (stN > 0) { nredTraceLine(stLine, stN); }
+            stN = snprintf(stLine, sizeof(stLine), "[selftest] stage=periodic\n");
+            if (stN > 0) { nredTraceLine(stLine, stN); }
+            NvMsgBuf::dumpNow();          // 周期路径（非 force）
+            stN = snprintf(stLine, sizeof(stLine), "[selftest] stage=force\n");
+            if (stN > 0) { nredTraceLine(stLine, stN); }
+            NvMsgBuf::dumpNowForce();     // force 路径（panic 兜底同款）
         }
         if (const auto from = resolveProbe("ttl-allocA", kTtlInitAllocAPattern, kTtlInitAllocAPatternMask,
                                            arrsize(kTtlInitAllocAPattern), 0x93880)) {
