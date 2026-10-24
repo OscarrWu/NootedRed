@@ -439,10 +439,6 @@ static const UInt8 kP8HeadPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41,
 //  （第 16 字节起是 `callq *32176(%rdi)` 的 `ff 87 …`，故只取到指令边界）。
 static const UInt8 kPspRingCreatePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
                                               0x53, 0x50, 0x89, 0xF3, 0x49, 0x89, 0xFF};
-// 0x495ec（`psp_hardware_initialization`）前 14 B——`h` 保存点（比 `0x4cb8a` 更早）。
-//  取自 macho `__text`（VMA 0x495ec，file off = 0x1760 + (0x495ec − 0x760)）。
-static const UInt8 kPspHwInitPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
-                                          0x41, 0x55, 0x41, 0x54, 0x53, 0x50};
 // 子调用前 14/16 B（批次 pspedx5；取自 macho `__text`，file off = 0x1760 + (VMA − 0x760)）。
 static const UInt8 kPspSub4ccaePattern[] = {0x55, 0x48, 0x89, 0xE5, 0x53, 0x50, 0x48,
                                             0x89, 0xFB, 0xB9, 0x4B, 0x00, 0x00, 0x00};
@@ -591,12 +587,9 @@ static bool gTraceSelfTest = false;
 //  ⚠ 关态零读、零输出；单次读、无循环、无写。
 static bool   gPspStateOn = false;
 static UInt32 gPspStateN  = 0;   // 已输出行数（≤2）
-
-// 批次 SOS 采样（R-SOS采样时序 §2）：`h` 在 `0x495ec`（psp_hardware_initialization）入口保存，
-//  比 `0x4cb8a`（ring create）更早；每次 flush 且 `secTag >= 20` 采样，限 3 次。
-static void*  gPspCtx     = nullptr;   // PSP 上下文（首次 hw-init 时保存；带 iface/readReg 校验）
+// 批次 SOS 采样（R-SOS采样 §2）：`h` 在 `wrapPspRingCreate` 入口保存（~18 s），20/27/32 s 各采一次。
+static void*  gPspCtx     = nullptr;   // PSP 上下文（首次 ring create 时保存；带 KPtr 失效保护）
 static UInt32 gPspSampleN = 0;         // 采样行计数（≤3；独立于 `gPspStateN`）
-static mach_vm_address_t gOrgPspHwInit = 0;   // `0x495ec` 的原件跳板
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -1889,11 +1882,10 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
                                   static_cast<unsigned>(gPspEdxSev));
         if (nPsp > 0) { off += (static_cast<size_t>(nPsp) < capPsp) ? static_cast<size_t>(nPsp) : capPsp; }
     }
-    // 批次 SOS 采样（R-SOS采样时序 §1／§3）：**每次 flush 且 `secTag >= 20`** 时读一次 C2PMSG_81，限 3 次。
-    //  为什么不再写死 20/27/32：r309 实测 flush 只在 20/21/26 s 发生（22–25 缺、26 后无）⇒ 写死会漏。
+    // 批次 SOS 采样（R-SOS采样 §1）：复用周期 flush 的 `secTag`，在 20/27/32 s 各读一次 C2PMSG_81。
     //  ⚠ 采样行经 `nredTraceLine` 进环；本函数的环遍历在头部区**之后** ⇒ 同一拍必带出。
     //  ⚠ 关态（`-NRedPspState` 未带）⇒ 不读、不输出。
-    if (gPspStateOn && secTag >= 20) {
+    if (gPspStateOn && (secTag == 20 || secTag == 27 || secTag == 32)) {
         pspStateSample(static_cast<UInt32>(secTag));
     }
     // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
@@ -3514,26 +3506,6 @@ UInt8 X5000HWLibs::wrapP8Head(void* const a, UInt64 b, UInt64 c, UInt64 d)
     return FunctionCast(wrapP8Head, singleton().orgP8Head)(a, b, c, d);
 }
 
-// ─── 批次 SOS 采样：`0x495ec`（`psp_hardware_initialization`）入口只读 hook ──────────────
-//  目的：在**比 ring create 更早**的时点保存 PSP 上下文 `h`（r309 实证 ring create 晚于 20 s）。
-//  ⚠ 保存时校验 `iface` 与 `readReg`（`nredKernelPtrOk`）⇒ 只保存"可用"的上下文。
-//  ⚠ 零写（只读 `h` 的字段）、零寄存器访问、**返回值原样透传**。
-//  ⚠ 签名核对（反汇编 `0x495ec`）：入口只测 `rdi`／`rsi`／`rdx` 三个参数，`rcx`/`r8`/`r9` 从未被读
-//     ⇒ 3 参；返回 `eax`（`4999b: movl %r15d,%eax`）。
-static int wrapPspHwInit(void* const h, void* const a, void* const b)
-{
-    if (gOrgPspHwInit == 0) { return -1; }
-    if (gPspStateOn && gPspCtx == nullptr && nredKernelPtrOk(h)) {
-        const UInt8* const H = static_cast<const UInt8*>(h);
-        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
-        if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
-            const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
-            if (*reinterpret_cast<const UInt64*>(IF + 64) != 0) { gPspCtx = h; }
-        }
-    }
-    return FunctionCast(wrapPspHwInit, gOrgPspHwInit)(h, a, b);
-}
-
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
 //  原件返回后，环里必有刚写的条目 ⇒ 读"最后写入"的那一条的 `+8`（edx）。
 //  ⚠ 零写（只读 `h` 的字段）、零寄存器访问、**返回值原样透传**。
@@ -3551,8 +3523,9 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     //  为什么需要：`0x4c05b` 全库有 **30 处**调用（通用 poll 助手），不限域会让 2 行配额
     //  被无关调用吃掉 ⇒ 看不到 PSP ring create 路径上的真实读数。
     gPspInRingCreate = true;
-    // 批次 SOS 采样：`gPspCtx` 已改在 `0x495ec`（psp_hardware_initialization）入口保存
-    //  （r309 实证 ring create 晚于 20 s，此处保存太晚）⇒ 本处不再保存。
+    // 批次 SOS 采样（R-SOS采样 §2.1）：入口保存 `h`（首次调用 ~18 s），供 20/27/32 s 采样使用。
+    //  ⚠ 关态（`-NRedPspState` 未带）⇒ 不保存。
+    if (gPspStateOn && gPspCtx == nullptr && nredKernelPtrOk(h)) { gPspCtx = h; }
     gPspSubFlushed = false;   // 批次 S4：每轮 ring create 只允许失败点强制 flush 一次
     const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
     gPspInRingCreate = false;
@@ -3649,21 +3622,20 @@ static void pspStateEmit(void* const h, const char* const where)
 }
 
 
-// 批次 SOS 采样（R-SOS采样时序 §3）：每次 flush 且 `secTag >= 20` 时读一次 `C2PMSG_81`，限 3 次。
+// 批次 SOS 采样（R-SOS采样 §3）：在 20/27/32 s 各读一次 `C2PMSG_81`，定位 SOS 死亡窗口。
 //  ⚠ 复用 `pspStateEmit` 的读路径（`*(*(h+8)+64)`）；单次读、无循环、无写。
 //  ⚠ 独立计数 `gPspSampleN`（≤3），不与 `pspStateEmit` 的 `gPspStateN`（≤2）共用。
-//  ⚠ 失效时输出 `ctx/iface/readReg` 三个指针值，便于判"保存太晚"还是"字段失效"。
+//  ⚠ 失效保护：`gPspCtx` 非内核指针／接口非法／读回调为空 ⇒ 输出一行 `invalid` 后返回。
 static void pspStateSample(const UInt32 t)
 {
     if (!gPspStateOn || gPspSampleN >= 3) { return; }
-    static char smLine[128];
+    static char smLine[96];
     void* const h = gPspCtx;
-    UInt64 iface = 0;
     UInt64 readReg = 0;
     UInt64 ctx = 0;
     if (nredKernelPtrOk(h)) {
         const UInt8* const H = static_cast<const UInt8*>(h);
-        iface = *reinterpret_cast<const UInt64*>(H + 8);
+        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
         if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
             const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
             readReg = *reinterpret_cast<const UInt64*>(IF + 64);
@@ -3671,13 +3643,9 @@ static void pspStateSample(const UInt32 t)
         }
     }
     ++gPspSampleN;
-    if (!nredKernelPtrOk(h) || readReg == 0) {
-        const int nI = snprintf(smLine, sizeof(smLine),
-                                "[pspstate] t=%u invalid ctx=%llx iface=%llx readReg=%llx\n",
-                                static_cast<unsigned>(t),
-                                static_cast<unsigned long long>(reinterpret_cast<UInt64>(h)),
-                                static_cast<unsigned long long>(iface),
-                                static_cast<unsigned long long>(readReg));
+    if (readReg == 0) {
+        const int nI = snprintf(smLine, sizeof(smLine), "[pspstate] t=%u invalid\n",
+                                static_cast<unsigned>(t));
         if (nI > 0) { nredTraceLine(smLine, nI); }
         return;
     }
@@ -9566,15 +9534,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         // 批次 pspstate：`-NRedPspState` 也复用本 hook ⇒ 两者任一开都要安装。
         //  ⚠ 否则 `-NRedPspState` 单独开时 hook 不装 ⇒ 探针静默无效（会浪费一轮真机）。
         if (gPspEdxOn || gPspStateOn) {
-            // 批次 SOS 采样（R-SOS采样时序 §2）：`0x495ec` 入口 hook——在 ring create **之前**保存 `h`。
-            //  ⚠ 只属 `-NRedPspState`（采样需要它）；关态不注册。
-            if (gPspStateOn) {
-                if (const auto from = resolveProbe("psp-hwinit", kPspHwInitPattern, nullptr,
-                                                   arrsize(kPspHwInitPattern), 0x495EC)) {
-                    hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapPspHwInit, gOrgPspHwInit},
-                              "psp-hwinit");
-                }
-            }
             // 批次 pspedx4（R-pspedx4轮判读 §4）：**启动期安装确认行**——19 s 的 flush 必带出。
             //  为什么需要：`resolveProbe` 的"预期偏移命中"走 `DBGLOG`（不进环），
             //  失败才走 `NRED_TRACE`；两轮归档里都没有失败行 ⇒ 无法区分"装上了"与"块没执行"。
