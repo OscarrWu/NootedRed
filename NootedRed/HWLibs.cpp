@@ -453,12 +453,12 @@ static const UInt8 kPspSub4c05bPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 
 static const UInt8 kPspSub56fffPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48,
                                             0x83, 0xEC, 0x20, 0x49, 0x89, 0xFE, 0x31, 0xC0};
 
-// 0x4bae9 前 15 B（批次 psptmrreuse：苹果 PSP 提交包装；`resolveProbe` 的 expected-offset 校验用）。
-//  取自 macho `__text`（VMA 0x4bae9，file off 0x4cae9）：55 48 89 e5 41 57 41 56 41 54 53 48 81 ec 90 06
-//  （函数入口确认：0x4bae8 是上一条 `ret` 的 `c3`；入口 `41 89 f6` = `mov %esi,%r14d` ⇒ **esi = cmd_id**，
-//   `49 89 ff` = `mov %rdi,%r15` ⇒ rdi = h。）
-static const UInt8 kPspSubmitPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
-                                          0x41, 0x54, 0x53, 0x48, 0x81, 0xEC, 0x90};
+// 0x4a988 前 15 B（批次 psptmrreuse v2：苹果 PSP selector 分派器；`resolveProbe` 的 expected-offset 校验用）。
+//  取自 macho `__text`（VMA 0x4a988，file off 0x4b988）：55 48 89 e5 41 56 53 48 85 ff 74 36 49 89 fe
+//  （函数入口确认：0x4a987 是 `nop` 填充 `90`；第 16 B `bb` 是 `movl $4,%ebx` 的首字节，不入 pattern。
+//   入口 `48 85 ff` = `test %rdi,%rdi` ⇒ rdi = h；`89 f0` = `mov %esi,%eax` ⇒ **esi = selector**。）
+static const UInt8 kPspSelectorPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48,
+                                            0x85, 0xFF, 0x74, 0x36, 0x49, 0x89, 0xFE};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -615,9 +615,9 @@ static unsigned gPspRingDumps = 0;       // 本轮 dump 次数（入口重置，
 //  把 `h+1280` 指向我方 bringup 已建的 KM ring，并返回 0（不再调苹果原件）。
 //  ⚠ 关态 ⇒ 本块不执行，行为与改动前逐字一致。
 static bool gPspRingReuse = false;   // `-NRedPspRingReuse`
-// 批次 psptmrreuse（`-NRedPspTmrReuse`，默认关）：拦截苹果 PSP 提交包装（`0x4bae9`）的
-//  SETUP_TMR（`cmd_id == 5`）。我方 bringup 已完成 TMR 加载（r293 step=12）⇒ 苹果的
-//  SETUP_TMR 是冗余命令，直接返回 0（不构造、不提交、不设 fence、不等 fence）。
+// 批次 psptmrreuse v2（`-NRedPspTmrReuse`，默认关）：拦截苹果 PSP selector 分派器
+//  （`0x4a988`）的 selector 5（SETUP_TMR）。我方 bringup 已完成 TMR 加载（r293 step=12）
+//  ⇒ 苹果的 SETUP_TMR 是冗余命令，直接返回 0（不构造、不提交、不设 fence、不等 fence）。
 //  ⚠ 关态 ⇒ 本块不执行，行为与改动前逐字一致。
 static bool gPspTmrReuse = false;   // `-NRedPspTmrReuse`
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
@@ -3548,29 +3548,29 @@ UInt8 X5000HWLibs::wrapP8Head(void* const a, UInt64 b, UInt64 c, UInt64 d)
     return FunctionCast(wrapP8Head, singleton().orgP8Head)(a, b, c, d);
 }
 
-// ─── 批次 psptmrreuse：`0x4bae9`（苹果 PSP 提交包装）按 cmd_id 拦截 ──────────────────────
-//  我方 bringup 已完成 TMR 加载（r293 step=12）⇒ 苹果的 SETUP_TMR（cmd_id=5）是冗余命令。
-//  ⚠ 只拦 `cmd_id == 5`；其他命令原样透传（`0x4d2c4` 提交入口影响所有命令，绝不拦）。
+// ─── 批次 psptmrreuse v2：`0x4a988`（苹果 PSP selector 分派器）按 selector 拦截 ────────────
+//  我方 bringup 已完成 TMR 加载（r293 step=12）⇒ 苹果的 SETUP_TMR（selector=5）是冗余命令。
+//  ⚠ 为什么从 `0x4bae9` 改到这里：`0x4bae9` 的 `esi` 是"命令序号"，不是 `cmd_id`
+//    （技术经理 R-PSP-TMR-等待路径 §4.1）；selector 是明确参数，只拦 TMR，
+//    且不依赖 `0x4b02d` 是否被调用。
+//  ⚠ 只拦 `selector == 5`；其他 selector 原样透传。
 //  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
-static mach_vm_address_t gOrgPspSubmit = 0;   // `0x4bae9` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
+static mach_vm_address_t gOrgPspSelector = 0;   // `0x4a988` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
 
-static int wrapPspSubmit(void* const h, const UInt32 cmdId)
+static int wrapPspSelector(void* const h, const UInt32 selector)
 {
-    // 批次 psptmrreuse（-NRedPspTmrReuse，默认关）：
-    //   在提交包装入口按 cmd_id 拦截 SETUP_TMR（5）：
-    //   我方 bringup 已完成 TMR 加载（r293 step=12）⇒ 苹果的 SETUP_TMR 是冗余命令，
-    //   直接返回 0（成功），不构造、不提交、不设 fence、不等 fence。
-    //   ⚠ 只拦 cmd_id==5；其他命令原样透传。
-    //   ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
-    if (gPspTmrReuse && cmdId == 5 && gBringupStep >= 11) {
+    // 批次 psptmrreuse v2（-NRedPspTmrReuse，默认关）：
+    //   在 selector 分派器（0x4a988）入口拦截 selector 5（SETUP_TMR）。
+    //   为什么改：0x4bae9 的 esi 是"命令序号"，不是 cmd_id；用它拦截会误伤其他命令。
+    if (gPspTmrReuse && selector == 5 && gBringupStep >= 11 /* TmrLoad */) {
         static char line[96];
-        const int n = snprintf(line, sizeof(line), "[psptmr] skip tmr submit step=%u\n",
+        const int n = snprintf(line, sizeof(line), "[psptmr] skip selector=5 step=%u\n",
                                static_cast<unsigned>(gBringupStep));
         if (n > 0) { nredTraceLine(line, n); }
         return 0;
     }
-    if (gOrgPspSubmit == 0) { return -1; }
-    return FunctionCast(wrapPspSubmit, gOrgPspSubmit)(h, cmdId);
+    if (gOrgPspSelector == 0) { return -1; }
+    return FunctionCast(wrapPspSelector, gOrgPspSelector)(h, selector);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
@@ -9754,27 +9754,28 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             }
             }
         }
-        // 批次 psptmrreuse（`-NRedPspTmrReuse`，默认关）：`0x4bae9`（苹果 PSP 提交包装）拦截。
+        // 批次 psptmrreuse v2（`-NRedPspTmrReuse`，默认关）：`0x4a988`（selector 分派器）拦截。
         //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
         //  ⚠ 独立于 `-NRedPspEdx`（拦截本身不需要探针开关；`[psptmr]` 行也不需要）。
-        //  ⚠ 上一版的 `0x4b02d`（TMR 加载）hook 已删除：r317 实测未触发（苹果不走那条路径）。
+        //  ⚠ 上一版的 `0x4bae9`（提交包装）hook 已删除：其 `esi` 是"命令序号"而非 `cmd_id`
+        //    （技术经理 R-PSP-TMR-等待路径 §4.1），用它拦截会误伤其他命令。
         if (gPspTmrReuse) {
-            const auto fromSub = resolveProbe("psp-submit", kPspSubmitPattern, nullptr,
-                                              arrsize(kPspSubmitPattern), 0x4BAE9);
-            bool okSub = false;
-            if (fromSub != 0) {
-                okSub = hookProbe(fromSub,
-                                  KernelPatcher::RouteRequest{nullptr, wrapPspSubmit, gOrgPspSubmit},
-                                  "psp-submit");
+            const auto fromSel = resolveProbe("psp-selector", kPspSelectorPattern, nullptr,
+                                              arrsize(kPspSelectorPattern), 0x4A988);
+            bool okSel = false;
+            if (fromSel != 0) {
+                okSel = hookProbe(fromSel,
+                                  KernelPatcher::RouteRequest{nullptr, wrapPspSelector, gOrgPspSelector},
+                                  "psp-selector");
             }
             {
-                static char subHookLine[96];
-                const int nH = snprintf(subHookLine, sizeof(subHookLine),
+                static char selHookLine[96];
+                const int nH = snprintf(selHookLine, sizeof(selHookLine),
                                         "[psptmr] hook=%s at=%llx org=%llx\n",
-                                        (fromSub == 0) ? "resolve-failed" : (okSub ? "installed" : "route-failed"),
-                                        static_cast<unsigned long long>(fromSub),
-                                        static_cast<unsigned long long>(gOrgPspSubmit));
-                if (nH > 0) { nredTraceLine(subHookLine, nH); }
+                                        (fromSel == 0) ? "resolve-failed" : (okSel ? "installed" : "route-failed"),
+                                        static_cast<unsigned long long>(fromSel),
+                                        static_cast<unsigned long long>(gOrgPspSelector));
+                if (nH > 0) { nredTraceLine(selHookLine, nH); }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
