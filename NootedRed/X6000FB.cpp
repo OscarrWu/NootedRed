@@ -2792,15 +2792,15 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
                   calls, base, self, hw, hwVt, hwZvm);
             if (n > 0) { nredTraceLine(line, n); }
             n = snprintf(line, sizeof(line),
-                  "[probe] engtbl-n: nonNull=%llu readFail=%llu\n",
+                  "[probe] engtblb: nonNull=%llu readFail=%llu\n",
                   nonnul, rfail);
             if (n > 0) { nredTraceLine(line, n); }
             n = snprintf(line, sizeof(line),
-                  "[probe] engtblb: s0..3=%llx %llx %llx %llx | s4..7=%llx %llx %llx %llx\n",
+                  "[probe] engtblc: s0..3=%llx %llx %llx %llx | s4..7=%llx %llx %llx %llx\n",
                   s00, s01, s02, s03, s04, s05, s06, s07);
             if (n > 0) { nredTraceLine(line, n); }
             n = snprintf(line, sizeof(line),
-                  "[probe] engtblc: s8..11=%llx %llx %llx %llx | s12..15=%llx %llx %llx %llx\n",
+                  "[probe] engtbld: s8..11=%llx %llx %llx %llx | s12..15=%llx %llx %llx %llx\n",
                   s08, s09, s10, s11, s12, s13, s14, s15);
             if (n > 0) { nredTraceLine(line, n); }
         }
