@@ -363,9 +363,19 @@ static void nredBringupBody()
                                      fenceMc,
                                      cmdBufMc,
                                      ringMc);
+    // 探针可靠性（S2 判读）：**失败早退前**也要把真实步号/错误码/响应状态写进文件静态量。
+    //  原实现只在成功路径末尾（本函数尾部）赋值 ⇒ phase1 失败时 `[bringup] step=0`（假象）。
+    //  `last_resp_status_load_toc` 在 Psp13Bringup 里**从未被写**（死字段，恒 0）
+    //  ⇒ 改从 ring 的命令缓冲取该阶段**最后一帧**的响应状态（与本文件既有 SMU 帧同一取法）。
+    gBringupStep      = static_cast<UInt32>(ctx.last_step);
+    gBringupLastError = ctx.last_error;
+    {
+        const fw::GfxCmdResp* const respP1 = fw::cmdBufGet(&ring);
+        gBringupLoadToc = (respP1 != nullptr) ? respP1->resp_status : 0xFFFFFFFFu;
+    }
     if (rc != 0) {
         NRED_TRACE("bringup: phase1 failed step=%u error=%d loadToc_resp=0x%X",
-                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_load_toc);
+                   static_cast<unsigned>(ctx.last_step), rc, gBringupLoadToc);
         ringDesc->complete(); ringDesc->release();
         cmdDesc->complete(); cmdDesc->release();
         fenceDesc->complete(); fenceDesc->release();
@@ -373,7 +383,7 @@ static void nredBringupBody()
         return;
     }
     // A-13 D1′：分开记录 loadToc resp_status
-    NRED_TRACE("bringup: loadToc resp_status=0x%X", ctx.last_resp_status_load_toc);
+    NRED_TRACE("bringup: loadToc resp_status=0x%X", gBringupLoadToc);
 
     // ⑥ A-11：TMR 物理连续缓冲分配（PSP 可 DMA）。tmrInit 计算 tmr_size 后，在此分配。
     // 依据：Linux psp_tmr_init (amdgpu_psp.c:881-923) 先 loadToc 取 tmr_size，再分配 TMR。
@@ -455,9 +465,16 @@ static void nredBringupBody()
                                tmrPhys,
                                cmdBufMc,
                                fenceMc);
+    // 探针可靠性：phase2 结束即快照（成功/失败都要），并取该阶段最后一帧的响应状态。
+    gBringupStep      = static_cast<UInt32>(ctx.last_step);
+    gBringupLastError = ctx.last_error;
+    {
+        const fw::GfxCmdResp* const respP2 = fw::cmdBufGet(&ring);
+        gBringupTmrLoad = (respP2 != nullptr) ? respP2->resp_status : 0xFFFFFFFFu;
+    }
     if (rc != 0) {
         NRED_TRACE("bringup: phase2 failed step=%u error=%d tmrLoad_resp=0x%X",
-                   static_cast<unsigned>(ctx.last_step), rc, ctx.last_resp_status_tmr_load);
+                   static_cast<unsigned>(ctx.last_step), rc, gBringupTmrLoad);
     }
     // ── B69 phase3（更正版）：第一次真实调用 LOAD_ASD（载荷＝TA 内 ASD 子固件切片）──
     //  依据（技术经理 B69 更正＋Linux 对应实现）：
@@ -565,17 +582,17 @@ static void nredBringupBody()
         }
     }
     // A-13 D1′：分开记录 tmrLoad resp_status
-    NRED_TRACE("bringup: tmrLoad resp_status=0x%X", ctx.last_resp_status_tmr_load);
+    NRED_TRACE("bringup: tmrLoad resp_status=0x%X", gBringupTmrLoad);
 
     // I10/G6/J-1：结构化逐步 trace（末行携带 last_step，供 J-1「last_step 单调不减」断言）。
     NRED_TRACE("bringup: step=%u last_error=%d loadToc_resp=0x%X tmrLoad_resp=0x%X",
                static_cast<unsigned>(ctx.last_step), ctx.last_error,
-               ctx.last_resp_status_load_toc, ctx.last_resp_status_tmr_load);
-    // P2 包A：同一处既有打印点顺带记四项（不新增打印/落盘量），供 HWLibs.cpp 头部戳记读取。
+               gBringupLoadToc, gBringupTmrLoad);
+    // P2 包A：同一处既有打印点顺带记两项（不新增打印/落盘量），供 HWLibs.cpp 头部戳记读取。
+    //  ⚠ `loadToc`／`tmrLoad` 的 resp_status 已在各自阶段结束时快照（见上方两处），
+    //    此处**不得**再用 `ctx.last_resp_status_*` 覆盖——那两个字段在 Psp13Bringup 里从未被写（恒 0）。
     gBringupStep = static_cast<UInt32>(ctx.last_step);
     gBringupLastError = ctx.last_error;
-    gBringupLoadToc = ctx.last_resp_status_load_toc;
-    gBringupTmrLoad = ctx.last_resp_status_tmr_load;
 
     // D3: TMR 缓冲保留至卸载（对齐 Linux"保留至卸载"契约，防提前释放）。
     // 此处不释放 tmrDesc，保留至 kext 卸载（static 持有）。

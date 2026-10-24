@@ -1468,7 +1468,12 @@ bool X5000::wrapInitializeTtl(void* const self, void* const gartParams)
     //  开启时转发原件 `AMDRTHardware::initializeTtl` 的真实返回值。不改原件、不改任何判定输入。
     const bool ttlRc = checkKernelArgument("-NRedTtlRc");
     if (ttlRc) {
-        SYSLOG("X5000", "ttlrc: org=%d ret=%d", orgRet ? 1 : 0, orgRet ? 1 : 0);
+        // 探针可靠性（S2 判读 §5.2）：原走 `SYSLOG`（dmesg）⇒ 归档里没有 dmesg ⇒ 0 命中。
+        //  改走内存环（`nredTraceLine`）⇒ 随 TraceFlush 落盘。格式与字段不变。
+        static char ttlRcLine[64];
+        const int nTtlRc = snprintf(ttlRcLine, sizeof(ttlRcLine), "ttlrc: org=%d ret=%d",
+                                    orgRet ? 1 : 0, orgRet ? 1 : 0);
+        if (nTtlRc > 0) { nredTraceLine(ttlRcLine, nTtlRc); }
     }
     return ttlRc ? orgRet : true;
 }
