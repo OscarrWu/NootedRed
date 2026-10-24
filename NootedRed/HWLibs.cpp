@@ -1713,7 +1713,10 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     const uint64_t slide = static_cast<uint64_t>(X5000HWLibs::singleton().getKcSlide());
     snprintf(name, sizeof(name), "/var/log/NRedTraceFlush-s%llx-%03u-%05ds.txt",
              (unsigned long long)slide, fseq, secTag);
-    static char body[4 * 1024];
+    // 4096 B 上限修复（R-4096上限 §3.1）：头部随开关数量可达 5–6 KB，4 KB 连头部都放不下
+    //  （r293/r294/r295/r297 实证：末行分别是 `[mesb]`／`[st1p]`／`[st1p] p`／`[st1c]`）。
+    //  16 KB = 头部（≤6 KB）+ 环正文（≥10 KB，≈50 行）；静态 BSS，+12 KB。
+    static char body[16 * 1024];
     size_t off = 0;
     // 首行指纹（复用 NvMsgBuf 的既有指纹格式）+ 秒级标签
     off += NvMsgBuf::formatFingerprint(body, sizeof(body));
@@ -2137,28 +2140,50 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
         if (nw > 0) { off += (static_cast<size_t>(nw) < capW) ? static_cast<size_t>(nw) : capW; }
     }
     const uint32_t n = gTraceRing.count;
-    for (uint32_t i = 0; i < n; ++i) {
+    // 4096 上限修复·尾优先（R-4096上限 §3.2）：先算起点，保证**最新**的行全部放下（切头不切尾）。
+    //  时间顺序不变（仍从旧到新），只是跳过最旧的若干行。
+    //  ⚠ 必须给尾部两行（`[flush-stamp]`／`[flush-t30]`）留位：§3.4 要求 `[flush-t30]` 必现。
+    //    文档 §3.2 的片段直接用 `sizeof(body) - off` 作 avail ⇒ 环满时尾部两行会被挤掉，
+    //    与它自己的 §3.4 验收判据冲突；此处按"预留 192 B"实现。
+    //  ⚠ force（panic 兜底）路径压到 8 KB（§3.3）：正常上下文由 PP 入口承担，panic 只兜底。
+    const size_t lim = force ? (8 * 1024) : sizeof(body);
+    const size_t kTailReserve = 192;
+    size_t avail = (off + kTailReserve < lim) ? (lim - off - kTailReserve) : 0;
+    uint32_t start = n;
+    {
+        size_t need = 0;
+        while (start > 0) {
+            const char* line = nullptr;
+            const uint32_t len = gTraceRing.get(start - 1, &line);
+            if (len == 0 || line == nullptr) { --start; continue; }
+            if (need + len + 1 > avail) { break; }
+            need += len + 1;
+            --start;
+        }
+    }
+    for (uint32_t i = start; i < n; ++i) {
         const char* line = nullptr;
         const uint32_t len = gTraceRing.get(i, &line);
         if (len == 0 || line == nullptr) { continue; }
-        if (off + len + 1 > sizeof(body)) { break; }
+        if (off + len + 1 > lim) { break; }   // 理论上不会触发（已按 avail 算过）
         __builtin_memcpy(body + off, line, len);
         off += len;
         body[off++] = '\n';
     }
     if (off == 0) { NvMsgBuf::stFlushBusy() = false; return 0; }
     // B94 修复（s0-006 实测 4122B>4096 且 [flush-t30] 乱码）：snprintf 返回**应写长度**（截断时仍返回
-    //  完整长度）⇒ `off += snprintf(...)` 在 off 接近 4096 时越界累加 ⇒ 越界写 body、FileIO 读越界。
-    //  ⇒ 改用"实际写入长度"（min(返回值, 余量)）累加，off 恒 ≤ sizeof(body)，文件大小 ≤ 4096。
-    if (off < sizeof(body)) {
-        const size_t cap = sizeof(body) - off;
+    //  完整长度）⇒ `off += snprintf(...)` 在 off 接近上限时越界累加 ⇒ 越界写 body、FileIO 读越界。
+    //  ⇒ 改用"实际写入长度"（min(返回值, 余量)）累加，off 恒 ≤ lim，文件大小 ≤ lim。
+    //  ⚠ 用 `lim` 而非 `sizeof(body)`：force 路径的 8 KB 上限对尾部两行同样生效。
+    if (off < lim) {
+        const size_t cap = lim - off;
         const int fsN = snprintf(body + off, cap, "[flush-stamp] sec=%d overflow=%u t30=%llx\n",
                                  secTag, static_cast<unsigned>(gTraceRing.overflow),
                                  static_cast<unsigned long long>(gLastT30Type5));
         if (fsN > 0) { off += (static_cast<size_t>(fsN) < cap) ? static_cast<size_t>(fsN) : cap; }
     }
-    if (off < sizeof(body)) {
-        const size_t cap = sizeof(body) - off;
+    if (off < lim) {
+        const size_t cap = lim - off;
         const int ftN = snprintf(body + off, cap,
                                  "[flush-t30] type3=%llx type8=%llx type5=%llx sub5=%08x\n",
                                  static_cast<unsigned long long>(gLastT30Type3),
