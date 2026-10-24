@@ -546,7 +546,14 @@ static UInt32     gGc7xSeen = 0;
 //  条目 `h+0x3938+i*0x110`（+0 事件 ID u32／+4 严重度 u32／+8 返回码 edx u64）＋文本 256 B。
 //  ⚠ 零写、零寄存器访问、不改返回值；关态不安装 hook、不读环、不输出。
 static bool   gPspEdxOn  = false;             // `-NRedPspEdx`
-static UInt32 gPspEdxIdx = 0xFFFFFFFFU;       // 哨兵：尚未读到
+//  （条目索引 `i` 不再单独存：头部行的 `idx=`＋`wrap=` 即可推出 `i`。）
+// 批次 pspedx-诊断（R-pspedx轮判读 §5.2 方案 A＋C）：区分"未触发"与"触发但未读"。
+//  ⚠ 全部只在 `-NRedPspEdx` 开时写；关态零行为。
+static UInt32 gPspEdxEnter   = 0;   // hook 入口计数（饱和 255；**不受 ret 限制**）
+static UInt32 gPspEdxRet     = 0;   // 原件原始返回值（按 u32 位模式记录）
+static UInt32 gPspEdxRawIdx  = 0;   // 环原始索引（未做 -1）
+static UInt32 gPspEdxWrapped = 0;   // 回绕标志（0/1）
+static UInt32 gPspEdxSkip    = 0;   // 0=读到；1=i>=32；2=h 非内核指针；3=其它
 static UInt64 gPspEdxVal = 0;                 // 条目 +8（edx）
 static UInt32 gPspEdxEv  = 0;                 // 条目 +0（事件 ID）
 static UInt32 gPspEdxSev = 0;                 // 条目 +4（严重度）
@@ -1815,11 +1822,19 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
     // 批次 R1：P2b 数据面读数（仅 -NRedP2b）。紧跟 `[r1]` ⇒ 头部前部，免疫 4096 B 尾部截断。
     if (gP2bOn && off < sizeof(body)) { nredP2bStamp(body, off, sizeof(body) - off); }
     // 批次 PSP-edx：苹果 PSP 事件环最后一条的返回码（仅 `-NRedPspEdx`；关态一字不变）。
-    //  放头部区 ⇒ 免疫正文区截断；`idx=ffffffff` 表示"尚未读到"（哨兵）。
-    if (gPspEdxOn && gPspEdxIdx != 0xFFFFFFFFU && off < sizeof(body)) {
+    //  放头部区 ⇒ 免疫正文区截断。
+    //  诊断字段（R-pspedx轮判读 §5.2 方案 A＋C）：`enter` 区分"未触发"与"触发但未读"；
+    //  `ret/idx/wrap/skip` 给出原始值，`skip` 语义 0=读到／1=i>=32／2=h 非内核指针／3=其它。
+    //  ⚠ 只要开关开就输出（`enter=0` 本身是判据）⇒ 不再依赖"已读到"哨兵。
+    if (gPspEdxOn && off < sizeof(body)) {
         const size_t capPsp = sizeof(body) - off;
-        const int nPsp = snprintf(body + off, capPsp, "[pspedx] idx=%u edx=%llx ev=%x sev=%u\n",
-                                  static_cast<unsigned>(gPspEdxIdx),
+        const int nPsp = snprintf(body + off, capPsp,
+                                  "[pspedx] enter=%u ret=%x idx=%u wrap=%u skip=%u edx=%llx ev=%x sev=%u\n",
+                                  static_cast<unsigned>(gPspEdxEnter),
+                                  static_cast<unsigned>(gPspEdxRet),
+                                  static_cast<unsigned>(gPspEdxRawIdx),
+                                  static_cast<unsigned>(gPspEdxWrapped),
+                                  static_cast<unsigned>(gPspEdxSkip),
                                   static_cast<unsigned long long>(gPspEdxVal),
                                   static_cast<unsigned>(gPspEdxEv),
                                   static_cast<unsigned>(gPspEdxSev));
@@ -3446,24 +3461,41 @@ UInt8 X5000HWLibs::wrapP8Head(void* const a, UInt64 b, UInt64 c, UInt64 d)
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
 //  原件返回后，环里必有刚写的条目 ⇒ 读"最后写入"的那一条的 `+8`（edx）。
 //  ⚠ 零写（只读 `h` 的字段）、零寄存器访问、**返回值原样透传**。
-//  ⚠ 只在 `ret != 0` 时读（成功不记，避免噪声）。
+//  ⚠ 每次调用都读（方案 A＋C：不再用 `ret != 0` 过滤）——只写 BSS，不产生环行噪声。
 //  ⚠ 文件作用域 static 而非类成员：`RouteRequest` 的 `org` 是 `mach_vm_address_t*`
 //     ⇒ 文件作用域变量即可，**无需改 `HWLibs.hpp`**。
 static int wrapPspRingCreate(void* const h, const UInt32 type)
 {
-    if (gOrgPspRingCreate == 0) { return -1; }
+    if (gOrgPspRingCreate == 0) {
+        // 跳板未就绪（正常不会发生：wrapper 只在 hook 安装成功后才被调用）⇒ 记 skip=3。
+        if (gPspEdxOn) { if (gPspEdxEnter < 255) { ++gPspEdxEnter; } gPspEdxSkip = 3; }
+        return -1;
+    }
     const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
-    if (gPspEdxOn && ret != 0 && nredKernelPtrOk(h)) {
-        const UInt8* const H = static_cast<const UInt8*>(h);
-        const UInt32 idx     = *reinterpret_cast<const UInt32*>(H + 0x3934);
-        const UInt8  wrapped = *reinterpret_cast<const UInt8*>(H + 0x3930);
-        const UInt32 i       = (idx == 0) ? (wrapped ? 31U : 0U) : (idx - 1U);
-        if (i < 32U) {   // 索引越界（环被破坏）⇒ 不读，保持哨兵
-            const UInt8* const e = H + 0x3938 + static_cast<size_t>(i) * 0x110;
-            gPspEdxIdx = i;
-            gPspEdxEv  = *reinterpret_cast<const UInt32*>(e + 0);
-            gPspEdxSev = *reinterpret_cast<const UInt32*>(e + 4);
-            gPspEdxVal = *reinterpret_cast<const UInt64*>(e + 8);
+    if (gPspEdxOn) {
+        // 方案 A：**入口无条件计数**（不受 `ret != 0` 限制）⇒ 区分"未触发"与"触发但未读"。
+        if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
+        // 方案 C：记录原始 `ret`／`idx`／`wrapped`／`skip`（即使 `i>=32` 也记）。
+        gPspEdxRet = static_cast<UInt32>(ret);
+        if (!nredKernelPtrOk(h)) {
+            gPspEdxSkip = 2;                                   // h 非内核指针
+        } else {
+            const UInt8* const H = static_cast<const UInt8*>(h);
+            const UInt32 idx     = *reinterpret_cast<const UInt32*>(H + 0x3934);
+            const UInt8  wrapped = *reinterpret_cast<const UInt8*>(H + 0x3930);
+            gPspEdxRawIdx  = idx;
+            gPspEdxWrapped = wrapped ? 1U : 0U;
+            const UInt32 i = (idx == 0) ? (wrapped ? 31U : 0U) : (idx - 1U);
+            if (i < 32U) {
+                const UInt8* const e = H + 0x3938 + static_cast<size_t>(i) * 0x110;
+
+                gPspEdxEv  = *reinterpret_cast<const UInt32*>(e + 0);
+                gPspEdxSev = *reinterpret_cast<const UInt32*>(e + 4);
+                gPspEdxVal = *reinterpret_cast<const UInt64*>(e + 8);
+                gPspEdxSkip = 0;                               // 读到
+            } else {
+                gPspEdxSkip = 1;                               // i >= 32（idx 异常）
+            }
         }
     }
     return ret;
