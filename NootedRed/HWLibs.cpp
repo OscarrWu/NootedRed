@@ -590,6 +590,12 @@ static UInt32 gPspStateN  = 0;   // 已输出行数（≤2）
 // 批次 SOS 采样（R-SOS采样 §2）：`h` 在 `wrapPspRingCreate` 入口保存（~18 s），20/27/32 s 各采一次。
 static void*  gPspCtx     = nullptr;   // PSP 上下文（首次 ring create 时保存；带 KPtr 失效保护）
 static UInt32 gPspSampleN = 0;         // 采样行计数（≤3；独立于 `gPspStateN`）
+// 批次 pspring（G3 §C，`-NRedPspRing`，默认关）：PSP 事件环**全量** dump（32 条）。
+//  为什么：`[pspedx]` 只带最后一条，无法判断"何时死、死前有哪些事件"。
+//  ⚠ 纯内存（只走 `nredTraceLine`，不刷盘、不 panic）；关态零读零输出。
+//  ⚠ 限流：每次 ring create ≤1 次（块本身不在循环内）；全程 ≤2 次（`gPspRingDumps`）。
+static bool     gPspRingOn    = false;   // `-NRedPspRing`
+static unsigned gPspRingDumps = 0;       // 全程 dump 次数（≤2）
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3584,6 +3590,37 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
                                       static_cast<unsigned>(gPspEdxSev));
             if (nPsp > 0) { nredTraceLine(pspLine, nPsp); }
         }
+    }
+    // 批次 pspring（G3 §C）：PSP 事件环全量 dump（32 条），纯内存、零 MMIO。
+    //  为什么：`[pspedx]` 只带最后一条，无法判断"何时死、死前有哪些事件"。
+    //  ⚠ 纯内存（`nredTraceLine` 不刷盘）⇒ 深栈安全；`static` 缓冲不占栈。
+    //  ⚠ 限流：每次 ring create 最多 dump 一次，全程最多 2 次（`gPspRingDumps`）。
+    //  ⚠ 关态（`-NRedPspRing` 未带）⇒ 不读、不输出。
+    if (gPspRingOn && gPspRingDumps < 2 && nredKernelPtrOk(h)) {
+        ++gPspRingDumps;
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt32 idx = *reinterpret_cast<const UInt32*>(H + 0x3934);
+        const UInt8  wrapped = *reinterpret_cast<const UInt8*>(H + 0x3930);
+        const UInt32 n = wrapped ? 32U : ((idx > 32U) ? 32U : idx);
+        const UInt32 first = wrapped ? (idx % 32U) : 0U;
+        static char ringLine[128];
+        for (UInt32 k = 0; k < n; ++k) {
+            const UInt32 i = (first + k) % 32U;          // 从最旧到最新
+            const UInt8* const e = H + 0x3938 + static_cast<size_t>(i) * 0x110;
+            const int nr = snprintf(ringLine, sizeof(ringLine),
+                                    "[pspring] i=%u ev=%x sev=%u code=%llx\n",
+                                    static_cast<unsigned>(i),
+                                    static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 0)),
+                                    static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 4)),
+                                    static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(e + 8)));
+            if (nr > 0) { nredTraceLine(ringLine, nr); }
+        }
+        const int ne = snprintf(ringLine, sizeof(ringLine),
+                                "[pspring] end n=%u wrap=%u idx=%u\n",
+                                static_cast<unsigned>(n),
+                                static_cast<unsigned>(wrapped ? 1U : 0U),
+                                static_cast<unsigned>(idx));
+        if (ne > 0) { nredTraceLine(ringLine, ne); }
     }
     return ret;
 }
@@ -9114,6 +9151,11 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSmu20On = nredExactBootArg("-NRedSmu20");
     // 批次 PSP-edx（**默认关**）：苹果 PSP 事件环只读探针（hook `0x4cb8a`）。精确 token。
     gPspEdxOn = nredExactBootArg("-NRedPspEdx");
+    // 批次 pspring（**默认关**）：PSP 事件环全量 dump（32 条）。精确 token，与相邻行同款。
+    //  ⚠ 任务卡给的是 `PE_parse_boot_argn("-NRedPspRing", nullptr, 0)`；此处改用
+    //    `nredExactBootArg` —— 同一位置既有约定（见上一行），且 `PE_parse_boot_argn` 是
+    //    **前缀匹配**（`-NRedPspRingXxx` 会误开），与"精确 token"纪律冲突。已上报。
+    gPspRingOn = nredExactBootArg("-NRedPspRing");
     // 批次 C3（**默认关**）：平台自检模式（四段标记 + 实际 flush）。精确 token。
     gTraceSelfTest = nredExactBootArg("-NRedTraceSelfTest");
     // 批次 pspstate（**默认关**）：PSP 只读状态（C2PMSG_81／C2PMSG_64）。精确 token。
