@@ -2155,7 +2155,7 @@ static int nredFailResetWrite(const char* const stage)
     char path[64];
     const int pn = snprintf(path, sizeof(path), "/var/log/NRedFailReset-%u-%s.txt",
                             static_cast<unsigned>(gFrSeq), stage);
-    if (pn <= 0) { return -1; }
+    if (pn <= 0 || pn >= static_cast<int>(sizeof(path))) { return -1; }
     char line[192];
     const int n = snprintf(line, sizeof(line),
         "failreset seq=%u stage=%s where=%s code=%d a=%llx b=%llx ctx=%u flush=%d rc=%d sec=%u\n",
@@ -2163,7 +2163,9 @@ static int nredFailResetWrite(const char* const stage)
         static_cast<unsigned long long>(gFrA), static_cast<unsigned long long>(gFrB),
         static_cast<unsigned>(gFrCtx), gFrFlush, gFrRet,
         static_cast<unsigned>(gFrTickSec));
-    if (n <= 0) { return -1; }
+    //  ⚠ snprintf 返回**应写长度**（截断时仍返回完整长度）⇒ 必须挡掉 >= sizeof(line)，
+    //    否则 writeBufferToFile 会读越界（B94 同类问题）。
+    if (n <= 0 || n >= static_cast<int>(sizeof(line))) { return -1; }
     nredTraceTruncateFile(path);
     return FileIO::writeBufferToFile(path, line, static_cast<size_t>(n));
 }
