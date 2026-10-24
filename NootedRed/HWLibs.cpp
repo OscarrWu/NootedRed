@@ -587,6 +587,9 @@ static bool gTraceSelfTest = false;
 //  ⚠ 关态零读、零输出；单次读、无循环、无写。
 static bool   gPspStateOn = false;
 static UInt32 gPspStateN  = 0;   // 已输出行数（≤2）
+// 批次 SOS 采样（R-SOS采样 §2）：`h` 在 `wrapPspRingCreate` 入口保存（~18 s），20/27/32 s 各采一次。
+static void*  gPspCtx     = nullptr;   // PSP 上下文（首次 ring create 时保存；带 KPtr 失效保护）
+static UInt32 gPspSampleN = 0;         // 采样行计数（≤3；独立于 `gPspStateN`）
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -1770,6 +1773,8 @@ static void nredMesBStamp(char* const body, size_t& off, const size_t cap)
 //  动机：头部读数（`[p6]`／`[st1r]`／`[r1]`／`[p2b]`）只在"有环行要写"时才被带出去 ⇒
 //  环空时头部读数永远落不了盘（A 轮唯一新鲜片 sec=20 早于 sw init 1–2 s 即此机制）。
 //  ⚠ `force` **不**放宽 `rootvnode` 判据（落盘前提）；也不改任何既有落盘时点/频率/正文格式。
+// 批次 SOS 采样：定义在文件后部（依赖 `pspStateEmit` 的读路径）⇒ 此处前置声明。
+static void pspStateSample(UInt32 t);
 static int nredTraceFlushImpl(const int secTag, const bool force)
 {
     if (rootvnode == nullptr) { return 0; }              // 落盘前提（force 也不放宽）
@@ -1876,6 +1881,12 @@ static int nredTraceFlushImpl(const int secTag, const bool force)
                                   static_cast<unsigned>(gPspEdxEv),
                                   static_cast<unsigned>(gPspEdxSev));
         if (nPsp > 0) { off += (static_cast<size_t>(nPsp) < capPsp) ? static_cast<size_t>(nPsp) : capPsp; }
+    }
+    // 批次 SOS 采样（R-SOS采样 §1）：复用周期 flush 的 `secTag`，在 20/27/32 s 各读一次 C2PMSG_81。
+    //  ⚠ 采样行经 `nredTraceLine` 进环；本函数的环遍历在头部区**之后** ⇒ 同一拍必带出。
+    //  ⚠ 关态（`-NRedPspState` 未带）⇒ 不读、不输出。
+    if (gPspStateOn && (secTag == 20 || secTag == 27 || secTag == 32)) {
+        pspStateSample(static_cast<UInt32>(secTag));
     }
     // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
     //  ab＝allocB 返回值（由既有 wrapTtlAllocB 写入）；n＝`0x929ac` 调用总计数；
@@ -3512,6 +3523,9 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     //  为什么需要：`0x4c05b` 全库有 **30 处**调用（通用 poll 助手），不限域会让 2 行配额
     //  被无关调用吃掉 ⇒ 看不到 PSP ring create 路径上的真实读数。
     gPspInRingCreate = true;
+    // 批次 SOS 采样（R-SOS采样 §2.1）：入口保存 `h`（首次调用 ~18 s），供 20/27/32 s 采样使用。
+    //  ⚠ 关态（`-NRedPspState` 未带）⇒ 不保存。
+    if (gPspStateOn && gPspCtx == nullptr && nredKernelPtrOk(h)) { gPspCtx = h; }
     gPspSubFlushed = false;   // 批次 S4：每轮 ring create 只允许失败点强制 flush 一次
     const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
     gPspInRingCreate = false;
@@ -3607,6 +3621,42 @@ static void pspStateEmit(void* const h, const char* const where)
     if (nSt > 0) { nredTraceLine(stLine, nSt); }
 }
 
+
+// 批次 SOS 采样（R-SOS采样 §3）：在 20/27/32 s 各读一次 `C2PMSG_81`，定位 SOS 死亡窗口。
+//  ⚠ 复用 `pspStateEmit` 的读路径（`*(*(h+8)+64)`）；单次读、无循环、无写。
+//  ⚠ 独立计数 `gPspSampleN`（≤3），不与 `pspStateEmit` 的 `gPspStateN`（≤2）共用。
+//  ⚠ 失效保护：`gPspCtx` 非内核指针／接口非法／读回调为空 ⇒ 输出一行 `invalid` 后返回。
+static void pspStateSample(const UInt32 t)
+{
+    if (!gPspStateOn || gPspSampleN >= 3) { return; }
+    static char smLine[96];
+    void* const h = gPspCtx;
+    UInt64 readReg = 0;
+    UInt64 ctx = 0;
+    if (nredKernelPtrOk(h)) {
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
+        if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
+            const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
+            readReg = *reinterpret_cast<const UInt64*>(IF + 64);
+            ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
+        }
+    }
+    ++gPspSampleN;
+    if (readReg == 0) {
+        const int nI = snprintf(smLine, sizeof(smLine), "[pspstate] t=%u invalid\n",
+                                static_cast<unsigned>(t));
+        if (nI > 0) { nredTraceLine(smLine, nI); }
+        return;
+    }
+    using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
+    const auto fn = reinterpret_cast<PspReadReg>(readReg);
+    const UInt32 base  = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(h) + 92);
+    const UInt32 c2p81 = fn(ctx, base + 145U, 75U);   // C2PMSG_81
+    const int nS = snprintf(smLine, sizeof(smLine), "[pspstate] t=%u alive=%x c2p81=%x\n",
+                            static_cast<unsigned>(t), (c2p81 != 0) ? 1U : 0U, c2p81);
+    if (nS > 0) { nredTraceLine(smLine, nS); }
+}
 static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const int ret, const UInt64 us)
 {
     if (ret != 0) {
