@@ -3559,34 +3559,6 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
             if (nPsp > 0) { nredTraceLine(pspLine, nPsp); }
         }
     }
-    // 批次 pspstate（`-NRedPspState`，默认关）：PSP 只读状态——区分"活着但未 ready"与"没起来"。
-    //  路径＝苹果自己的读回调 `*(*(h+8)+64)`，签名 `(ctx, reg, timeout)`，`ctx = *(*(h+8)+8)`；
-    //  索引＝`base + 128`（C2PMSG_64）／`base + 145`（C2PMSG_81），`base = *(u32*)(h+92)`。
-    //  ⚠ **单次读、无循环、无写**；不新增裸 SMN 探针（复用苹果路径）。
-    //  ⚠ 关态：不读、不输出。限流 ≤2 行。
-    if (gPspStateOn && ret != 0 && gPspStateN < 2 && nredKernelPtrOk(h)) {
-        const UInt8* const H = static_cast<const UInt8*>(h);
-        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
-        if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
-            const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
-            const UInt64 readReg = *reinterpret_cast<const UInt64*>(IF + 64);
-            const UInt64 ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
-            if (readReg != 0) {
-                using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
-                const auto fn = reinterpret_cast<PspReadReg>(readReg);
-                const UInt32 base  = *reinterpret_cast<const UInt32*>(H + 92);
-                const UInt32 c2p64 = fn(ctx, base + 128U, 75U);   // C2PMSG_64
-                const UInt32 c2p81 = fn(ctx, base + 145U, 75U);   // C2PMSG_81
-                ++gPspStateN;
-                static char stLine[96];
-                const int nSt = snprintf(stLine, sizeof(stLine),
-                                         "[pspstate] alive=%x ready=%x c2p81=%x c2p64=%x\n",
-                                         (c2p81 != 0) ? 1U : 0U,
-                                         ((c2p64 & 0x80000000U) != 0) ? 1U : 0U, c2p81, c2p64);
-                if (nSt > 0) { nredTraceLine(stLine, nSt); }
-            }
-        }
-    }
     return ret;
 }
 
@@ -3606,13 +3578,44 @@ static void pspSubLine(const char* const fn, const UInt32 n, const int ret, cons
 
 // 批次 pspsub：**失败必写**——`ret != 0` 时不受"每函数 2 行"配额限制（改用总上限 8）。
 //  为什么：失败是判读重点；若配额已被早期成功调用吃掉，失败行就永远看不到。
-static void pspSubEmit(const char* const fn, UInt32& perFn, const int ret, const UInt64 us)
+// 批次 pspstate v2（R-PSP只读状态-v2 §2.2）：PSP 只读状态（C2PMSG_81／C2PMSG_64）。
+//  ⚠ 位置：由 `pspSubEmit` 在 `ret != 0` 分支内、`dumpNowForce()` **之前**调用
+//     ⇒ force 片必然同时含 `[pspsub]` 与 `[pspstate]`（v1 的读在 flush 之后，force 片不含它）。
+//  ⚠ 单次读、无循环、无写；三重指针保护；关态零读零输出。
+static void pspStateEmit(void* const h, const char* const where)
+{
+    if (!gPspStateOn || gPspStateN >= 2) { return; }
+    if (!nredKernelPtrOk(h)) { return; }
+    const UInt8* const H = static_cast<const UInt8*>(h);
+    const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(iface))) { return; }
+    const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
+    const UInt64 readReg = *reinterpret_cast<const UInt64*>(IF + 64);
+    const UInt64 ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
+    if (readReg == 0) { return; }
+    using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
+    const auto fn = reinterpret_cast<PspReadReg>(readReg);
+    const UInt32 base  = *reinterpret_cast<const UInt32*>(H + 92);
+    const UInt32 c2p64 = fn(ctx, base + 128U, 75U);   // C2PMSG_64
+    const UInt32 c2p81 = fn(ctx, base + 145U, 75U);   // C2PMSG_81
+    ++gPspStateN;
+    static char stLine[128];
+    const int nSt = snprintf(stLine, sizeof(stLine),
+                             "[pspstate] where=%s alive=%x ready=%x c2p81=%x c2p64=%x\n",
+                             where, (c2p81 != 0) ? 1U : 0U,
+                             ((c2p64 & 0x80000000U) != 0) ? 1U : 0U, c2p81, c2p64);
+    if (nSt > 0) { nredTraceLine(stLine, nSt); }
+}
+
+static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const int ret, const UInt64 us)
 {
     if (ret != 0) {
         if (gPspSubFailN < 8) {
             ++gPspSubFailN;
             pspSubLine(fn, gPspSubFailN, ret, us);
         }
+        // 批次 pspstate v2：**先读状态并写行**，再 flush ⇒ force 片必含两行。
+        pspStateEmit(h, fn);
         // 批次 S4（观测装置一次性方案 §3）：**首次**非 0 返回 ⇒ 立即强制 flush。
         //  ⚠ 顺序：先写环行（上面），再 flush ⇒ 新片必含该行。
         //  ⚠ 每轮 ring create 只 flush 一次（`wrapPspRingCreate` 入口重置）。
@@ -3650,7 +3653,7 @@ static int wrapPspSub4ccae(void* const h, const UInt32 a, const UInt32 b)
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub4ccae, gOrgPspSub4ccae)(h, a, b);
     if (gPspEdxOn && gPspInRingCreate) {
-        pspSubEmit("4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000);
+        pspSubEmit(h, "4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
 }
@@ -3662,7 +3665,9 @@ static int wrapPspSub4c05b(void* const a, void* const cb, void* const desc, cons
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub4c05b, gOrgPspSub4c05b)(a, cb, desc, timeoutUs);
     if (gPspEdxOn && gPspInRingCreate) {
-        pspSubEmit("4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000);
+        // `4c05b` 的 `h` 在 `desc+0`（反汇编 `0x56e9a` 的 `movq %r15,(%rdx)`）。
+        pspSubEmit(desc != nullptr ? *reinterpret_cast<void* const*>(desc) : nullptr,
+                   "4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
 }
@@ -3674,7 +3679,7 @@ static int wrapPspSub56fff(void* const h, const UInt32 type)
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub56fff, gOrgPspSub56fff)(h, type);
     if (gPspEdxOn && gPspInRingCreate) {
-        pspSubEmit("56fff", gPspSub56fff, ret, (mach_absolute_time() - t0) / 1000);
+        pspSubEmit(h, "56fff", gPspSub56fff, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
 }
