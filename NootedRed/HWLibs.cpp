@@ -314,6 +314,20 @@ static UInt32 gR0Blk  = 0;       // 1=信息块已读（sz>=0x50）
 static UInt32 gR0Qp   = 0;       // 1=Q′ 已到第 14 步（t0/d10 有值）
 static UInt32 gR0T0   = 0;       // clk+0x20（type[0]）
 static UInt32 gR0D10  = 0;       // desc+0x10
+// ─── 批次 R1：provider 层构造（`-NRedR1`／`-NRedR2`，默认全关）──────────────────────────
+//  目的：按苹果布局造 0x600 B 的 e88 对象、装 +0x528/+0x570 两个方法、准备 desc 27 指针。
+//  ⚠ 时序：create 在 stage0（本批），init（clk 派生字段/+0x210/aperture 表）在叶第 13 步（R2）。
+//  ⚠ 零 MMIO、零写苹果对象；只写我方新分配的对象。
+static bool   gR1On    = false;   // `-NRedR1`（默认关）
+static bool   gR2On    = false;   // `-NRedR2`（默认关；仅参与就绪判定）
+static UInt32 gR1Ready = 0;       // 1=就绪判定全真（R1 恒 0）
+static UInt64 gR1Obj   = 0;       // e88 地址
+static UInt64 gR1M528  = 0;       // *(e88+0x528)
+static UInt64 gR1M570  = 0;       // *(e88+0x570)
+static UInt64 gR1A210  = 0;       // *(e88+0x210)
+static UInt32 gR1Tbl   = 0;       // *(u32*)(e88+0x108)（aperture 表项数）
+static UInt32 gR1Sc    = 0;       // 27 指针自检结果（1=通过）
+static UInt32 gP6ObjSize[4] = {0,0,0,0};   // 每个对象的**实际分配尺寸**（释放用；0=未知）
 // ─── 批次 P7：golden 表有界性只读探针（`-NRedP7Probe`，默认关）──────────────────────────
 //  数据链：ctx→P5→clone→T→pair→device→p→q→r→s→t→recs（逐级 KPtr）。
 //  遍历：复刻 0x18f7c 的 recs 遍历；0x1a99e 只做算术，不 deref 结果地址。
@@ -1218,6 +1232,23 @@ static void nredR0Stamp(char* const body, size_t& off, const size_t cap)
     if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
                  off += d; room -= d; }
 }
+// 批次 R1：provider 层构造读数（仅 -NRedR1；关态一字不变）。单行 ≤191 B。
+__attribute__((noinline))
+static void nredR1Stamp(char* const body, size_t& off, const size_t cap)
+{
+    size_t room = cap;
+    int n = snprintf(body + off, room,
+                     "[r1] obj=%llx sz=%x m528=%llx m570=%llx a210=%llx tbl=%u sc=%u ready=%u\n",
+                     static_cast<unsigned long long>(gR1Obj),
+                     static_cast<unsigned>(gP6ObjSize[1]),
+                     static_cast<unsigned long long>(gR1M528),
+                     static_cast<unsigned long long>(gR1M570),
+                     static_cast<unsigned long long>(gR1A210),
+                     static_cast<unsigned>(gR1Tbl), static_cast<unsigned>(gR1Sc),
+                     static_cast<unsigned>(gR1Ready));
+    if (n > 0) { const size_t d = (static_cast<size_t>(n) < room) ? static_cast<size_t>(n) : room;
+                 off += d; room -= d; }
+}
 // 批次 P5：E3 定因探针读数（仅 -NRedE3Probe；关态一字不变）
 __attribute__((noinline))
 static void nredE3Stamp(char* const body, size_t& off, const size_t cap)
@@ -1637,6 +1668,8 @@ int nredTraceFlush(int secTag)
     //  **为什么放头部区**：环正文区受 4096 B 硬上限"保头丢尾"约束 ⇒ 判别读数必须落头部区才每片必现。
     //  ⚠ 只读：只读 `gR0*` 标量（由护栏／Q′ 钩子写入），本处**零解引用**、零 SYSLOG、零 panic 文本。
     if (gR0On && off < sizeof(body)) { nredR0Stamp(body, off, sizeof(body) - off); }
+    // 批次 R1：provider 层构造读数（仅 -NRedR1；关态一字不变）。放头部区 ⇒ 每片必现。
+    if (gR1On && off < sizeof(body)) { nredR1Stamp(body, off, sizeof(body) - off); }
     // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
     //  ab＝allocB 返回值（由既有 wrapTtlAllocB 写入）；n＝`0x929ac` 调用总计数；
     //  k=RA/sub/al＝第 k 次调用的三值（三槽按到达顺序、不覆盖；第 4 次起只计数）。
@@ -4851,6 +4884,106 @@ static UInt8 gGvmHandleReq[kGvmHandleBytes];
 //  ⚠ Mode A 必须经 0x19158 查 handler（布局随键变）；不得硬编码某个 handler。
 //  ⚠ 第 2 实参传 `info`（＝苹果 0x191dc 链的同一实参，见 `1ddb9 movq %rbx,%rsi`）；
 //     实施文档 §3 的片段写作 `clone+8`，与 §4 的"与 0x191dc 同参"矛盾 —— 以反汇编为准。
+// ─── 批次 R1：e88 真实对象（0x600 B）────────────────────────────────────────────────────
+//  布局依据（【反汇编·确凿】kc `0x4d8301c` create／`0x4d830e6` init／`0x4d82ec6` 方法表）：
+//    +0x00 clone；+0x08 key；+0x0C 位域（clk+4，第 13 步填）；+0x10 信息块（本批 0）；
+//    +0x18..+0x40 clk 拷贝（第 13 步）；+0x48 aperture 表（n×0x18）；+0x108 表项数；
+//    +0x10C/+0x110 clk 拷贝（第 13 步）；+0x118 标志；+0x1E8 kind==2 的 base；
+//    +0x210 aperture 尺寸（第 13 步）；+0x510 0；+0x518..+0x5E8 方法表。
+static const UInt32 kNRedR1ObjBytes = 0x600;
+
+// +0x528：按 kind 查 aperture 描述符（逐字复刻 kc `0x4d82dc0` + `0x4d82d59`）
+static SInt32 nredR1ApertureQuery(void* const obj, const void* const in, void* const out)
+{
+    if (!nredKernelPtrOk(obj) || !nredKernelPtrOk(in) || !nredKernelPtrOk(out)) { return 1; }
+    const UInt8* const o = static_cast<const UInt8*>(obj);
+    const UInt32 kind = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(in) + 4);
+    const UInt32 n = *reinterpret_cast<const UInt32*>(o + 0x108);
+    if (n == 0 || n > 8) { return 1; }   // 上界：表区 0x48..0x108 最多 8 项；>8 视为损坏
+    for (UInt32 i = 0; i < n; ++i) {
+        const UInt8* const e = o + 0x48 + i * 0x18;
+        if (*reinterpret_cast<const UInt32*>(e) != kind) { continue; }
+        const UInt64 base = *reinterpret_cast<const UInt64*>(e + 0x08);
+        if (base == 0) { continue; }
+        const UInt64 size = *reinterpret_cast<const UInt64*>(e + 0x10);
+        const UInt64 b = (kind == 2) ? *reinterpret_cast<const UInt64*>(o + 0x1E8) : base;
+        UInt8* const p = static_cast<UInt8*>(out);
+        *reinterpret_cast<UInt32*>(p + 0x04) = kind;
+        *reinterpret_cast<UInt64*>(p + 0x10) = size;
+        *reinterpret_cast<UInt64*>(p + 0x08) = b;
+        return 0;
+    }
+    return 1;
+}
+
+// +0x570：页/块尺寸常量（逐字复刻 kc `0x4d848f8`）
+static SInt32 nredR1PageSizes(void* const obj, void* const in)
+{
+    (void)obj;
+    if (!nredKernelPtrOk(in)) { return 1; }
+    UInt8* const p = static_cast<UInt8*>(in);
+    *reinterpret_cast<UInt32*>(p + 0x04) = 0x200000U;   // 2 MB 块
+    *reinterpret_cast<UInt32*>(p + 0x08) = 0x1000U;     // 4 KB 页
+    *reinterpret_cast<UInt32*>(p + 0x0C) = 0x200000U;   // 2 MB
+    return 0;
+}
+
+// 27 个苹果真实薄壳（macho VMA；运行时加 gHwlibsSlide）
+static const UInt32 kNRedR1Shims[27] = {
+    0x195FB, 0x1965C, 0x19686, 0x196A4, 0x196C2, 0x196E0, 0x196FE, 0x1971C, 0x19778,
+    0x197EE, 0x1980C, 0x1982A, 0x19848, 0x1986E, 0x19889, 0x198A4, 0x198C2, 0x198DD,
+    0x198F8, 0x19913, 0x19929, 0x1993F, 0x199AC, 0x199C2, 0x199FB, 0x19A23, 0x19A40
+};
+
+// desc 填充：+0x10 = *(u32*)H；+0xf0..+0x1c0 = 27 个薄壳（仅 R2 调用；R1 只自检）
+static bool nredR1FillDesc(void* const H, void* const desc)
+{
+    if (!nredKernelPtrOk(H) || !nredKernelPtrOk(desc) || gHwlibsSlide == 0) { return false; }
+    UInt8* const d = static_cast<UInt8*>(desc);
+    *reinterpret_cast<UInt32*>(d + 0x10) = *reinterpret_cast<const UInt32*>(H);
+    for (unsigned k = 0; k < 27; ++k) {
+        *reinterpret_cast<UInt64*>(d + 0xF0 + k * 8) =
+            static_cast<UInt64>(gHwlibsSlide) + kNRedR1Shims[k];
+    }
+    return true;
+}
+
+// 自检：27 个地址必须落在本 kext 的 __TEXT（0x475000）内且为内核指针；
+//   并对本地 0x1c8 缓冲跑一遍填充器，核对 27 个槽与 desc+0x10（不触碰叶的 desc）。
+//   ⚠ 不校验 0x55 入口：部分薄壳以 `testq %rdi,%rdi`（48 85 ff）开头
+static bool nredR1SelfCheck(void)
+{
+    if (gHwlibsSlide == 0) { return false; }
+    for (unsigned k = 0; k < 27; ++k) {
+        if (kNRedR1Shims[k] >= 0x475000U) { return false; }
+        const UInt64 p = static_cast<UInt64>(gHwlibsSlide) + kNRedR1Shims[k];
+        if (!nredKernelPtrOk(reinterpret_cast<const void*>(p))) { return false; }
+    }
+    alignas(8) UInt8 buf[0x1C8] = {0};
+    UInt32 hWord = 0x5A5A5A5AU;   // 假 H 的首 dword：只用于验证 +0x10 的拷贝路径
+    if (!nredR1FillDesc(&hWord, buf)) { return false; }
+    if (*reinterpret_cast<const UInt32*>(buf + 0x10) != hWord) { return false; }
+    for (unsigned k = 0; k < 27; ++k) {
+        if (*reinterpret_cast<const UInt64*>(buf + 0xF0 + k * 8) !=
+            static_cast<UInt64>(gHwlibsSlide) + kNRedR1Shims[k]) { return false; }
+    }
+    return true;
+}
+
+// 构造：只填 create 阶段的字段（clone/key/+0x510）与方法表；其余留 0（第 13 步再填）
+static bool nredR1InitE88(void* const obj, void* const clone, const UInt32 key)
+{
+    if (!nredKernelPtrOk(obj) || !nredKernelPtrOk(clone)) { return false; }
+    UInt8* const o = static_cast<UInt8*>(obj);
+    __builtin_memset(o, 0, kNRedR1ObjBytes);
+    *reinterpret_cast<UInt64*>(o + 0x00) = reinterpret_cast<UInt64>(clone);
+    *reinterpret_cast<UInt32*>(o + 0x08) = key;
+    *reinterpret_cast<UInt64*>(o + 0x510) = 0;
+    *reinterpret_cast<UInt64*>(o + 0x528) = reinterpret_cast<UInt64>(&nredR1ApertureQuery);
+    *reinterpret_cast<UInt64*>(o + 0x570) = reinterpret_cast<UInt64>(&nredR1PageSizes);
+    return true;
+}
+
 static bool nredP6BuildFourObjects(void* const clone, void* const info)
 {
     if (!nredKernelPtrOk(clone) || gHwlibsSlide == 0) { gP6Code = 4; return false; }
@@ -4893,6 +5026,21 @@ static bool nredP6BuildFourObjects(void* const clone, void* const info)
             const UInt64 rc = create(clone, info, outBuf, &keyBuf);
             if (rc != 0) { gP6Code = 4; return false; }
             gP6Mode[i] = 1;
+            gP6ObjSize[i] = 0;                    // Mode A：尺寸未知（不按常量释放）
+        } else if (gR1On && s.fieldOff == 0xE88) {
+            // 批次 R1：e88 用真实 0x600 对象（不是 0x88 壳）。
+            //  自检先做（只查 27 个薄壳地址＋本地缓冲填充），失败则不分配、不装对象。
+            gR1Sc = nredR1SelfCheck() ? 1U : 0U;
+            if (gR1Sc == 0) { gP6Code = 4; return false; }
+            void* A = nullptr;
+            if (getOrCreate(clone, kNRedR1ObjBytes, 1, &A) != 0 || !nredKernelPtrOk(A)) {
+                gP6Code = 3; return false;
+            }
+            if (!nredR1InitE88(A, clone, key)) { gP6Code = 4; return false; }
+            *reinterpret_cast<UInt64*>(static_cast<UInt8*>(clone) + s.fieldOff) =
+                reinterpret_cast<UInt64>(A);
+            gP6Mode[i] = 2;                       // 2 = R1 真实对象
+            gP6ObjSize[i] = kNRedR1ObjBytes;
         } else {
             // Mode B：苹果没有该键的 handler ⇒ 通用壳（真实分配＋真实键，不猜布局）
             void* A = nullptr;
@@ -4905,6 +5053,7 @@ static bool nredP6BuildFourObjects(void* const clone, void* const info)
             *reinterpret_cast<UInt64*>(static_cast<UInt8*>(clone) + s.fieldOff) =
                 reinterpret_cast<UInt64>(A);
             gP6Mode[i] = 0;
+            gP6ObjSize[i] = kP6GenericShellBytes; // Mode B：0x88 壳
         }
         // 3. 校验字段非 0
         const UInt64 obj = *reinterpret_cast<const UInt64*>(static_cast<const UInt8*>(clone) + s.fieldOff);
@@ -4936,9 +5085,12 @@ static void nredP6FreeBuilt(void* const clone)
         if (h != 0) {
             reinterpret_cast<P6Destroy>(h)(clone);          // 苹果 destroy：先 B 后 A
         } else {
-            freeFn(clone, A, kP6GenericShellBytes);         // Mode B：直接释放通用壳
+            // 尺寸必须按对象记账：0x88 壳与 0x600 真实对象不能混用同一常量
+            const UInt64 sz = (gP6ObjSize[i] != 0) ? gP6ObjSize[i] : kP6GenericShellBytes;
+            freeFn(clone, A, sz);
         }
         *reinterpret_cast<UInt64*>(slot) = 0;
+        gP6ObjSize[i] = 0;
     }
 }
 
@@ -6487,6 +6639,33 @@ static bool nredStage1Guard5(const void* const ctx)
                         reinterpret_cast<const UInt8*>(gSt1G5P) + 0x108)) & 1U;
             }
         }
+        // 批次 R1：就绪判定（只读；R1 恒假）。全部判据见需求 §3.3。
+        //  ⚠ 越界纪律：只有"我方 0x600 对象"才读 +0x210/+0x528/+0x570；
+        //    P6 的 0x88 壳一律不读（与 R0 同一条纪律）。
+        if (gR1On) {
+            gR1Ready = 0; gR1Obj = 0; gR1M528 = 0; gR1M570 = 0;
+            gR1A210 = 0; gR1Tbl = 0;
+            gR1Obj = e88;
+            if (nredKernelPtrOk(reinterpret_cast<const void*>(e88)) &&
+                gP6Mode[1] == 2 && gP6ObjSize[1] >= kNRedR1ObjBytes) {
+                const UInt8* const e = reinterpret_cast<const UInt8*>(e88);
+                gR1M528 = *reinterpret_cast<const UInt64*>(e + 0x528);
+                gR1M570 = *reinterpret_cast<const UInt64*>(e + 0x570);
+                gR1A210 = *reinterpret_cast<const UInt64*>(e + 0x210);
+                gR1Tbl  = *reinterpret_cast<const UInt32*>(e + 0x108);
+                const bool ok528 = (gR1M528 == reinterpret_cast<UInt64>(&nredR1ApertureQuery));
+                const bool ok570 = (gR1M570 == reinterpret_cast<UInt64>(&nredR1PageSizes));
+                bool okS1 = false;
+                if (nredKernelPtrOk(reinterpret_cast<const void*>(gSt1G5P23))) {
+                    const UInt8* const s1 = reinterpret_cast<const UInt8*>(gSt1G5P23);
+                    okS1 = *reinterpret_cast<const UInt64*>(s1 + 0x258) != 0 &&
+                           *reinterpret_cast<const UInt64*>(s1 + 0x268) != 0 &&
+                           *reinterpret_cast<const UInt64*>(s1 + 0x2B8) != 0;
+                }
+                gR1Ready = (ok528 && ok570 && gR1A210 != 0 && gR1Tbl > 0 &&
+                            okS1 && gR1Sc != 0 && gR2On) ? 1U : 0U;
+            }
+        }
         // 批次 P2／P2-2b：`-NRedQp` 开 ⇒ 第 14 步被截断 ⇒ 0x1aef4/0x1dde1/0x3d1b5
         //   三个分派器**不执行** ⇒ 这三个字段永不被使用 ⇒ 只观测。
         //   （本机是否非空未测：R278 U1；若为 0 而此处仍强制，会白废一轮 Q′。）
@@ -6627,7 +6806,10 @@ static bool nredStage1Guard(const void* const ctx, const UInt32 client)
             //  立即调用 orgMode9440f ⇒ 苹果叶执行 ⇒ 叶内 0x1936e 做真实 MMIO（M1 §2.3）。
             const bool v = nredStage1Guard5(ctx);
             gSt1G5Verdict = v ? 1U : 0U;
-            ok = (gQp && gQpArmed) ? v : false;
+            // 批次 R1：门＝(Q′ 已武装) ∧ (R1 关 或 就绪判定为真)。
+            //  ⚠ R1 恒未就绪（a210=0／表空／R2 未开）⇒ 门不开 ⇒ 叶不跑（安全出口）。
+            const bool gate = (gQp && gQpArmed) && (!gR1On || gR1Ready != 0);
+            ok = gate ? v : false;
             break;
         }
         case 6: ok = nredStage1Guard6(ctx); break;
@@ -8069,6 +8251,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  `-NRedR0ProbeX` 的前缀；若底层解析器做前缀匹配会误开 ⇒ 破坏关态零行为）。
     gR0On          = nredExactBootArg("-NRedR0Probe");
     gR0Deep        = nredExactBootArg("-NRedR0Deep");
+    // 批次 R1（**默认关**）：provider 层构造。精确 token，避免前缀误开。
+    gR1On          = nredExactBootArg("-NRedR1");
+    gR2On          = nredExactBootArg("-NRedR2");
     gP7On          = checkKernelArgument("-NRedP7Probe");   // P7：golden 表有界性（默认关）
     gP8On          = checkKernelArgument("-NRedP8Probe");   // P8：iproot/head 根因（默认关）
     gGvmSwInitPass = checkKernelArgument("-NRedGvmSwInitPass");
@@ -8561,7 +8746,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         // 批次 Q′：route 0x1936e（client5 stage1 叶第 14 步的被调者；函数入口型）。
         //   ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
         //   ⚠ resolveProbe 失败只打一行不 panic（沿用既有纪律）。
-        if (gQp) {
+        // 批次 R1：R1 也需要 hook 在位（R2 才真正调用）；R1 门关 ⇒ hook 不会被调用。
+        if (gQp || gR1On) {
             if (const auto from = resolveProbe("gvm5-init", kQpGvm5InitPattern, nullptr,
                                                arrsize(kQpGvm5InitPattern), 0x1936E)) {
                 if (hookProbe(from, KernelPatcher::RouteRequest{nullptr, wrapQpGvm5Init,
