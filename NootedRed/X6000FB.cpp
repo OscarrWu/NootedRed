@@ -297,9 +297,10 @@ static void nredPPTrace(char* const buf, const int n)
     const size_t len = static_cast<size_t>(n > 767 ? 767 : n);
     // 通道 1：写内核 console（同时也会进 Lilu 日志——但该通道在下述时刻常已饱和）
     SYSLOG("X6000FB", "%s", buf);
-    // 通道 2：立即把 msgbuf 增量落盘（失败静默，不影响流程）
-    // 批次 F1：panic 路径用**强制**刷盘（环空也写一片头部）⇒ `[p6]`／`[st1r]`／`[r1]`／`[p2b]`
-    //  等头部读数不再因"环已空"而丢失（A 轮全零的直接机制，见 R-A轮全零定因 §7.3）。
+
+    // 通道 2：批次 挂起修复起 `dumpNowForce()` 为**零 I/O**（panic/挂起路径禁止写盘，301/310 实测）
+    //  ⇒ 本通道**不再落盘**；读数留在内存环，由下一次正常上下文的 flush 带出。
+    //  （原"环空也写一片头部"的 F1 能力随 force 语义反转一并消失，见交付报告 §7.5。）
     NvMsgBuf::dumpNowForce();
     // 通道 3：直写文件（前两条都失效时的兜底；本时刻 `FileIO` 可能不可用，故仅作冗余）
     if (gPPTraceSafe.shouldWrite(rootvnode != nullptr, static_cast<int>(len))) {
@@ -1306,12 +1307,14 @@ UInt32 X6000FB::wrapPpHelperPowerUp(void* const self)
         SYSLOG("X6000FB", "pp-in: self=%llx gates=%d%d%d%d",
                static_cast<unsigned long long>(gPpHelperSelf),
                wantProbe ? 1 : 0, wantRegister ? 1 : 0, wantAccelProbe ? 1 : 0, wantAccelLog ? 1 : 0);
-        // 批次 F1-安全替代（2026-10-24）：改用**强制**刷盘——环空也写一片头部。
-        //  动机：`[p6]`／`[st1r]`／`[r1]`／`[p2b]` 等头部读数只在"有环行要写"时才被带出去；
-        //  本入口在**正常上下文**（panic 之前）⇒ 零 panic 写盘风险，且时点比 panic 更早。
-        //  ⚠ panic 路径的 `nredPPTrace` 仍用 `dumpNowForce()` 作兜底（F1 保留）。
-        NvMsgBuf::dumpNowForce();
-        // A-28：刷盘已并入 `dumpNowForce()` 的 stBusy 保护区（见 NvMsgBuf.hpp），
+        // 批次 F1-安全替代（2026-10-24）：本入口在**正常上下文**（panic 之前）⇒ 提前把读数落盘。
+        //  动机：`[p6]`／`[st1r]`／`[r1]`／`[p2b]` 等头部读数只在"有环行要写"时才被带出去。
+        //  批次 挂起修复（2026-10-25）：`dumpNowForce()` 语义已反转为**零 I/O**（panic 路径专用）
+        //  ⇒ 本处（正常上下文、目的是落盘）改用**非 force** 入口 `dumpNow()`。
+        //  ⚠ 代价：F1 的"环空也写一片头部"能力随 force 语义反转一并消失（环空时本处不落盘）。
+        //    已在交付报告 §7.5 上报，待上级裁决是否补一个"正常上下文专用"的头部入口。
+        NvMsgBuf::dumpNow();
+        // A-28：刷盘已并入 `dumpNow()` 的 stBusy 保护区（见 NvMsgBuf.hpp），
         //  此处**不再**单独调用（避免与 L2 周期拍并发写同一卷）。
     }
 

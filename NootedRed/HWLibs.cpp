@@ -9591,7 +9591,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
-        //  四段标记 + 实际调用 `dumpNow()`／`dumpNowForce()`，验证"环→flush→落盘"整条链。
+        //  四段标记 + 实际调用 `dumpNow()`／`dumpNowForce()`。
+        //  批次 挂起修复起：`dumpNow()` 验证"环→flush→落盘"；`dumpNowForce()` 验证**零 I/O**
+        //  （其 `stage=force` 行留在环里，由下一次周期 flush 带出 ⇒ 仍可在盘上看到，只是延后）。
         //  ⚠ 独立于 `-NRedPspEdx`；不触发 panic；关态零输出、零额外 flush。
         if (gTraceSelfTest) {
             static char stLine[64];
