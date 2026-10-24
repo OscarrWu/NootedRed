@@ -575,6 +575,7 @@ static UInt32 gPspSub56fff = 0;
 static mach_vm_address_t gOrgPspSub4ccae = 0;
 static mach_vm_address_t gOrgPspSub4c05b = 0;
 static mach_vm_address_t gOrgPspSub56fff = 0;
+static bool gPspInRingCreate = false;   // 1＝正在 `0x4cb8a` 内（子调用探针的作用域限定）
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3488,7 +3489,12 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         if (gPspEdxOn) { if (gPspEdxEnter < 255) { ++gPspEdxEnter; } gPspEdxSkip = 3; }
         return -1;
     }
+    // 批次 pspedx5：作用域标志——子调用探针只在 `0x4cb8a` 内部生效。
+    //  为什么需要：`0x4c05b` 全库有 **30 处**调用（通用 poll 助手），不限域会让 2 行配额
+    //  被无关调用吃掉 ⇒ 看不到 PSP ring create 路径上的真实读数。
+    gPspInRingCreate = true;
     const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
+    gPspInRingCreate = false;
     if (gPspEdxOn) {
         // 方案 A：**入口无条件计数**（不受 `ret != 0` 限制）⇒ 区分"未触发"与"触发但未读"。
         if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
@@ -3556,7 +3562,7 @@ static int wrapPspSub4ccae(void* const h, const UInt32 a, const UInt32 b)
     if (gOrgPspSub4ccae == 0) { return -1; }
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub4ccae, gOrgPspSub4ccae)(h, a, b);
-    if (gPspEdxOn && gPspSub4ccae < 2) {
+    if (gPspEdxOn && gPspInRingCreate && gPspSub4ccae < 2) {
         ++gPspSub4ccae;
         pspSubLine("4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000);
     }
@@ -3569,7 +3575,7 @@ static int wrapPspSub4c05b(void* const a, void* const cb, void* const desc, cons
     if (gOrgPspSub4c05b == 0) { return -1; }
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub4c05b, gOrgPspSub4c05b)(a, cb, desc, timeoutUs);
-    if (gPspEdxOn && gPspSub4c05b < 2) {
+    if (gPspEdxOn && gPspInRingCreate && gPspSub4c05b < 2) {
         ++gPspSub4c05b;
         pspSubLine("4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000);
     }
@@ -3582,7 +3588,7 @@ static int wrapPspSub56fff(void* const h, const UInt32 type)
     if (gOrgPspSub56fff == 0) { return -1; }
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub56fff, gOrgPspSub56fff)(h, type);
-    if (gPspEdxOn && gPspSub56fff < 2) {
+    if (gPspEdxOn && gPspInRingCreate && gPspSub56fff < 2) {
         ++gPspSub56fff;
         pspSubLine("56fff", gPspSub56fff, ret, (mach_absolute_time() - t0) / 1000);
     }
