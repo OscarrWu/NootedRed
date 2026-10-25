@@ -452,6 +452,16 @@ static const UInt8 kPspSub4c05bPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 
                                             0x49, 0x89, 0xF8, 0x48, 0x8D, 0x45, 0xE8, 0x48};
 static const UInt8 kPspSub56fffPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48,
                                             0x83, 0xEC, 0x20, 0x49, 0x89, 0xFE, 0x31, 0xC0};
+// 0x4c664 前 20 B（批次 U8：PSP 寄存器**写**路径；`resolveProbe` 用）。
+//  取自 macho `__text`（VMA 0x4c664，file off 0x4d664）。函数体 `0x4c664`–`0x4c689`。
+//  ⚠ 用 **20 B** 而非 16 B：16 B 前缀在该 macho 内命中 **2 次**（不唯一）；20 B **唯一**（count=1）。
+//  ⚠ 函数入口确认：`0x4c663` = `c3`（上一条 `ret`）⇒ `0x4c664` 是干净入口。
+//  ⚠ 签名 `void(void* h, int base, UInt32 idx, UInt32 value, UInt32 flag)`；
+//    `wcb = *(*(h+8)+0x38)`；`addr = base + *(int*)(h+0x5C + idx*4)`；`ctx = *(*(h+8)+8)`；
+//    `wcb == NULL` ⇒ **静默返回**（`0x4c673 je 0x4c688` → `ret`，不设 `eax`）。
+static const UInt8 kPspSub4c664Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x47, 0x08,
+                                            0x4C, 0x8B, 0x48, 0x38, 0x4D, 0x85, 0xC9, 0x74,
+                                            0x13, 0x89, 0xD2, 0x03};
 
 // 0x4a988 前 15 B（批次 psptmrreuse v2：苹果 PSP selector 分派器；`resolveProbe` 的 expected-offset 校验用）。
 //  取自 macho `__text`（VMA 0x4a988，file off 0x4b988）：55 48 89 e5 41 56 53 48 85 ff 74 36 49 89 fe
@@ -578,9 +588,6 @@ static UInt64 gPspEdxVal = 0;                 // 条目 +8（edx）
 static UInt32 gPspEdxEv  = 0;                 // 条目 +0（事件 ID）
 static UInt32 gPspEdxSev = 0;                 // 条目 +4（严重度）
 static mach_vm_address_t gOrgPspRingCreate = 0;   // `0x4cb8a` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
-// 批次 pspreuse v4（`-NRedPspRingReuse`，默认关）：补跑 `0x4ab34` 的**防重入**标志。
-//  `0x4ab34` 内部会经 `0x4b835` 调 `0x4cb8a`（本 wrapper 的原件）⇒ 若不加锁会无限递归。
-static bool gInRingInit = false;
 // 批次 pspedx5（R-pspedx5判读 §3.2）：PSP ring create 的**子调用级**只读探针。
 //  目的：edx=2 的返回路径有三条（`0x4ccae`×2／`0x4c05b`×2／`0x56fff` 内层）⇒ 用入口/返回/耗时区分。
 //  ⚠ 零写、零寄存器访问、返回值原样透传；只在 `-NRedPspEdx` 开时输出。
@@ -591,6 +598,12 @@ static UInt32 gPspSub56fff = 0;
 static mach_vm_address_t gOrgPspSub4ccae = 0;
 static mach_vm_address_t gOrgPspSub4c05b = 0;
 static mach_vm_address_t gOrgPspSub56fff = 0;
+// 批次 U8：`0x4c664`（PSP 寄存器**写**路径）的只读 hook。
+//  记录 `base`/`idx`/`addr`/`value`/`flag`/`wcb`/`rcb`——`wcb`（`*(iface+0x38)`）是
+//  "写回调是否安装"的唯一判据：为 NULL 时原件**静默空转**，只记 `(base,idx,addr,value)`
+//  会把"没写"误判成"写了"（实施文档 §6.1）。
+static mach_vm_address_t gOrgPspSub4c664 = 0;
+static UInt32 gPspSub4c664 = 0;   // 本函数已输出行数（上限 8：4 个 base × 2 轮）
 static bool gPspInRingCreate = false;   // 1＝正在 `0x4cb8a` 内（子调用探针的作用域限定）
 // 批次 pspsub：**失败行**用独立计数（总上限 8）——失败是判读重点，不能被"每函数 2 行"的配额吃掉。
 static UInt32 gPspSubFailN = 0;
@@ -3587,6 +3600,42 @@ static int wrapPspSelector(void* const h, const UInt32 selector,
 //  ⚠ 每次调用都读（方案 A＋C：不再用 `ret != 0` 过滤）——只写 BSS，不产生环行噪声。
 //  ⚠ 文件作用域 static 而非类成员：`RouteRequest` 的 `org` 是 `mach_vm_address_t*`
 //     ⇒ 文件作用域变量即可，**无需改 `HWLibs.hpp`**。
+// ─── A′（-NRedPspRingReuse）：ring 结构的**真实校验** ────────────────────────────────────
+//  为什么需要：A 方案直接 `return 0` 是"接口约定式"成功——没有证据表明 PSP 认的就是我方 ring。
+//  A′ 改为：读 `C2PMSG_69/70/71`（PSP 侧记录的 ring MC 地址 lo/hi 与大小），
+//  与我方 bringup 建环时写入的值比对；再读 `C2PMSG_64` 的 bit31（PSP 响应位）。
+//  全部相符 ⇒ 有真实校验背书，才允许 `return 0`；任一不符 ⇒ **调原件**（不伪造）。
+//  ⚠ 读走 `fw::RegSinkKernel`（SMN 间接通道，内部已有锁 + 重试），不绕过它直读 BAR5（硬规则 H-1）。
+//  ⚠ 单次读、无循环、无写；`err` 取值见实施文档 §3.1 判据表。
+//  ⚠ 关态零行为：本函数只在 `gPspRingReuse` 为真时被调用。
+static bool nredPspRingVerify(UInt32* const lo, UInt32* const hi,
+                              UInt32* const size, int* const err)
+{
+    *lo = 0; *hi = 0; *size = 0; *err = 0;
+    if (gBringupStep == 0) { *err = 1; return false; }   // bringup 未跑过 ⇒ sink 回调为空
+
+    fw::RegSinkKernel& sink = fw::bringupSink();
+
+    *lo = sink.read(fw::kC2PMSG69);
+    if (sink.lastError() != fw::SmnAccessError::None) { *err = 2; return false; }
+    *hi = sink.read(fw::kC2PMSG70);
+    if (sink.lastError() != fw::SmnAccessError::None) { *err = 3; return false; }
+    *size = sink.read(fw::kC2PMSG71);
+    if (sink.lastError() != fw::SmnAccessError::None) { *err = 4; return false; }
+
+    const UInt64 addr = static_cast<UInt64>(*lo) | (static_cast<UInt64>(*hi) << 32);
+    if (addr != gBringupRingMc) { *err = 5; return false; }
+    if (*size != gBringupRingSize) { *err = 6; return false; }
+
+    // A′-7b：`C2PMSG_64` 的 bit31＝PSP 响应位。只有它为 1 才能证明 PSP 真的处理了 ring create，
+    //  否则 69/70/71 只是"我方写入的值"，不能证明"PSP 接受"。
+    const UInt32 ctrl = sink.read(fw::kC2PMSG64);
+    if (sink.lastError() != fw::SmnAccessError::None) { *err = 7; return false; }
+    if ((ctrl & fw::kMboxTosRespFlag) == 0) { *err = 8; return false; }
+
+    return true;
+}
+
 static int wrapPspRingCreate(void* const h, const UInt32 type)
 {
     if (gOrgPspRingCreate == 0) {
@@ -3594,80 +3643,71 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         if (gPspEdxOn) { if (gPspEdxEnter < 255) { ++gPspEdxEnter; } gPspEdxSkip = 3; }
         return -1;
     }
-    // 批次 pspringreuse（A 方案，-NRedPspRingReuse，默认关）：
-    //   我方 bringup 已建 KM ring（r293 step=12）⇒ 不再调用苹果原件，
-    //   直接把苹果的 KM ring 结构（h+1280）指向我方 ring，并返回 0。
-    //   ⚠ 只对 KM（type==2）生效；UM（type==1）仍走原件。
+    // ─── A′（-NRedPspRingReuse，默认关）：用我方 bringup 建的 KM ring 替代苹果的 ring create ──
+    //  与 A 方案的差别（实施文档 §1.1）：
+    //    · 删 `0x4AB34` 调用（它是 HDCP 初始化，不是 ring 初始化）；
+    //    · 删 `h+1280` 填充（`h+0x500` 是 UM 槽，不是 KM ring 结构）；
+    //    · 新增**真实校验**（`nredPspRingVerify`）＋按真实布局填 `h+0x2C0`＋清零 ring 缓冲。
+    //  ⚠ 只对 KM（type==2）生效；UM（type==1）仍走原件。
     //     （r316 实测：`[pspreuse]` 0 命中而 `[pspsub]` 5 命中 ⇒ 原 `type == 1` 写反。）
-    //   ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
-    //   ⚠ 前置：gBringupStep >= 8（RingCreate）且 gBringupRingMc != 0。
+    //  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
+    //  ⚠ 前置：gBringupStep >= 8（RingCreate）且 gBringupRingMc != 0。
     if (gPspRingReuse && type == 2 && gBringupStep >= 8 && gBringupRingMc != 0
         && nredKernelPtrOk(h)) {
-        // 批次 pspreuse v4（治本，PSP 方案 §6.2）：A 方案原先只填 ring 结构，没跑苹果的
-        //   ring 初始化（`0x4ab34`）⇒ `h+14032`（命令缓冲）等完成路径没建立。
-        //   现在两件事都做：① 补跑 `0x4ab34`；② 填 `h+1280`（给 `0x4cb8a` 的三条路径用）。
-        //   补跑 `0x4ab34`，它依次做：写 `h+0x36B0`=0x4000／`h+0x36B8`=0x1000／`h+0x36C8`=1
-        //   → `0x4c407` 分配（填 `h+0x36C0`／`h+0x36D0`=14032／`h+0x36D8`）
-        //   → `0x4b835`（ring create，内部 `0x4b925: call 0x4d2c4` 提交）
-        //   → `0x4c4bf`（注册）→ 成功则置 `h+0x36A8`=1／`h+0x36E8`=1 → `0x4ca72`（完成路径）。
-        //   ⚠ 防重入：**实测 `0x4b835` 不调 `0x4cb8a`**（`0x4cb8a` 的调用者只有
-        //     `0x49a4b`／`0x49c8e`／`0x4ff84`；`0x4b835` 的调用是外部符号／`0x4d2c4`／`0x4c8a3`）
-        //     ⇒ 本 wrapper 不会被 `0x4ab34` 递归进来。`gInRingInit` 保留为**安全网**，
-        //     不是当前必需的。
-        //   ⚠ 单参数 `(h)`：反汇编 `0x4ab34` 只读 `%rdi`。
-        //   ⚠ 调用时机：先调 `0x4ab34`（①），再填 `h+1280`（②）。
-        if (!gInRingInit) {
-            gInRingInit = true;
-            using RingInitFn = int (*)(void*);
-            int rc = -1;
-            if (gHwlibsSlide != 0) {
-                const auto initFn = reinterpret_cast<RingInitFn>(gHwlibsSlide + 0x4AB34);
-                rc = initFn(h);
+        UInt32 lo = 0, hi = 0, size = 0;
+        int verr = 0;
+        if (!nredPspRingVerify(&lo, &hi, &size, &verr)) {
+            // 校验失败 ⇒ 调原件（不伪造成功）。`err` 取值见实施文档 §3.1 判据表。
+            static char vfLine[160];
+            const int nv = snprintf(vfLine, sizeof(vfLine),
+                                    "[pspreuse] A' verify-failed lo=%x hi=%x size=%x err=%d -> org\n",
+                                    static_cast<unsigned>(lo), static_cast<unsigned>(hi),
+                                    static_cast<unsigned>(size), verr);
+            if (nv > 0) { nredTraceLine(vfLine, nv); }
+        } else {
+            static char okLine[128];
+            const int no = snprintf(okLine, sizeof(okLine),
+                                    "[pspreuse] A' ok lo=%x hi=%x size=%x\n",
+                                    static_cast<unsigned>(lo), static_cast<unsigned>(hi),
+                                    static_cast<unsigned>(size));
+            if (no > 0) { nredTraceLine(okLine, no); }
+
+            // 按真实布局填 `h+0x2C0`（实施文档 §3.3；消费者见 §2.3）
+            UInt8* const H = static_cast<UInt8*>(h);
+            UInt8* const R = H + 0x2C0;
+            *reinterpret_cast<UInt32*>(R + 0x00) = 2;
+            *reinterpret_cast<UInt32*>(R + 0x08) = gBringupRingSize;
+            *reinterpret_cast<UInt32*>(R + 0x0C) = 0;
+            *reinterpret_cast<UInt32*>(R + 0x10) = 0x1000;
+            *reinterpret_cast<UInt64*>(R + 0x18) = gBringupRingMc;
+            *reinterpret_cast<UInt32*>(R + 0x20) = 1;
+            *reinterpret_cast<UInt64*>(R + 0x28) = gBringupRingVa;
+            *reinterpret_cast<UInt64*>(R + 0x30) = 0;
+            for (int i = 0; i < 64; ++i) {
+                *reinterpret_cast<UInt64*>(R + 0x38 + i * 8) = 0;
             }
-            gInRingInit = false;
-            static char initLine[96];
-            const int ni = snprintf(initLine, sizeof(initLine),
-                                    "[pspreuse] ring-init rc=%d\n", rc);
-            if (ni > 0) { nredTraceLine(initLine, ni); }
-        }
-        // ② 填 `h+1280`（A 方案「用我方 ring」的数据）——**只服务 `0x4cb8a` 的三条调用路径**
-        //   （`0x49a4b`／`0x49c8e`／`0x4ff84`）。`0x4ab34` 走 `0x4b835`、不经过 `0x4cb8a`
-        //   ⇒ 它不读这里；但另外三条路径需要，故不能删。
-        UInt8* const H = static_cast<UInt8*>(h);
-        UInt8* const R = H + 1280;                                  // 苹果 KM ring 结构
-        *reinterpret_cast<UInt32*>(R + 0)  = 1;                     // type = KM
-        *reinterpret_cast<UInt64*>(R + 8)  = gBringupRingMc;        // ring 地址（8 B 完整值）
-        *reinterpret_cast<UInt32*>(R + 24) = gBringupRingSize;      // size（4 B）
-        *reinterpret_cast<UInt32*>(R + 28) = static_cast<UInt32>(gBringupRingMc >> 32); // addr hi（4 B）
-        *reinterpret_cast<UInt32*>(R + 32) = gBringupRingWptr;      // wptr
-        *reinterpret_cast<UInt64*>(R + 40) = gBringupRingVa;        // 缓冲虚拟地址
-        *reinterpret_cast<UInt64*>(R + 48) = 0;                     // 语义未解出（U1）
-        for (int i = 0; i < 64; ++i) {                              // +56..+568 清零
-            *reinterpret_cast<UInt64*>(R + 56 + i * 8) = 0;
-        }
-        *reinterpret_cast<UInt64*>(R + 568) = 0;
-        {
-            static char rcLine[128];
-            const int nrc = snprintf(rcLine, sizeof(rcLine),
-                                     "[pspreuse] ring-create h1280=%llx\n",
-                                     static_cast<unsigned long long>(gBringupRingMc));
-            if (nrc > 0) { nredTraceLine(rcLine, nrc); }
-        }
-        if (gPspEdxOn) {
-            if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
-            gPspEdxRet = 0;
-            gPspEdxSkip = 0;
-            static char reuseLine[128];
-            const int nr = snprintf(reuseLine, sizeof(reuseLine),
-                                    "[pspreuse] step=%u mc=%llx size=%x wptr=%u va=%llx\n",
-                                    static_cast<unsigned>(gBringupStep),
-                                    static_cast<unsigned long long>(gBringupRingMc),
+            *reinterpret_cast<UInt64*>(R + 0x238) = 0;
+
+            // 清零 ring 缓冲（PSP 从 wptr=0 开始读；不清会读到上一轮的残留帧）
+            if (nredKernelPtrOk(reinterpret_cast<const void*>(gBringupRingVa))) {
+                memset(reinterpret_cast<void*>(gBringupRingVa), 0, gBringupRingSize);
+            }
+
+            static char h2c0Line[128];
+            const int nh = snprintf(h2c0Line, sizeof(h2c0Line),
+                                    "[pspreuse] A' h2c0 type=2 size=%x mc=%llx va=%llx\n",
                                     static_cast<unsigned>(gBringupRingSize),
-                                    static_cast<unsigned>(gBringupRingWptr),
+                                    static_cast<unsigned long long>(gBringupRingMc),
                                     static_cast<unsigned long long>(gBringupRingVa));
-            if (nr > 0) { nredTraceLine(reuseLine, nr); }
+            if (nh > 0) { nredTraceLine(h2c0Line, nh); }
+
+            if (gPspEdxOn) {
+                if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
+                gPspEdxRet = 0;
+                gPspEdxSkip = 0;
+            }
+            return 0;   // 接口约定式成功，但有真实校验背书（实施文档 §3.5）
         }
-        return 0;
     }
     // 批次 pspedx5：作用域标志——子调用探针只在 `0x4cb8a` 内部生效。
     //  为什么需要：`0x4c05b` 全库有 **30 处**调用（通用 poll 助手），不限域会让 2 行配额
@@ -3733,12 +3773,28 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
 //  ⚠ 零写、零寄存器访问、返回值原样透传；只在 `-NRedPspEdx` 开时输出。
 //  ⚠ 耗时用 `mach_absolute_time()` 差值（x86_64 上单位为 ns）÷1000 ⇒ µs。
 //  ⚠ 限流：每个函数各 2 行（合计 ≤6 行）。
-static void pspSubLine(const char* const fn, const UInt32 n, const int ret, const UInt64 us)
+// 批次 U8：`desc` 非空时追加 `base/mask/exp`（`0x4c05b` 的 descriptor 已在手，零额外风险）。
+//  用途：解决 r316 的"POLL1 成功行缺失"异常——`mask` 能区分是 POLL1（`80000000`）还是
+//  POLL2（`8000ffff`）失败。descriptor 布局：`+0x08 base`／`+0x14 mask`／`+0x18 expected`。
+static void pspSubLine(const char* const fn, const UInt32 n, const int ret, const UInt64 us,
+                       const void* const desc = nullptr)
 {
-    static char line[96];
-    const int k = snprintf(line, sizeof(line), "[pspsub] fn=%s n=%u ret=%x us=%llu\n",
-                           fn, static_cast<unsigned>(n), static_cast<unsigned>(ret),
-                           static_cast<unsigned long long>(us));
+    static char line[160];
+    int k;
+    if (desc != nullptr) {
+        const UInt8* const D = static_cast<const UInt8*>(desc);
+        k = snprintf(line, sizeof(line),
+                     "[pspsub] fn=%s n=%u ret=%x us=%llu base=%x mask=%x exp=%x\n",
+                     fn, static_cast<unsigned>(n), static_cast<unsigned>(ret),
+                     static_cast<unsigned long long>(us),
+                     static_cast<unsigned>(*reinterpret_cast<const UInt32*>(D + 0x08)),
+                     static_cast<unsigned>(*reinterpret_cast<const UInt32*>(D + 0x14)),
+                     static_cast<unsigned>(*reinterpret_cast<const UInt32*>(D + 0x18)));
+    } else {
+        k = snprintf(line, sizeof(line), "[pspsub] fn=%s n=%u ret=%x us=%llu\n",
+                     fn, static_cast<unsigned>(n), static_cast<unsigned>(ret),
+                     static_cast<unsigned long long>(us));
+    }
     if (k > 0) { nredTraceLine(line, k); }
 }
 
@@ -3764,12 +3820,20 @@ static void pspStateEmit(void* const h, const char* const where)
     const UInt32 base  = *reinterpret_cast<const UInt32*>(H + 92);
     const UInt32 c2p64 = fn(ctx, base + 128U, 75U);   // C2PMSG_64
     const UInt32 c2p81 = fn(ctx, base + 145U, 75U);   // C2PMSG_81
+    // 批次 U8：追加 `C2PMSG_69/70/71` 回读（PSP 侧记录的 ring MC 地址 lo/hi 与大小）。
+    //  为什么必须：判读矩阵要靠"这三个值是否被苹果原件改写"来区分场景 A/B/C/D
+    //  （实施文档 §6.3）。旧版 `pspStateEmit` 只读 64/81，无法定行。
+    const UInt32 c2p69 = fn(ctx, base + 0x85U, 75U);  // C2PMSG_69（MC 低）
+    const UInt32 c2p70 = fn(ctx, base + 0x86U, 75U);  // C2PMSG_70（MC 高）
+    const UInt32 c2p71 = fn(ctx, base + 0x87U, 75U);  // C2PMSG_71（大小）
     ++gPspStateN;
-    static char stLine[128];
+    static char stLine[192];
     const int nSt = snprintf(stLine, sizeof(stLine),
-                             "[pspstate] where=%s alive=%x ready=%x c2p81=%x c2p64=%x\n",
+                             "[pspstate] where=%s alive=%x ready=%x c2p81=%x c2p64=%x "
+                             "c2p69=%x c2p70=%x c2p71=%x\n",
                              where, (c2p81 != 0) ? 1U : 0U,
-                             ((c2p64 & 0x80000000U) != 0) ? 1U : 0U, c2p81, c2p64);
+                             ((c2p64 & 0x80000000U) != 0) ? 1U : 0U, c2p81, c2p64,
+                             c2p69, c2p70, c2p71);
     if (nSt > 0) { nredTraceLine(stLine, nSt); }
 }
 
@@ -3809,7 +3873,8 @@ static void pspStateSample(const UInt32 t)
                             static_cast<unsigned>(t), (c2p81 != 0) ? 1U : 0U, c2p81);
     if (nS > 0) { nredTraceLine(smLine, nS); }
 }
-static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const int ret, const UInt64 us)
+static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const int ret,
+                       const UInt64 us, const void* const desc = nullptr)
 {
     // 批次 pspring（G3 §C 入口版）：PSP 事件环全量 dump（32 条），纯内存、零 MMIO。
     //  为什么放入口：r313/r314 两轮 `4ccae ret=0`（成功）⇒ 失败分支的块不执行。
@@ -3859,7 +3924,7 @@ static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const
     if (ret != 0) {
         if (gPspSubFailN < 8) {
             ++gPspSubFailN;
-            pspSubLine(fn, gPspSubFailN, ret, us);
+            pspSubLine(fn, gPspSubFailN, ret, us, desc);
         }
         // 批次 pspstate v2：**先读状态并写行**，再 flush ⇒ force 片必含两行。
         pspStateEmit(h, fn);
@@ -3872,7 +3937,7 @@ static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const
         }
     } else if (perFn < 2) {
         ++perFn;
-        pspSubLine(fn, perFn, ret, us);
+        pspSubLine(fn, perFn, ret, us, desc);
     }
 }
 
@@ -3913,8 +3978,9 @@ static int wrapPspSub4c05b(void* const a, void* const cb, void* const desc, cons
     const int ret = FunctionCast(wrapPspSub4c05b, gOrgPspSub4c05b)(a, cb, desc, timeoutUs);
     if (gPspEdxOn && gPspInRingCreate) {
         // `4c05b` 的 `h` 在 `desc+0`（反汇编 `0x56e9a` 的 `movq %r15,(%rdx)`）。
+        // U8：把 `desc` 一并传入 ⇒ 日志追加 `base/mask/exp`（区分 POLL1/POLL2 失败）。
         pspSubEmit(desc != nullptr ? *reinterpret_cast<void* const*>(desc) : nullptr,
-                   "4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000);
+                   "4c05b", gPspSub4c05b, ret, (mach_absolute_time() - t0) / 1000, desc);
     }
     return ret;
 }
@@ -3929,6 +3995,47 @@ static int wrapPspSub56fff(void* const h, const UInt32 type)
         pspSubEmit(h, "56fff", gPspSub56fff, ret, (mach_absolute_time() - t0) / 1000);
     }
     return ret;
+}
+
+// `0x4c664(h, base, idx, value, flag)`：PSP 寄存器**写**路径（U8 核心）。
+//  原件：`wcb = *(*(h+8)+0x38)`；`addr = (UInt32)base + *(int*)(h+0x5C + idx*4)`；
+//        `wcb(*(*(h+8)+8), addr, value, flag)`；`wcb == NULL` ⇒ **静默返回**（不设 eax）。
+//  ⚠ **只读 hook**：在原件**之前**记录，返回值原样透传（原件返回 `void`）。
+//  ⚠ 记录 `wcb`／`rcb` 是判读的关键：`wcb == 0` ⇒ 场景 C（写根本没发生），
+//    此时 `C2PMSG_69/70/71` 应保持 bringup 的值不变（实施文档 §6.3 判读矩阵）。
+//  ⚠ 纯内存（`nredTraceLine`），零 MMIO、零写；`static` 缓冲不占栈。
+static void wrapPspSub4c664(void* const h, const int base, const UInt32 idx,
+                            const UInt32 value, const UInt32 flag)
+{
+    if (gOrgPspSub4c664 == 0) { return; }
+    if (gPspEdxOn && gPspInRingCreate && gPspSub4c664 < 8 && nredKernelPtrOk(h)) {
+        ++gPspSub4c664;
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
+        UInt64 wcb = 0, rcb = 0, ctx = 0;
+        if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
+            const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
+            wcb = *reinterpret_cast<const UInt64*>(IF + 0x38);   // 写回调
+            rcb = *reinterpret_cast<const UInt64*>(IF + 0x40);   // 读回调（对照项）
+            ctx = *reinterpret_cast<const UInt64*>(IF + 8);
+        }
+        // `addr = base + *(int*)(h+0x5C + idx*4)`；`idx` 实测恒为 0（实施文档 §6.4），
+        //  但按公式算，避免把"表项非 0"误读成地址错。
+        const UInt32 addr = static_cast<UInt32>(base) +
+            static_cast<UInt32>(*reinterpret_cast<const SInt32*>(H + 0x5C + idx * 4));
+        static char line[192];
+        const int n = snprintf(line, sizeof(line),
+                               "[pspsub] fn=4c664 base=%x idx=%u addr=%x val=%x flag=%x "
+                               "wcb=%llx rcb=%llx\n",
+                               static_cast<unsigned>(base), static_cast<unsigned>(idx),
+                               static_cast<unsigned>(addr), static_cast<unsigned>(value),
+                               static_cast<unsigned>(flag),
+                               static_cast<unsigned long long>(wcb),
+                               static_cast<unsigned long long>(rcb));
+        if (n > 0) { nredTraceLine(line, n); }
+        (void)ctx;
+    }
+    FunctionCast(wrapPspSub4c664, gOrgPspSub4c664)(h, base, idx, value, flag);
 }
 
 void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
@@ -9796,6 +9903,17 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                     hookProbe(f3, KernelPatcher::RouteRequest{nullptr, wrapPspSub56fff, gOrgPspSub56fff},
                               "psp-sub-56fff");
                 pspSubInstallLine("56fff", f3, ok3, gOrgPspSub56fff);
+            }
+            // 批次 U8：`0x4c664`（PSP 寄存器**写**路径）只读 hook。
+            //  ⚠ 开关沿用 `-NRedPspEdx`（零新增 bootarg，实施文档 §6.6）；
+            //    作用域由 `gPspInRingCreate` 限定在 `0x4cb8a` 内部。
+            {
+                const auto f4 = resolveProbe("psp-sub-4c664", kPspSub4c664Pattern, nullptr,
+                                             arrsize(kPspSub4c664Pattern), 0x4C664);
+                const bool ok4 = (f4 != 0) &&
+                    hookProbe(f4, KernelPatcher::RouteRequest{nullptr, wrapPspSub4c664, gOrgPspSub4c664},
+                              "psp-sub-4c664");
+                pspSubInstallLine("4c664", f4, ok4, gOrgPspSub4c664);
             }
             }
         }

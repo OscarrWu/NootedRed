@@ -63,7 +63,10 @@ static const fw::FwAssetDesc kFwSmuAsset = {sSmu1300Data, sizeof(sSmu1300Data), 
 //  在 hook 内两处**既有**打印点各记一次，不新增任何打印/落盘量；常量初始化（无 guard variable，
 //  符合内核态约束）；全为标量 ⇒ 关态读到的即初值，戳记据此不输出（关态输出逐字不变）。
 static UInt32 gBringupEnterCount = 0;   // 进入 hook 次数（非 0 ⇒ 进入过）
-static UInt32 gBringupStep      = 0;   // 末次 step（哨兵 0＝尚未走到）
+//  ⚠ U10 修正（实施文档 §7）：原为 `static`，但 HWLibs.cpp:75 以 `extern` 引用它
+//    （C++ [dcl.stc]/7 规定 `extern` 声明已 `static` 的变量是 ill-formed；编译器接受但属 UB）。
+//    改为非 static（与下方 `gBringupRingMc` 等一致）；本头文件仅被 HWLibs.cpp 包含 ⇒ 无多重定义。
+UInt32 gBringupStep      = 0;   // 末次 step（哨兵 0＝尚未走到）
 static SInt32 gBringupLastError = 0;   // 末次 last_error
 static UInt32 gBringupLoadToc   = 0;   // 末次 loadToc_resp
 static UInt32 gBringupTmrLoad   = 0;   // 末次 tmrLoad_resp
@@ -115,6 +118,12 @@ struct NredSyslogMuteGuard {
 //  `RegSinkKernel` 无拷贝但可默认构造 + `setCallbacks()` ⇒ 不再在 hook 栈上构造（省 ~100 B）。
 static fw::SmnCallbacks gBringupCb;
 static fw::RegSinkKernel gBringupSink;
+// A′（-NRedPspRingReuse）：暴露 bringup 的 RegSinkKernel，供 HWLibs.cpp 的
+//  `nredPspRingVerify` 读 C2PMSG_69/70/71（+64 的 bit31）做真实校验。
+//  ⚠ `gBringupSink` 是 static（本头文件仅被 HWLibs.cpp 包含）⇒ 用 inline 访问器暴露，
+//    避免把 sink 本身改成非 static（它带回调上下文，语义上不应外泄）。
+//  ⚠ 调用前必须确认 bringup 已跑过（`gBringupStep != 0`）；否则 `cb_` 为空 ⇒ read 会解引用空指针。
+inline RegSinkKernel& bringupSink() { return gBringupSink; }
 // ⚠ 必须是**命名空间作用域**而不是函数内 static：带 NSDMI 的类型（BringupCtx）在函数内
 //   会要求 guard variable（内核不支持，CI run456 已证）⇒ 一律放在这里；进入时显式重置。
 static fw::RingState   gBringupRing;
