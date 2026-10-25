@@ -462,6 +462,18 @@ static const UInt8 kPspSub56fffPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 
 static const UInt8 kPspSub4c664Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 0x47, 0x08,
                                             0x4C, 0x8B, 0x48, 0x38, 0x4D, 0x85, 0xC9, 0x74,
                                             0x13, 0x89, 0xD2, 0x03};
+// R6（A′ 配对）：两个 ring destroy 函数的前 20 B。
+//  `0x55ecb`：`FUN_00055ecb(h, type)`；`type==1 ⇒ h+0x500`（UM）／`type==2 ⇒ h+0x2C0`（KM）；
+//    调 `0x55e15`（停 ring），然后 `if (*(u64*)(base+0x28) != 0)` 调 `0x4c4bf`（free），
+//    最后清 `+0`／`+0x238`。
+//  `0x570b5`：同形，但调 `0x56fff` 且**无条件**调 `0x4c4bf`。
+//  ⚠ 两者入口均干净（前一字节 = `c3`）；15 B 分别命中 3／4 次，20 B **唯一**（count=1）。
+static const UInt8 kPspRingDestroyAPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                                                0x53, 0x50, 0x49, 0x89, 0xFE, 0x83, 0xFE, 0x01,
+                                                0x74, 0x14, 0x41, 0xBF};
+static const UInt8 kPspRingDestroyBPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                                                0x53, 0x50, 0x49, 0x89, 0xFF, 0x83, 0xFE, 0x01,
+                                                0x74, 0x13, 0xB8, 0x01};
 
 // 0x4a988 前 15 B（批次 psptmrreuse v2：苹果 PSP selector 分派器；`resolveProbe` 的 expected-offset 校验用）。
 //  取自 macho `__text`（VMA 0x4a988，file off 0x4b988）：55 48 89 e5 41 56 53 48 85 ff 74 36 49 89 fe
@@ -4036,6 +4048,68 @@ static void wrapPspSub4c664(void* const h, const int base, const UInt32 idx,
         (void)ctx;
     }
     FunctionCast(wrapPspSub4c664, gOrgPspSub4c664)(h, base, idx, value, flag);
+}
+
+// ─── R6（A′ 配对）：ring destroy 的 free 配对 ────────────────────────────────────────────
+//  为什么必须：A′ 填的 `h+0x2C0+0x30`（BO 句柄）恒为 0——我们**没有**通过 GMM 分配这个 ring。
+//  但 `0x55ecb` 的 free 门控是 `+0x28`（VA）!= 0，而 A′ 会填 VA ⇒ 门控成立 ⇒
+//  拿句柄 0 去调 `0x4c4bf`（GMM free，`iface+0x20`）⇒ 释放一个不存在的 BO。
+//  `0x570b5` 更是**无条件**调 `0x4c4bf`。
+//  ⇒ 两个 destroy 都补一条「句柄 != 0 才 free」的配对判据；其余清理（停 ring、清 `+0`／`+0x238`）原样保留。
+//  ⚠ 这是**配对**而非跳过：我们没分配，就不该释放（核心原则「适配，不是骗过」）。
+//  ⚠ 关态（未带 `-NRedPspRingReuse`）⇒ 直接透传原件，行为逐字不变。
+static mach_vm_address_t gOrgPspRingDestroyA = 0;   // `0x55ecb`
+static mach_vm_address_t gOrgPspRingDestroyB = 0;   // `0x570b5`
+
+// 两个 destroy 的公共骨架：`type` 选槽 → 停 ring → （句柄非 0 才）free → 清 `+0`／`+0x238`。
+//  `stopAddr`：`0x55ecb` 用 `0x55E15`，`0x570b5` 用 `0x56FFF`。
+//  `requireVa`：`0x55ecb` 原件有 `VA != 0` 门控，`0x570b5` 没有 ⇒ 分别保持。
+static UInt32 nredPspRingDestroyCommon(void* const h, const UInt32 type,
+                                       const mach_vm_address_t stopAddr, const bool requireVa)
+{
+    UInt8* const H = static_cast<UInt8*>(h);
+    UInt8* base = nullptr;
+    if (type == 1) {
+        if ((*reinterpret_cast<const UInt8*>(H + 0x28) & 6) != 0) { return 4; }
+        base = H + 0x500;
+    } else if (type == 2) {
+        base = H + 0x2C0;
+    } else {
+        return 1;
+    }
+    using StopFn = UInt32 (*)(void*);
+    UInt32 rc = reinterpret_cast<StopFn>(stopAddr)(h);
+    const UInt64 va     = *reinterpret_cast<const UInt64*>(base + 0x28);
+    const UInt64 handle = *reinterpret_cast<const UInt64*>(base + 0x30);
+    if ((!requireVa || va != 0) && handle != 0) {   // ← 配对：句柄 0 ⇒ 不是 GMM 分配的 ⇒ 不 free
+        using FreeFn = UInt32 (*)(UInt64, UInt64, UInt64, UInt32, UInt64, UInt64);
+        const auto freeFn = reinterpret_cast<FreeFn>(gHwlibsSlide + 0x4C4BF);
+        rc |= freeFn(*reinterpret_cast<const UInt64*>(H + 8), va,
+                     *reinterpret_cast<const UInt64*>(base + 0x08),
+                     *reinterpret_cast<const UInt32*>(base + 0x20),
+                     *reinterpret_cast<const UInt64*>(base + 0x18), handle);
+    }
+    *reinterpret_cast<UInt32*>(base + 0) = 0;
+    *reinterpret_cast<UInt64*>(base + 0x238) = 0;
+    return rc;
+}
+
+static UInt32 wrapPspRingDestroyA(void* const h, const UInt32 type)
+{
+    if (gOrgPspRingDestroyA == 0) { return 1; }
+    if (!gPspRingReuse || gHwlibsSlide == 0 || !nredKernelPtrOk(h)) {
+        return FunctionCast(wrapPspRingDestroyA, gOrgPspRingDestroyA)(h, type);
+    }
+    return nredPspRingDestroyCommon(h, type, gHwlibsSlide + 0x55E15, true);
+}
+
+static UInt32 wrapPspRingDestroyB(void* const h, const UInt32 type)
+{
+    if (gOrgPspRingDestroyB == 0) { return 1; }
+    if (!gPspRingReuse || gHwlibsSlide == 0 || !nredKernelPtrOk(h)) {
+        return FunctionCast(wrapPspRingDestroyB, gOrgPspRingDestroyB)(h, type);
+    }
+    return nredPspRingDestroyCommon(h, type, gHwlibsSlide + 0x56FFF, false);
 }
 
 void* X5000HWLibs::wrapTtlAllocA(void* const ctx)
@@ -9939,6 +10013,36 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                         static_cast<unsigned long long>(fromSel),
                                         static_cast<unsigned long long>(gOrgPspSelector));
                 if (nH > 0) { nredTraceLine(selHookLine, nH); }
+            }
+        }
+        // R6（`-NRedPspRingReuse`，默认关）：两个 ring destroy 的 free 配对。
+        //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        if (gPspRingReuse) {
+            const auto dA = resolveProbe("psp-ring-destroy-a", kPspRingDestroyAPattern, nullptr,
+                                         arrsize(kPspRingDestroyAPattern), 0x55ECB);
+            bool okA = false;
+            if (dA != 0) {
+                okA = hookProbe(dA,
+                                KernelPatcher::RouteRequest{nullptr, wrapPspRingDestroyA,
+                                                            gOrgPspRingDestroyA},
+                                "psp-ring-destroy-a");
+            }
+            const auto dB = resolveProbe("psp-ring-destroy-b", kPspRingDestroyBPattern, nullptr,
+                                         arrsize(kPspRingDestroyBPattern), 0x570B5);
+            bool okB = false;
+            if (dB != 0) {
+                okB = hookProbe(dB,
+                                KernelPatcher::RouteRequest{nullptr, wrapPspRingDestroyB,
+                                                            gOrgPspRingDestroyB},
+                                "psp-ring-destroy-b");
+            }
+            {
+                static char dLine[128];
+                const int nD = snprintf(dLine, sizeof(dLine),
+                                        "[pspreuse] destroy-hook a=%s b=%s\n",
+                                        (dA == 0) ? "resolve-failed" : (okA ? "installed" : "route-failed"),
+                                        (dB == 0) ? "resolve-failed" : (okB ? "installed" : "route-failed"));
+                if (nD > 0) { nredTraceLine(dLine, nD); }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
