@@ -482,15 +482,6 @@ static const UInt8 kPspFenceWaitPattern[] = {
     0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48, 0x83, 0xEC,
     0x10, 0x31, 0xC0, 0x48, 0x89, 0x45, 0xD8, 0x48, 0x89, 0x45, 0xD0, 0xBB, 0x01, 0x00,
     0x00, 0x00, 0x48, 0x85, 0xF6, 0x74, 0x72};
-// 0x4dd8c 前 24 B（批次 psptmrreuse v9：X5000 HWLibs 的 **TMR 加载真实函数**；`resolveProbe` 用）。
-//  取自 `com.apple.kext.AMDRadeonX5000HWLibs.macho` `__text`（VMA 0x4dd8c，file off 0x4ed8c；
-//  file off = VMA + 0x1000）。函数体 `0x4dd8c` 起（`sub $0x388,%rsp` ⇒ 栈帧 904 B）。
-//  ⚠ 用 **24 B** 而非 15 B：15 B 前缀在该 macho 内出现 **15 次**；20 B 11 次；24 B **唯一**（count=1）。
-//  ⚠ 函数入口确认：`0x4dd8b` 是上一条 `callq`（`0x4dd86`，5 B）的末字节 ⇒ `0x4dd8c` 是干净入口。
-//  ⚠ 原件只读 `%rdi`（h）⇒ **1 参数**。
-static const UInt8 kPspTmrLoadRealPattern[] = {
-    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x48, 0x81, 0xEC,
-    0x88, 0x03, 0x00, 0x00, 0x49, 0x89, 0xFE, 0x48, 0x8B, 0x05, 0x32, 0x73};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -3724,32 +3715,6 @@ static int wrapPspFenceWait(void* const h, const void* const idx)
     }
     if (gOrgPspFenceWait == 0) { return -1; }
     return FunctionCast(wrapPspFenceWait, gOrgPspFenceWait)(h, idx);
-}
-
-// ─── 批次 psptmrreuse v9：`0x4dd8c`（TMR 加载真实函数）入口拦截 ──────────────────────────
-//  r328 定位：`0x4d6d0` ← `0x4d2c4` ← `0x4de53`（`0x4dd8c` 内）⇒ `0x4dd8c` 才是 TMR 加载路径。
-//  反汇编确认：`0x4de66` 上报 `0x4010020B`（TMR 失败事件）。
-//  ⚠ 只跳过 TMR（`cmd_id = 5`）：`0x4de1f` 的 `leal 5(,%rdx,4)` ⇒ 5（TMR）或 9（VMR）；
-//    `rdx = ((h+40 & 0xA) == 2)` ⇒ 用该条件预判，**不碰 VMR**。
-//  ⚠ 原件只读 `%rdi`（h）⇒ 1 参数。
-//  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
-static mach_vm_address_t gOrgPspTmrLoadReal = 0;
-
-static int wrapPspTmrLoadReal(void* const h)
-{
-    if (gPspTmrReuse && gBringupStep >= 11 && nredKernelPtrOk(h)) {
-        const UInt8* const H = static_cast<const UInt8*>(h);
-        const UInt32 flags = *reinterpret_cast<const UInt32*>(H + 40);
-        if ((flags & 0xAU) == 2U) {
-            static char line[96];
-            const int n = snprintf(line, sizeof(line), "[psptmr] skip tmr-load step=%u\n",
-                                   static_cast<unsigned>(gBringupStep));
-            if (n > 0) { nredTraceLine(line, n); }
-            return 0;
-        }
-    }
-    if (gOrgPspTmrLoadReal == 0) { return -1; }
-    return FunctionCast(wrapPspTmrLoadReal, gOrgPspTmrLoadReal)(h);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
@@ -10042,29 +10007,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                         static_cast<unsigned long long>(fromFence),
                                         static_cast<unsigned long long>(gOrgPspFenceWait));
                 if (nH > 0) { nredTraceLine(fenceHookLine, nH); }
-            }
-        }
-        // 批次 psptmrreuse v9（`-NRedPspTmrReuse`，默认关）：`0x4dd8c`（TMR 加载真实函数）拦截。
-        //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
-        if (gPspTmrReuse) {
-            const auto fromTmrReal = resolveProbe("psp-tmrload-real", kPspTmrLoadRealPattern, nullptr,
-                                                  arrsize(kPspTmrLoadRealPattern), 0x4DD8C);
-            bool okTmrReal = false;
-            if (fromTmrReal != 0) {
-                okTmrReal = hookProbe(fromTmrReal,
-                                      KernelPatcher::RouteRequest{nullptr, wrapPspTmrLoadReal,
-                                                                  gOrgPspTmrLoadReal},
-                                      "psp-tmrload-real");
-            }
-            {
-                static char tmrRealHookLine[96];
-                const int nH = snprintf(tmrRealHookLine, sizeof(tmrRealHookLine),
-                                        "[psptmr] tmrload-hook=%s at=%llx org=%llx\n",
-                                        (fromTmrReal == 0) ? "resolve-failed"
-                                                           : (okTmrReal ? "installed" : "route-failed"),
-                                        static_cast<unsigned long long>(fromTmrReal),
-                                        static_cast<unsigned long long>(gOrgPspTmrLoadReal));
-                if (nH > 0) { nredTraceLine(tmrRealHookLine, nH); }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
