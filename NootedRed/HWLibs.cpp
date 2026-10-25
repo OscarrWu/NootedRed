@@ -3737,6 +3737,37 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
             *reinterpret_cast<UInt64*>(R + 56 + i * 8) = 0;
         }
         *reinterpret_cast<UInt64*>(R + 568) = 0;
+        // 批次 pspreuse v2（治本）：A 方案跳过苹果 ring 初始化 ⇒ `h+14032`（命令缓冲）未分配。
+        //   r325 诊断实测 `hOk=1 buf=0` ⇒ 必须补一次 `0x4c407`（分配 ring/命令/fence 缓冲）。
+        //   ⚠ **与文档 §4.1 的差异**：文档写 `fn(H + 8, …)`；但反汇编 `0x4ab7f` 是
+        //     `movq 8(%rbx), %rdi`（**解引用**）⇒ 第 1 参数是 `*(h+8)`（iface 指针），
+        //     不是 `h+8`（地址）。传地址会让 `0x4c407` 从 `*(h+24)` 取回调 ⇒ 野指针。
+        //   ⚠ 其余 6 个参数与 `0x4ab59`–`0x4aba6` 逐项一致：
+        //     rsi=0x4000（ring 大小）／rdx=0x1000（cmd 大小）／rcx=1／
+        //     r8=&h+14016／r9=&h+14032／栈[0]=&h+14040。
+        if (*reinterpret_cast<const void* const*>(H + 14032) == nullptr) {
+            using AllocFn = int (*)(void*, UInt32, UInt32, UInt32, void*, void*, void*);
+            void* const iface = *reinterpret_cast<void* const*>(H + 8);
+            int allocRc = -1;
+            if (gHwlibsSlide != 0 && nredKernelPtrOk(iface)) {
+                const auto fn = reinterpret_cast<AllocFn>(gHwlibsSlide + 0x4C407);
+                allocRc = fn(iface, 0x4000, 0x1000, 1,
+                             H + 14016, H + 14032, H + 14040);
+            }
+            const UInt64 h14032 = *reinterpret_cast<const UInt64*>(H + 14032);
+            static char allocLine[128];
+            const int na = snprintf(allocLine, sizeof(allocLine),
+                                    "[pspreuse] alloc h14032=%llx rc=%d\n",
+                                    static_cast<unsigned long long>(h14032), allocRc);
+            if (na > 0) { nredTraceLine(allocLine, na); }
+            if (h14032 == 0) {
+                static char failLine[96];
+                const int nf = snprintf(failLine, sizeof(failLine),
+                                        "[pspreuse] alloc-failed rc=%d\n", allocRc);
+                if (nf > 0) { nredTraceLine(failLine, nf); }
+                return 0;   // 不继续（保持 A 方案"不调苹果原件"的语义）
+            }
+        }
         if (gPspEdxOn) {
             if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
             gPspEdxRet = 0;
