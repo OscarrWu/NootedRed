@@ -578,6 +578,9 @@ static UInt64 gPspEdxVal = 0;                 // 条目 +8（edx）
 static UInt32 gPspEdxEv  = 0;                 // 条目 +0（事件 ID）
 static UInt32 gPspEdxSev = 0;                 // 条目 +4（严重度）
 static mach_vm_address_t gOrgPspRingCreate = 0;   // `0x4cb8a` 的原件跳板（文件作用域，避免改 HWLibs.hpp）
+// 批次 pspreuse v4（`-NRedPspRingReuse`，默认关）：补跑 `0x4ab34` 的**防重入**标志。
+//  `0x4ab34` 内部会经 `0x4b835` 调 `0x4cb8a`（本 wrapper 的原件）⇒ 若不加锁会无限递归。
+static bool gInRingInit = false;
 // 批次 pspedx5（R-pspedx5判读 §3.2）：PSP ring create 的**子调用级**只读探针。
 //  目的：edx=2 的返回路径有三条（`0x4ccae`×2／`0x4c05b`×2／`0x56fff` 内层）⇒ 用入口/返回/耗时区分。
 //  ⚠ 零写、零寄存器访问、返回值原样透传；只在 `-NRedPspEdx` 开时输出。
@@ -3600,6 +3603,32 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     //   ⚠ 前置：gBringupStep >= 8（RingCreate）且 gBringupRingMc != 0。
     if (gPspRingReuse && type == 2 && gBringupStep >= 8 && gBringupRingMc != 0
         && nredKernelPtrOk(h)) {
+        // 批次 pspreuse v4（治本，PSP 方案 §6.2）：A 方案只填 ring 结构，没跑苹果的
+        //   ring 初始化（`0x4ab34`）⇒ `h+14032`（命令缓冲）等完成路径没建立。
+        //   补跑 `0x4ab34`，它依次做：写 `h+0x36B0`=0x4000／`h+0x36B8`=0x1000／`h+0x36C8`=1
+        //   → `0x4c407` 分配（填 `h+0x36C0`／`h+0x36D0`=14032／`h+0x36D8`）
+        //   → `0x4b835`（ring create，内部 `0x4b925: call 0x4d2c4` 提交）
+        //   → `0x4c4bf`（注册）→ 成功则置 `h+0x36A8`=1／`h+0x36E8`=1 → `0x4ca72`（完成路径）。
+        //   ⚠ 防重入：**实测 `0x4b835` 不调 `0x4cb8a`**（`0x4cb8a` 的调用者只有
+        //     `0x49a4b`／`0x49c8e`／`0x4ff84`；`0x4b835` 的调用是外部符号／`0x4d2c4`／`0x4c8a3`）
+        //     ⇒ 本 wrapper 不会被 `0x4ab34` 递归进来。`gInRingInit` 保留为**安全网**，
+        //     不是当前必需的。
+        //   ⚠ 单参数 `(h)`：反汇编 `0x4ab34` 只读 `%rdi`。
+        //   ⚠ 必须在填 `h+1280` **之前**调用：`0x4ab34` 自己也会写 ring 结构。
+        if (!gInRingInit) {
+            gInRingInit = true;
+            using RingInitFn = int (*)(void*);
+            int rc = -1;
+            if (gHwlibsSlide != 0) {
+                const auto initFn = reinterpret_cast<RingInitFn>(gHwlibsSlide + 0x4AB34);
+                rc = initFn(h);
+            }
+            gInRingInit = false;
+            static char initLine[96];
+            const int ni = snprintf(initLine, sizeof(initLine),
+                                    "[pspreuse] ring-init rc=%d\n", rc);
+            if (ni > 0) { nredTraceLine(initLine, ni); }
+        }
         UInt8* const H = static_cast<UInt8*>(h);
         UInt8* const R = H + 1280;                                  // 苹果 KM ring 结构
         *reinterpret_cast<UInt32*>(R + 0)  = 1;                     // type = KM
