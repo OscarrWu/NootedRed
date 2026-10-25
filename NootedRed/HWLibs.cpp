@@ -3734,12 +3734,26 @@ static int wrapPspFenceWait(void* const h, const void* const idx)
 //  ⚠ 原件只读 `%rdi`（h）⇒ 1 参数。
 //  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
 static mach_vm_address_t gOrgPspTmrLoadReal = 0;
+static UInt32 gPspTmrLoadDiag = 0;   // 诊断行计数（前 4 次）
 
 static int wrapPspTmrLoadReal(void* const h)
 {
     if (gPspTmrReuse && gBringupStep >= 11 && nredKernelPtrOk(h)) {
         const UInt8* const H = static_cast<const UInt8*>(h);
         const UInt32 flags = *reinterpret_cast<const UInt32*>(H + 40);
+        // 批次 psptmrreuse v10（取证）：r329 `skip tmr-load` 0 命中 ⇒ 需看 `h+40` 实际值。
+        //   技术经理已确认 `0x4010020b` 是 **VMR 失败**（不是 TMR），`h+40` 的 bit1/bit3/bit8
+        //   语义未完全解出 ⇒ 先打印实际值，再决定条件。前 4 次。
+        if (gPspTmrLoadDiag < 4) {
+            ++gPspTmrLoadDiag;
+            const UInt64 h2824 = *reinterpret_cast<const UInt64*>(H + 2824);
+            static char dLine[128];
+            const int nd = snprintf(dLine, sizeof(dLine),
+                                    "[psptmr] tmrload h40=%x h2824=%llx\n",
+                                    static_cast<unsigned>(flags),
+                                    static_cast<unsigned long long>(h2824));
+            if (nd > 0) { nredTraceLine(dLine, nd); }
+        }
         if ((flags & 0xAU) == 2U) {
             static char line[96];
             const int n = snprintf(line, sizeof(line), "[psptmr] skip tmr-load step=%u\n",
