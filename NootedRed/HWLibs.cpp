@@ -3614,7 +3614,7 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         //     ⇒ 本 wrapper 不会被 `0x4ab34` 递归进来。`gInRingInit` 保留为**安全网**，
         //     不是当前必需的。
         //   ⚠ 单参数 `(h)`：反汇编 `0x4ab34` 只读 `%rdi`。
-        //   ⚠ 必须在填 `h+1280` **之前**调用：`0x4ab34` 自己也会写 ring 结构。
+        //   ⚠ 调用时机：在返回 0 之前（本块不再填 `h+1280`，见下方说明）。
         if (!gInRingInit) {
             gInRingInit = true;
             using RingInitFn = int (*)(void*);
@@ -3629,19 +3629,11 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
                                     "[pspreuse] ring-init rc=%d\n", rc);
             if (ni > 0) { nredTraceLine(initLine, ni); }
         }
-        UInt8* const H = static_cast<UInt8*>(h);
-        UInt8* const R = H + 1280;                                  // 苹果 KM ring 结构
-        *reinterpret_cast<UInt32*>(R + 0)  = 1;                     // type = KM
-        *reinterpret_cast<UInt64*>(R + 8)  = gBringupRingMc;        // ring 地址（8 B 完整值）
-        *reinterpret_cast<UInt32*>(R + 24) = gBringupRingSize;      // size（4 B）
-        *reinterpret_cast<UInt32*>(R + 28) = static_cast<UInt32>(gBringupRingMc >> 32); // addr hi（4 B）
-        *reinterpret_cast<UInt32*>(R + 32) = gBringupRingWptr;      // wptr
-        *reinterpret_cast<UInt64*>(R + 40) = gBringupRingVa;        // 缓冲虚拟地址
-        *reinterpret_cast<UInt64*>(R + 48) = 0;                     // 语义未解出（U1）
-        for (int i = 0; i < 64; ++i) {                              // +56..+568 清零
-            *reinterpret_cast<UInt64*>(R + 56 + i * 8) = 0;
-        }
-        *reinterpret_cast<UInt64*>(R + 568) = 0;
+        // ⚠ 按项目经理指示：**不再填 `h+1280`**。
+        //   理由：`0x4ab34` 走的是 `0x4b835`，**不经过** `0x4cb8a` ⇒ 填 `h+1280` 对它无用；
+        //   而 `0x4ab34` 自己会写 `h+0x36B0`/`h+0x36B8`/`h+0x36C8` 并经 `0x4c407` 建立
+        //   `h+0x36C0`/`h+0x36D0`(=14032)/`h+0x36D8`。
+        //   `0x4cb8a` 的拦截仍保留，服务另外三条调用路径（`0x49a4b`/`0x49c8e`/`0x4ff84`）。
         if (gPspEdxOn) {
             if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
             gPspEdxRet = 0;
