@@ -4077,17 +4077,24 @@ static UInt32 nredPspRingDestroyCommon(void* const h, const UInt32 type,
     } else {
         return 1;
     }
-    using StopFn = UInt32 (*)(void*);
-    UInt32 rc = reinterpret_cast<StopFn>(stopAddr)(h);
+    // ⚠ `0x55e15`／`0x56fff` 的签名是 **`(long h, int type)`**（反编译 `undefined8 FUN_...(long, int)`）。
+    //   原件 `0x55ecb` 在 `0x55f05: mov %r14,%rdi; call 0x55e15` 处**没有设 `%esi`** ——
+    //   它靠 `%esi` 里残留的 `type` 传参（`0x55ed8: cmp $0x1,%esi` 之后未改）。
+    //   ⇒ 我们必须**显式**传 `type`，否则 `0x55e15` 的 `param_2` 是垃圾。
+    //   （返回值只读 `%eax`：原件 `0x55f0d: mov %eax,%r15d`。）
+    using StopFn = UInt32 (*)(void*, UInt32);
+    UInt32 rc = reinterpret_cast<StopFn>(stopAddr)(h, type);
     const UInt64 va     = *reinterpret_cast<const UInt64*>(base + 0x28);
     const UInt64 handle = *reinterpret_cast<const UInt64*>(base + 0x30);
     if ((!requireVa || va != 0) && handle != 0) {   // ← 配对：句柄 0 ⇒ 不是 GMM 分配的 ⇒ 不 free
-        using FreeFn = UInt32 (*)(UInt64, UInt64, UInt64, UInt32, UInt64, UInt64);
+        // ⚠ `0x4c4bf` 的返回类型是 **`char`**（反编译 `char FUN_0004c4bf(...)`）⇒ 只能读 `%al`。
+        //   若按 `UInt32` 声明，会读到 `%eax` 的高位垃圾（ABI 只保证 `%al`）。
+        using FreeFn = UInt8 (*)(UInt64, UInt64, UInt64, UInt32, UInt64, UInt64);
         const auto freeFn = reinterpret_cast<FreeFn>(gHwlibsSlide + 0x4C4BF);
-        rc |= freeFn(*reinterpret_cast<const UInt64*>(H + 8), va,
-                     *reinterpret_cast<const UInt64*>(base + 0x08),
-                     *reinterpret_cast<const UInt32*>(base + 0x20),
-                     *reinterpret_cast<const UInt64*>(base + 0x18), handle);
+        rc |= static_cast<UInt32>(freeFn(*reinterpret_cast<const UInt64*>(H + 8), va,
+                                         *reinterpret_cast<const UInt64*>(base + 0x08),
+                                         *reinterpret_cast<const UInt32*>(base + 0x20),
+                                         *reinterpret_cast<const UInt64*>(base + 0x18), handle));
     }
     *reinterpret_cast<UInt32*>(base + 0) = 0;
     *reinterpret_cast<UInt64*>(base + 0x238) = 0;
