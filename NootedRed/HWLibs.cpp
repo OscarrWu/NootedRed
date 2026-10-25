@@ -3640,12 +3640,19 @@ static bool nredPspRingVerify(void* const h, UInt32* const lo, UInt32* const hi,
     const UInt64 ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
     if (readReg == 0) { *err = 3; return false; }
 
+    // R7-① 有界性来源（实施文档 §3.1）：
+    //   · **限次**：4 次单发读（A′-5 三次 + A′-7b 一次），**无循环、无重试**；
+    //   · **读间计时**：每次读返回后用 `mach_absolute_time` 判定累计耗时，> 1 ms ⇒ 停读、err=9。
+    //   ⚠ **能力边界（必须明写）**：`mach_absolute_time` 只能在读**返回后**判定，
+    //     **无法打断**已挂起的读。真正的边界是"限次"——最多 4 次，不会无限循环。
     using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
     const auto fn = reinterpret_cast<PspReadReg>(readReg);
     const UInt32 base = *reinterpret_cast<const UInt32*>(H + 92);          // h+0x5C
+    const UInt64 t0 = mach_absolute_time();
     *lo   = fn(ctx, base + 0x85U, 75U);   // C2PMSG_69（MC 低）
     *hi   = fn(ctx, base + 0x86U, 75U);   // C2PMSG_70（MC 高）
     *size = fn(ctx, base + 0x87U, 75U);   // C2PMSG_71（大小）
+    if ((mach_absolute_time() - t0) / 1000 > 1000ULL) { *err = 9; return false; }   // > 1 ms
 
     const UInt64 addr = static_cast<UInt64>(*lo) | (static_cast<UInt64>(*hi) << 32);
     if (addr != gBringupRingMc) { *err = 5; return false; }
@@ -3653,7 +3660,9 @@ static bool nredPspRingVerify(void* const h, UInt32* const lo, UInt32* const hi,
 
     // A′-7b：`C2PMSG_64` 的 bit31＝PSP 响应位。只有它为 1 才能证明 PSP 真的处理了 ring create，
     //  否则 69/70/71 只是"我方写入的值"，不能证明"PSP 接受"。
+    const UInt64 t1 = mach_absolute_time();
     const UInt32 ctrl = fn(ctx, base + 128U, 75U);   // C2PMSG_64
+    if ((mach_absolute_time() - t1) / 1000 > 1000ULL) { *err = 9; return false; }
     if ((ctrl & fw::kMboxTosRespFlag) == 0) { *err = 8; return false; }
 
     return true;
@@ -3679,13 +3688,18 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         && nredKernelPtrOk(h)) {
         UInt32 lo = 0, hi = 0, size = 0;
         int verr = 0;
-        if (!nredPspRingVerify(h, &lo, &hi, &size, &verr)) {
+        const UInt64 tv0 = mach_absolute_time();
+        const bool vok = nredPspRingVerify(h, &lo, &hi, &size, &verr);
+        const UInt64 vus = (mach_absolute_time() - tv0) / 1000;
+        if (!vok) {
             // 校验失败 ⇒ 调原件（不伪造成功）。`err` 取值见实施文档 §3.1 判据表。
-            static char vfLine[160];
+            //  `us=` 是 4 次单发读的实测总耗时（R7-① 有界性证据；> 1000 会先以 err=9 返回）。
+            static char vfLine[192];
             const int nv = snprintf(vfLine, sizeof(vfLine),
-                                    "[pspreuse] A' verify-failed lo=%x hi=%x size=%x err=%d -> org\n",
+                                    "[pspreuse] A' verify-failed lo=%x hi=%x size=%x err=%d us=%llu -> org\n",
                                     static_cast<unsigned>(lo), static_cast<unsigned>(hi),
-                                    static_cast<unsigned>(size), verr);
+                                    static_cast<unsigned>(size), verr,
+                                    static_cast<unsigned long long>(vus));
             if (nv > 0) { nredTraceLine(vfLine, nv); }
         } else {
             static char okLine[128];
@@ -3786,6 +3800,36 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
                                       static_cast<unsigned>(gPspEdxEv),
                                       static_cast<unsigned>(gPspEdxSev));
             if (nPsp > 0) { nredTraceLine(pspLine, nPsp); }
+        }
+        // 批次 R3-③（实施文档 §6.2）：`[pspev]` 事件环 dump（≤8 条，取**最后** min(n,8) 条）。
+        //  为什么需要：`[pspedx]` 只给"最后一条"的 ev/sev；判读需要**最近若干条**的事件号序列
+        //  才能把"哪个失败函数对应哪个事件号"对上。
+        //  ⚠ 纯内存读（`h+0x3930/0x3934/0x3938`），零 MMIO、零写；`%.40s` 有界。
+        //  ⚠ 沿用 `-NRedPspEdx` ⇒ 零新增 bootarg／hook；`[pspring]` 不动。
+        if (gPspEdxEnter <= 4 && nredKernelPtrOk(h)) {
+            const UInt8* const HE = static_cast<const UInt8*>(h);
+            const UInt32 eidx = *reinterpret_cast<const UInt32*>(HE + 0x3934);
+            const UInt8  ewrapped = *reinterpret_cast<const UInt8*>(HE + 0x3930);
+            if (eidx <= 32U && ewrapped <= 1U) {
+                const UInt32 en = ewrapped ? 32U : eidx;
+                const UInt32 efirst = ewrapped ? (eidx % 32U) : 0U;
+                const UInt32 take = (en > 8U) ? 8U : en;
+                for (UInt32 k = 0; k < take; ++k) {
+                    // 取最后 take 条：从 en-take 开始
+                    const UInt32 i = (efirst + (en - take) + k) % 32U;
+                    const UInt8* const e = HE + 0x3938 + static_cast<size_t>(i) * 0x110;
+                    static char evLine[160];
+                    const int ne = snprintf(evLine, sizeof(evLine),
+                                            "[pspev] n=%u i=%u ev=%x lvl=%u code=%llx msg=\"%.40s\"\n",
+                                            static_cast<unsigned>(gPspEdxEnter),
+                                            static_cast<unsigned>(i),
+                                            static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 0)),
+                                            static_cast<unsigned>(*reinterpret_cast<const UInt32*>(e + 4)),
+                                            static_cast<unsigned long long>(*reinterpret_cast<const UInt64*>(e + 8)),
+                                            reinterpret_cast<const char*>(e + 0x10));
+                    if (ne > 0) { nredTraceLine(evLine, ne); }
+                }
+            }
         }
     }
     return ret;

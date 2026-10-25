@@ -97,6 +97,11 @@ void nredFailResetMark(const char* where, int code, UInt64 a, UInt64 b);
 // 安全点（L2 拍）：有待处理失败时落盘并 PEHaltRestart(1)。返回 true ⇒ 已发起复位。
 bool nredFailResetService();
 
+// R2（实施文档 §6.2）：`dumpTick` 每 10 拍写一行 `[tick] n=`（纯内存，规则 4 合规）。
+//  `nredTraceLine` 定义在 HWLibs.cpp（声明在 HWLibs.hpp）；本头文件不包含 HWLibs.hpp
+//  （会带入静态缓冲），故在此**前向声明**同一签名。
+void nredTraceLine(char* const buf, const int n);
+
 namespace NvMsgBuf {
 	static constexpr int kMagic   = 0x063061;
 	static constexpr int kMaxDump = 32768;       // 单次最多 32 KB
@@ -483,6 +488,17 @@ namespace NvMsgBuf {
 
 		if (tick < kMaxTicks && stTotal() < kMaxTotal) {
 			tick++;
+			// R2（实施文档 §6.2）：**活性标记**——每 10 拍往内存环 push 一行 `[tick] n=`。
+			//  为什么需要：判读要区分"机器还活着但没事件"与"已经死了"。
+			//  ⚠ `-NRedPspState` **不能**替代：环空时 `pspStateEmit` 早退（HWLibs.cpp:1845），
+			//    且采样在 `:1944-1946` 之后才发生 ⇒ 环空时零输出。
+			//  ⚠ 纯内存（`nredTraceLine` 不刷盘）⇒ 规则 4 合规；`static` 缓冲不占栈。
+			//  ⚠ 关态零行为：本行只在 tick 计数到达时写，且不改变任何控制流。
+			if ((tick % 10) == 0) {
+				static char tickLine[48];
+				const int nt = snprintf(tickLine, sizeof(tickLine), "[tick] n=%d\n", tick);
+				if (nt > 0) { nredTraceLine(tickLine, nt); }
+			}
 			// P3：首拍到达（thread_call 已触发 ⇒ C1/C2 均否）。同时重建全部已知项，
 			//  兜底 `NRed::init` 阶段 NVStorage 不可用而丢失的 P1/P2。
 			//  v2：**只在首拍**写一次 + 尝试 sync（第 2 次，大概率被限速）；关态整块不执行。
