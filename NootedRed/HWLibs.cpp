@@ -3726,41 +3726,27 @@ static int wrapPspFenceWait(void* const h, const void* const idx)
     return FunctionCast(wrapPspFenceWait, gOrgPspFenceWait)(h, idx);
 }
 
-// ─── 批次 psptmrreuse v9：`0x4dd8c`（TMR 加载真实函数）入口拦截 ──────────────────────────
-//  r328 定位：`0x4d6d0` ← `0x4d2c4` ← `0x4de53`（`0x4dd8c` 内）⇒ `0x4dd8c` 才是 TMR 加载路径。
-//  反汇编确认：`0x4de66` 上报 `0x4010020B`（TMR 失败事件）。
-//  ⚠ 只跳过 TMR（`cmd_id = 5`）：`0x4de1f` 的 `leal 5(,%rdx,4)` ⇒ 5（TMR）或 9（VMR）；
-//    `rdx = ((h+40 & 0xA) == 2)` ⇒ 用该条件预判，**不碰 VMR**。
-//  ⚠ 原件只读 `%rdi`（h）⇒ 1 参数。
+// ─── 批次 psptmrreuse v11：`0x4dd8c`（TMR/VMR 加载真实函数）入口拦截 ───────────────────────
+//  r328 定位：`0x4d6d0` ← `0x4d2c4` ← `0x4de53`（`0x4dd8c` 内）⇒ `0x4dd8c` 才是加载路径。
+//  反汇编确认：`0x4de66` 上报 `0x4010020B`。
+//  ⚠ v11 定因（r330）：`0x4de1f` 的 `leal 5(,%rdx,4)` ⇒ `cmd_id` = 5（TMR）或 9（VMR），
+//    其中 `rdx = ((h+40 & 0xA) == 2)`。r330 实测 `h+40=0x20`；`h+40` 是 `0x291f` 查表
+//    （表 `0x41dae0`）得到的**设备能力位**，不是软件标志 ⇒ `(0x20 & 0xA) == 0` ⇒
+//    真机**只走 VMR**，TMR 分支永不触发。改 `h+40` 等于伪造设备能力（违反红线）。
+//  ⚠ 因此 TMR/VMR **都不需要**苹果这条路径：TMR 已由我方 bringup 完成
+//    （`Psp13Bringup.hpp` 的 `tmrLoad`）⇒ 入口**无条件跳过**，不再依赖 `h+40`。
+//  ⚠ 原件只读 `%rdi`（h）⇒ 1 参数；跳过时不触碰 `h` ⇒ 无需指针校验。
 //  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
 static mach_vm_address_t gOrgPspTmrLoadReal = 0;
-static UInt32 gPspTmrLoadDiag = 0;   // 诊断行计数（前 4 次）
 
 static int wrapPspTmrLoadReal(void* const h)
 {
-    if (gPspTmrReuse && gBringupStep >= 11 && nredKernelPtrOk(h)) {
-        const UInt8* const H = static_cast<const UInt8*>(h);
-        const UInt32 flags = *reinterpret_cast<const UInt32*>(H + 40);
-        // 批次 psptmrreuse v10（取证）：r329 `skip tmr-load` 0 命中 ⇒ 需看 `h+40` 实际值。
-        //   技术经理已确认 `0x4010020b` 是 **VMR 失败**（不是 TMR），`h+40` 的 bit1/bit3/bit8
-        //   语义未完全解出 ⇒ 先打印实际值，再决定条件。前 4 次。
-        if (gPspTmrLoadDiag < 4) {
-            ++gPspTmrLoadDiag;
-            const UInt64 h2824 = *reinterpret_cast<const UInt64*>(H + 2824);
-            static char dLine[128];
-            const int nd = snprintf(dLine, sizeof(dLine),
-                                    "[psptmr] tmrload h40=%x h2824=%llx\n",
-                                    static_cast<unsigned>(flags),
-                                    static_cast<unsigned long long>(h2824));
-            if (nd > 0) { nredTraceLine(dLine, nd); }
-        }
-        if ((flags & 0xAU) == 2U) {
-            static char line[96];
-            const int n = snprintf(line, sizeof(line), "[psptmr] skip tmr-load step=%u\n",
-                                   static_cast<unsigned>(gBringupStep));
-            if (n > 0) { nredTraceLine(line, n); }
-            return 0;
-        }
+    if (gPspTmrReuse && gBringupStep >= 11) {
+        static char line[96];
+        const int n = snprintf(line, sizeof(line), "[psptmr] skip tmr/vmr step=%u\n",
+                               static_cast<unsigned>(gBringupStep));
+        if (n > 0) { nredTraceLine(line, n); }
+        return 0;
     }
     if (gOrgPspTmrLoadReal == 0) { return -1; }
     return FunctionCast(wrapPspTmrLoadReal, gOrgPspTmrLoadReal)(h);
