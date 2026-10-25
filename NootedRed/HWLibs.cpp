@@ -3824,44 +3824,6 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
             *reinterpret_cast<UInt64*>(R + 56 + i * 8) = 0;
         }
         *reinterpret_cast<UInt64*>(R + 568) = 0;
-        // 批次 pspreuse v3（治本，r331/r332 定因）：A 方案跳过苹果 ring 初始化（`0x4ab34`）
-        //   ⇒ 中断使能位未置位 ⇒ `0x495b` 返回 1 ⇒ `0x4c05b` 返回 2 ⇒ `0x140401`。
-        //   ⚠ `0x495b` 真正读的是 **`(*(*(h+16)+8))+52` bit1**，不是 `h+52` bit1：
-        //     `0x4d721: mov 0x10(%r14),%rdi`（p1 = *(h+16)）
-        //     `0x4c07c: movq 8(%rdi),%rdi`   （p2 = *(p1+8)）
-        //     `0x4968: testb $2,52(%rdi)`    （p2+52 bit1）
-        //   ⇒ 两处都置（`h+52` 用于观测 bit1 原本是否已置位；`poll52` 才是 `0x495b` 读的）。
-        //   ⚠ 幂等：bit1 已置位则不重复写。关态（未带开关）⇒ 本块不执行，逐字不变。
-        {
-            UInt32 h52 = *reinterpret_cast<const UInt32*>(H + 52);
-            if ((h52 & 0x2U) == 0) {
-                h52 |= 0x2U;
-                *reinterpret_cast<UInt32*>(H + 52) = h52;
-            }
-            // 两级指针都必须校验；任一失败 ⇒ 输出 `poll52=skip`，**不写**。
-            void* const p1 = *reinterpret_cast<void* const*>(H + 16);
-            void* p2 = nullptr;
-            bool pollOk = false;
-            UInt32 poll52 = 0;
-            if (nredKernelPtrOk(p1)) {
-                p2 = *reinterpret_cast<void* const*>(static_cast<const UInt8*>(p1) + 8);
-                if (nredKernelPtrOk(p2)) {
-                    pollOk = true;
-                    poll52 = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(p2) + 52);
-                    if ((poll52 & 0x2U) == 0) {
-                        poll52 |= 0x2U;
-                        *reinterpret_cast<UInt32*>(static_cast<UInt8*>(p2) + 52) = poll52;
-                    }
-                }
-            }
-            static char irqLine[128];
-            const int ni = pollOk
-                ? snprintf(irqLine, sizeof(irqLine), "[pspreuse] irq-en h52=%x poll52=%x\n",
-                           static_cast<unsigned>(h52), static_cast<unsigned>(poll52))
-                : snprintf(irqLine, sizeof(irqLine), "[pspreuse] irq-en h52=%x poll52=skip\n",
-                           static_cast<unsigned>(h52));
-            if (ni > 0) { nredTraceLine(irqLine, ni); }
-        }
         // 批次 pspreuse v2（治本）：A 方案跳过苹果 ring 初始化 ⇒ `h+14032`（命令缓冲）未分配。
         //   r325 诊断实测 `hOk=1 buf=0` ⇒ 必须补一次 `0x4c407`（分配 ring/命令/fence 缓冲）。
         //   ⚠ **与文档 §4.1 的差异**：文档写 `fn(H + 8, …)`；但反汇编 `0x4ab7f` 是
