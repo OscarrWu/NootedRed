@@ -469,19 +469,6 @@ static const UInt8 kPspSelectorPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 
 static const UInt8 kPspTmrLoadX6Pattern[] = {
     0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x49, 0x89, 0xFE, 0x48,
     0x8B, 0x9F, 0xD0, 0x36, 0x00, 0x00, 0x48, 0x85, 0xDB, 0x74, 0x43};
-// 0x4d6d0 前 28 B（批次 psptmrreuse v4：X5000 HWLibs 的 fence 等待函数；`resolveProbe` 用）。
-//  取自 `com.apple.kext.AMDRadeonX5000HWLibs.macho` `__text`（VMA 0x4d6d0，file off 0x4e6d0；
-//  file off = VMA + 0x1000）。函数体 `0x4d6d0`–`0x4d773`。
-//  ⚠ 用 **28 B** 而非 15 B：15 B 前缀在该 macho 内出现 **141 次**（极不唯一）；
-//    20/24 B 各 3 次；28 B 版本（含 `48 85 f6 74 72`）**唯一**（实测 count=1）。
-//  ⚠ 函数入口确认：`0x4d6cf` 是上一条 `callq` 的末字节 ⇒ `0x4d6d0` 是干净入口；
-//    **`0x4d6d2` 是中段**（`mov %rsp,%rbp` 的第 2 字节），禁止使用。
-//  ⚠ 注意：`HWLibs_full.asm` 在 `0x4d69e`–`0x4d6d1` 区间**反汇编错位**（大量 `<unknown>`），
-//    该处以 macho 原始字节为准（本 pattern 即从 macho 直接取）。
-static const UInt8 kPspFenceWaitPattern[] = {
-    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48, 0x83, 0xEC,
-    0x10, 0x31, 0xC0, 0x48, 0x89, 0x45, 0xD8, 0x48, 0x89, 0x45, 0xD0, 0xBB, 0x01, 0x00,
-    0x00, 0x00, 0x48, 0x85, 0xF6, 0x74, 0x72};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -3646,60 +3633,6 @@ static int wrapPspTmrLoadX6(void* const h, void* const a2)
     }
     if (gOrgPspTmrLoadX6 == 0) { return -1; }
     return FunctionCast(wrapPspTmrLoadX6, gOrgPspTmrLoadX6)(h, a2);
-}
-
-// ─── 批次 psptmrreuse v4：`0x4d6d0`（fence 等待）按 cmd_id 跳过 TMR ──────────────────────
-//  为什么：r322 证明 `0x140401`（fence 超时）先于 `0x4010020b`（TMR 失败）17833 ns ⇒ fence 是根。
-//  fence 实际值在 kext `__DATA`（`h+2784` → `0x47c5f`），PSP 不会写 ⇒ A 方案下永远等不到。
-//  ⚠ 函数入口是 `0x4d6d0`（**不是** `0x4d6d2`，后者是 `mov %rsp,%rbp` 的第 2 字节）。
-//  ⚠ 原件签名：`(h, const u32* ringIndex)`；`*(u32*)idx` = ring_index（0..15）。
-//  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
-static mach_vm_address_t gOrgPspFenceWait = 0;
-static UInt32 gPspFenceDiag = 0;   // 诊断行计数（前 4 次）
-
-static int wrapPspFenceWait(void* const h, const void* const idx)
-{
-    // 批次 psptmrreuse v4（-NRedPspTmrReuse，默认关）：
-    //   在 fence 等待入口按 cmd_id 跳过 TMR（5）：我方 bringup 已完成 TMR，
-    //   苹果的 fence 等待无意义（实际值在 kext __DATA，PSP 不会写）。
-    //   ⚠ 只跳过 cmd_id==5；其他命令原样透传。
-    if (gPspTmrReuse && gBringupStep >= 11 && nredKernelPtrOk(h) && idx != nullptr) {
-        const UInt32 index = *static_cast<const UInt32*>(idx);
-        if (index < 16U) {
-            const UInt8* const H = static_cast<const UInt8*>(h);
-            // ⚠ **与文档 §3.1 的差异**：文档写 `cmdId = *(u32*)(h+1872+index*56)`；
-            //   但反汇编 `0x4d384` 是 `movq 1872(%rbx,%rax), %rsi`（**8 字节载入**），
-            //   且该值被当作参数传给提交 vtable ⇒ 该槽位存的是**指针**，不是内联 cmd_id。
-            //   直接读 u32 得到的是指针低半，**永远不会等于 5**（静默失效）。
-            //   此处按"槽位 → 指针 → cmd_id"解引用，并用 `nredKernelPtrOk` 守卫。
-            const UInt64 slot = *reinterpret_cast<const UInt64*>(
-                H + 1872 + static_cast<size_t>(index) * 56);
-            const bool slotOk = nredKernelPtrOk(reinterpret_cast<const void*>(slot));
-            const UInt32 cmdId = slotOk ? *reinterpret_cast<const UInt32*>(slot) : 0xFFFFFFFFU;
-            // 诊断行（前 4 次）：同时给出 index／槽位原值／解引用后的 cmd_id，
-            //  供下一轮判定"槽位是否指针"（若 slot 不像内核指针 ⇒ 文档公式可能才对）。
-            if (gPspFenceDiag < 4) {
-                ++gPspFenceDiag;
-                static char dLine[128];
-                const int nd = snprintf(dLine, sizeof(dLine),
-                                        "[psptmr] fence idx=%u slot=%llx cmd=%x ok=%u\n",
-                                        static_cast<unsigned>(index),
-                                        static_cast<unsigned long long>(slot),
-                                        static_cast<unsigned>(cmdId),
-                                        slotOk ? 1U : 0U);
-                if (nd > 0) { nredTraceLine(dLine, nd); }
-            }
-            if (cmdId == 5U) {
-                static char line[96];
-                const int n = snprintf(line, sizeof(line), "[psptmr] skip fence cmd=5 step=%u\n",
-                                       static_cast<unsigned>(gBringupStep));
-                if (n > 0) { nredTraceLine(line, n); }
-                return 0;
-            }
-        }
-    }
-    if (gOrgPspFenceWait == 0) { return -1; }
-    return FunctionCast(wrapPspFenceWait, gOrgPspFenceWait)(h, idx);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
@@ -9940,27 +9873,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                         static_cast<unsigned long long>(fromSel),
                                         static_cast<unsigned long long>(gOrgPspSelector));
                 if (nH > 0) { nredTraceLine(selHookLine, nH); }
-            }
-        }
-        // 批次 psptmrreuse v4（`-NRedPspTmrReuse`，默认关）：`0x4d6d0`（fence 等待）拦截。
-        //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
-        if (gPspTmrReuse) {
-            const auto fromFence = resolveProbe("psp-fence", kPspFenceWaitPattern, nullptr,
-                                                arrsize(kPspFenceWaitPattern), 0x4D6D0);
-            bool okFence = false;
-            if (fromFence != 0) {
-                okFence = hookProbe(fromFence,
-                                    KernelPatcher::RouteRequest{nullptr, wrapPspFenceWait, gOrgPspFenceWait},
-                                    "psp-fence");
-            }
-            {
-                static char fenceHookLine[96];
-                const int nH = snprintf(fenceHookLine, sizeof(fenceHookLine),
-                                        "[psptmr] fence-hook=%s at=%llx org=%llx\n",
-                                        (fromFence == 0) ? "resolve-failed" : (okFence ? "installed" : "route-failed"),
-                                        static_cast<unsigned long long>(fromFence),
-                                        static_cast<unsigned long long>(gOrgPspFenceWait));
-                if (nH > 0) { nredTraceLine(fenceHookLine, nH); }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
