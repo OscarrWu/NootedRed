@@ -3648,7 +3648,7 @@ static int wrapPspTmrLoadX6(void* const h, void* const a2)
     return FunctionCast(wrapPspTmrLoadX6, gOrgPspTmrLoadX6)(h, a2);
 }
 
-// ─── 批次 psptmrreuse v6：`0x4d6d0`（fence 等待）按 cmd_id 跳过 TMR ──────────────────────
+// ─── 批次 psptmrreuse v5：`0x4d6d0`（fence 等待）按 cmd_id 跳过 TMR ──────────────────────
 //  为什么：r322 证明 `0x140401`（fence 超时）先于 `0x4010020b`（TMR 失败）17833 ns ⇒ fence 是根。
 //  fence 实际值在 kext `__DATA`（`h+2784` → `0x47c5f`），PSP 不会写 ⇒ A 方案下永远等不到。
 //  ⚠ 函数入口是 `0x4d6d0`（**不是** `0x4d6d2`，后者是 `mov %rsp,%rbp` 的第 2 字节）。
@@ -3659,43 +3659,33 @@ static UInt32 gPspFenceDiag = 0;   // 诊断行计数（前 4 次）
 
 static int wrapPspFenceWait(void* const h, const void* const idx)
 {
-    // 批次 psptmrreuse v6（-NRedPspTmrReuse，默认关）：
+    // 批次 psptmrreuse v5（-NRedPspTmrReuse，默认关）：
     //   cmd_id 在 `*(h+14032)+0`（命令缓冲虚拟地址），**不是** `h+1872+index*56`
     //   （后者是 ring 槽的 MC 地址；r323 诊断实测 `slot=fefe000 ok=0` 已证伪）。
     //   我方 bringup 已完成 TMR ⇒ 苹果的 fence 等待无意义，直接返回 0。
     //   ⚠ 只跳过 cmd_id==5；其他命令原样透传。
-    //   ⚠ **诊断前置**（r324 教训）：诊断行**不受任何指针校验门控** ⇒ 只要开关开且
-    //     `gBringupStep>=11` 就打印（前 4 次），否则无法区分"没执行"与"校验失败"。
-    //     指针校验只用于**安全地**取值（`h` 无效则不读 `h+14032`；`buf` 无效则不读 `+0`）。
-    if (gPspTmrReuse && gBringupStep >= 11) {
-        const bool hOk = nredKernelPtrOk(h);
-        UInt64 buf = 0;
-        bool bufOk = false;
-        UInt32 cmdId = 0xFFFFFFFFU;
-        if (hOk) {
-            const UInt8* const H = static_cast<const UInt8*>(h);
-            buf = *reinterpret_cast<const UInt64*>(H + 14032);
-            bufOk = nredKernelPtrOk(reinterpret_cast<const void*>(buf));
-            if (bufOk) { cmdId = *reinterpret_cast<const UInt32*>(buf); }
-        }
-        if (gPspFenceDiag < 4) {
-            ++gPspFenceDiag;
-            static char dLine[160];
-            const int nd = snprintf(dLine, sizeof(dLine),
-                                    "[psptmr] fence h=%llx hOk=%u buf=%llx bufOk=%u cmd=%x\n",
-                                    static_cast<unsigned long long>(reinterpret_cast<UInt64>(h)),
-                                    hOk ? 1U : 0U,
-                                    static_cast<unsigned long long>(buf),
-                                    bufOk ? 1U : 0U,
-                                    static_cast<unsigned>(cmdId));
-            if (nd > 0) { nredTraceLine(dLine, nd); }
-        }
-        if (bufOk && cmdId == 5U) {
-            static char line[96];
-            const int n = snprintf(line, sizeof(line), "[psptmr] skip fence cmd=5 step=%u\n",
-                                   static_cast<unsigned>(gBringupStep));
-            if (n > 0) { nredTraceLine(line, n); }
-            return 0;
+    if (gPspTmrReuse && gBringupStep >= 11 && nredKernelPtrOk(h)) {
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const void* const cmdBuf = *reinterpret_cast<const void* const*>(H + 14032);
+        if (nredKernelPtrOk(cmdBuf)) {
+            const UInt32 cmdId = *reinterpret_cast<const UInt32*>(cmdBuf);
+            // 诊断行（前 4 次）：`cmd` = `*(h+14032)+0`；`ok` = (cmd == 5)。
+            if (gPspFenceDiag < 4) {
+                ++gPspFenceDiag;
+                static char dLine[96];
+                const int nd = snprintf(dLine, sizeof(dLine),
+                                        "[psptmr] fence cmd=%x ok=%u\n",
+                                        static_cast<unsigned>(cmdId),
+                                        (cmdId == 5U) ? 1U : 0U);
+                if (nd > 0) { nredTraceLine(dLine, nd); }
+            }
+            if (cmdId == 5U) {
+                static char line[96];
+                const int n = snprintf(line, sizeof(line), "[psptmr] skip fence cmd=5 step=%u\n",
+                                       static_cast<unsigned>(gBringupStep));
+                if (n > 0) { nredTraceLine(line, n); }
+                return 0;
+            }
         }
     }
     if (gOrgPspFenceWait == 0) { return -1; }
