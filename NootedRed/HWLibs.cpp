@@ -491,6 +491,17 @@ static const UInt8 kPspFenceWaitPattern[] = {
 static const UInt8 kPspTmrLoadRealPattern[] = {
     0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x48, 0x81, 0xEC,
     0x88, 0x03, 0x00, 0x00, 0x49, 0x89, 0xFE, 0x48, 0x8B, 0x05, 0x32, 0x73};
+// 0x4f521 前 24 B（批次 psptmrreuse v12：X5000 HWLibs 的 **ASD 加载函数**；`resolveProbe` 用）。
+//  取自 `com.apple.kext.AMDRadeonX5000HWLibs.macho` `__text`（VMA 0x4f521，file off 0x50521；
+//  file off = VMA + 0x1000）。函数体 `0x4f521`–`0x4f66a`（`sub $0x380,%rsp` ⇒ 栈帧 896 B）。
+//  ⚠ 用 **24 B** 而非任务卡写的 15 B：15 B 前缀在该 macho 内出现 **13 次**（不唯一）；
+//    20 B 6 次；24 B **唯一**（实测 count=1）。15 B 虽仍能过 expected-offset 校验，
+//    但一旦回退到全 kext 扫描就会命中错误位置 ⇒ 取 24 B。
+//  ⚠ 函数入口确认：`0x4f520` = `c3`（上一条 `ret`）⇒ `0x4f521` 是干净入口。
+//  ⚠ 原件只读 `%rdi`（h）⇒ **1 参数**（`%rsi` 在 `0x4f5b2`/`0x4f5d5` 先写后读）。
+static const UInt8 kPspAsdLoadPattern[] = {
+    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48,
+    0x81, 0xEC, 0x80, 0x03, 0x00, 0x00, 0x49, 0x89, 0xFE, 0x48, 0x8B, 0x05};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -3750,6 +3761,32 @@ static int wrapPspTmrLoadReal(void* const h)
     }
     if (gOrgPspTmrLoadReal == 0) { return -1; }
     return FunctionCast(wrapPspTmrLoadReal, gOrgPspTmrLoadReal)(h);
+}
+
+// ─── 批次 psptmrreuse v12：`0x4f521`（ASD 加载）入口拦截 ─────────────────────────────────
+//  r331 观测：`0x4dd8c` 无条件跳过后 `0x4010020b` 消失，但新出现 `0x4010020d`（ASD 加载失败），
+//  且 `0x140401`（fence 超时）仍在 ⇒ 下一道门是 ASD。
+//  反汇编确认：`0x4f5dc: movl $4,(%rsi)`（`cmd_id = 4` = LOAD_ASD）；`0x4f60e: callq 0x4d2c4`
+//  （提交）；`0x4f626: movl $0x4010020D,%esi`（失败上报）；`0x4f642: movl %eax,13724(%r14)`（响应）。
+//  ⚠ ASD（AMD Secure Debug）是安全调试功能；我方 bringup 的 `BringupStep` **没有 AsdLoad**
+//    ⇒ 不是冗余，但普通图形加速【推断·中】不必需 ⇒ 入口无条件跳过。
+//  ⚠ 原件只读 `%rdi`（h）⇒ 1 参数；跳过时不触碰 `h` ⇒ 无需指针校验。
+//  ⚠ 副作用（【未解出】）：跳过 ⇒ `h+13724`（ASD 响应）不被写入；下一个函数 `0x4f670`
+//    在 `0x4f6e8` 读它并作为 `cmd_id=2` 的参数。若该值必须非 0，会引出新失败。
+//  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
+static mach_vm_address_t gOrgPspAsdLoad = 0;
+
+static int wrapPspAsdLoad(void* const h)
+{
+    if (gPspTmrReuse && gBringupStep >= 11) {
+        static char line[96];
+        const int n = snprintf(line, sizeof(line), "[psptmr] skip asd step=%u\n",
+                               static_cast<unsigned>(gBringupStep));
+        if (n > 0) { nredTraceLine(line, n); }
+        return 0;
+    }
+    if (gOrgPspAsdLoad == 0) { return -1; }
+    return FunctionCast(wrapPspAsdLoad, gOrgPspAsdLoad)(h);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
@@ -10065,6 +10102,29 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                         static_cast<unsigned long long>(fromTmrReal),
                                         static_cast<unsigned long long>(gOrgPspTmrLoadReal));
                 if (nH > 0) { nredTraceLine(tmrRealHookLine, nH); }
+            }
+        }
+        // 批次 psptmrreuse v12（`-NRedPspTmrReuse`，默认关）：`0x4f521`（ASD 加载）拦截。
+        //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        if (gPspTmrReuse) {
+            const auto fromAsd = resolveProbe("psp-asd", kPspAsdLoadPattern, nullptr,
+                                              arrsize(kPspAsdLoadPattern), 0x4F521);
+            bool okAsd = false;
+            if (fromAsd != 0) {
+                okAsd = hookProbe(fromAsd,
+                                  KernelPatcher::RouteRequest{nullptr, wrapPspAsdLoad,
+                                                              gOrgPspAsdLoad},
+                                  "psp-asd");
+            }
+            {
+                static char asdHookLine[96];
+                const int nH = snprintf(asdHookLine, sizeof(asdHookLine),
+                                        "[psptmr] asd-hook=%s at=%llx org=%llx\n",
+                                        (fromAsd == 0) ? "resolve-failed"
+                                                       : (okAsd ? "installed" : "route-failed"),
+                                        static_cast<unsigned long long>(fromAsd),
+                                        static_cast<unsigned long long>(gOrgPspAsdLoad));
+                if (nH > 0) { nredTraceLine(asdHookLine, nH); }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
