@@ -3617,23 +3617,35 @@ static int wrapPspSelector(void* const h, const UInt32 selector,
 //  A′ 改为：读 `C2PMSG_69/70/71`（PSP 侧记录的 ring MC 地址 lo/hi 与大小），
 //  与我方 bringup 建环时写入的值比对；再读 `C2PMSG_64` 的 bit31（PSP 响应位）。
 //  全部相符 ⇒ 有真实校验背书，才允许 `return 0`；任一不符 ⇒ **调原件**（不伪造）。
-//  ⚠ 读走 `fw::RegSinkKernel`（SMN 间接通道，内部已有锁 + 重试），不绕过它直读 BAR5（硬规则 H-1）。
-//  ⚠ 单次读、无循环、无写；`err` 取值见实施文档 §3.1 判据表。
+//  ⚠ **R7-①**：读走**苹果读回调 `*(iface+0x40)`**（与 `pspStateEmit` 同款，已证工作：
+//    `4ccae ret=0`），**不再**走 `fw::bringupSink()`——后者的 `cb.lock == nullptr`、
+//    `maxRetries = 3`（重试≠超时）⇒ 违反硬规则 H-1a（无锁无硬超时）。
+//  ⚠ 单次读、无循环、无写；`err` 取值见下表。
 //  ⚠ 关态零行为：本函数只在 `gPspRingReuse` 为真时被调用。
-static bool nredPspRingVerify(UInt32* const lo, UInt32* const hi,
+//
+//  `err` 表（R7-① 后：读失败不再细分到 69/70/71，因为苹果回调不返回错误码）：
+//    1 = `h` 非内核指针；2 = `iface`（`*(h+8)`）非法；3 = 读回调为空；
+//    5 = 地址不匹配；6 = 大小不匹配；8 = `C2PMSG_64` 的 bit31 = 0（PSP 未响应）。
+static bool nredPspRingVerify(void* const h, UInt32* const lo, UInt32* const hi,
                               UInt32* const size, int* const err)
 {
     *lo = 0; *hi = 0; *size = 0; *err = 0;
-    if (gBringupStep == 0) { *err = 1; return false; }   // bringup 未跑过 ⇒ sink 回调为空
+    if (!nredKernelPtrOk(h)) { *err = 1; return false; }
 
-    fw::RegSinkKernel& sink = fw::bringupSink();
+    const UInt8* const H = static_cast<const UInt8*>(h);
+    const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
+    if (!nredKernelPtrOk(reinterpret_cast<const void*>(iface))) { *err = 2; return false; }
+    const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
+    const UInt64 readReg = *reinterpret_cast<const UInt64*>(IF + 0x40);   // 苹果读回调
+    const UInt64 ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
+    if (readReg == 0) { *err = 3; return false; }
 
-    *lo = sink.read(fw::kC2PMSG69);
-    if (sink.lastError() != fw::SmnAccessError::None) { *err = 2; return false; }
-    *hi = sink.read(fw::kC2PMSG70);
-    if (sink.lastError() != fw::SmnAccessError::None) { *err = 3; return false; }
-    *size = sink.read(fw::kC2PMSG71);
-    if (sink.lastError() != fw::SmnAccessError::None) { *err = 4; return false; }
+    using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
+    const auto fn = reinterpret_cast<PspReadReg>(readReg);
+    const UInt32 base = *reinterpret_cast<const UInt32*>(H + 92);          // h+0x5C
+    *lo   = fn(ctx, base + 0x85U, 75U);   // C2PMSG_69（MC 低）
+    *hi   = fn(ctx, base + 0x86U, 75U);   // C2PMSG_70（MC 高）
+    *size = fn(ctx, base + 0x87U, 75U);   // C2PMSG_71（大小）
 
     const UInt64 addr = static_cast<UInt64>(*lo) | (static_cast<UInt64>(*hi) << 32);
     if (addr != gBringupRingMc) { *err = 5; return false; }
@@ -3641,8 +3653,7 @@ static bool nredPspRingVerify(UInt32* const lo, UInt32* const hi,
 
     // A′-7b：`C2PMSG_64` 的 bit31＝PSP 响应位。只有它为 1 才能证明 PSP 真的处理了 ring create，
     //  否则 69/70/71 只是"我方写入的值"，不能证明"PSP 接受"。
-    const UInt32 ctrl = sink.read(fw::kC2PMSG64);
-    if (sink.lastError() != fw::SmnAccessError::None) { *err = 7; return false; }
+    const UInt32 ctrl = fn(ctx, base + 128U, 75U);   // C2PMSG_64
     if ((ctrl & fw::kMboxTosRespFlag) == 0) { *err = 8; return false; }
 
     return true;
@@ -3668,7 +3679,7 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         && nredKernelPtrOk(h)) {
         UInt32 lo = 0, hi = 0, size = 0;
         int verr = 0;
-        if (!nredPspRingVerify(&lo, &hi, &size, &verr)) {
+        if (!nredPspRingVerify(h, &lo, &hi, &size, &verr)) {
             // 校验失败 ⇒ 调原件（不伪造成功）。`err` 取值见实施文档 §3.1 判据表。
             static char vfLine[160];
             const int nv = snprintf(vfLine, sizeof(vfLine),
@@ -4024,26 +4035,33 @@ static void wrapPspSub4c664(void* const h, const int base, const UInt32 idx,
         ++gPspSub4c664;
         const UInt8* const H = static_cast<const UInt8*>(h);
         const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
-        UInt64 wcb = 0, rcb = 0, ctx = 0;
+        UInt64 wcb = 0, rcb = 0, ctx = 0, allocCb = 0, freeCb = 0;
         if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
             const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
-            wcb = *reinterpret_cast<const UInt64*>(IF + 0x38);   // 写回调
-            rcb = *reinterpret_cast<const UInt64*>(IF + 0x40);   // 读回调（对照项）
-            ctx = *reinterpret_cast<const UInt64*>(IF + 8);
+            wcb     = *reinterpret_cast<const UInt64*>(IF + 0x38);   // 写回调
+            rcb     = *reinterpret_cast<const UInt64*>(IF + 0x40);   // 读回调（对照项）
+            ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
+            // R2：分配/释放回调（Part 2 的配对：`0x4c407` 用 `+0x10`，`0x4c4bf` 用 `+0x20`）。
+            //  ⚠ 原写 `+0x18` 是**错**的——那是系统内存 free（`0x4bf3c`），与 `0x4beba` 配对。
+            //  纯内存读，H-4 合规；用于 Part 2 条件触发时判断"分配链是否可用"。
+            allocCb = *reinterpret_cast<const UInt64*>(IF + 0x10);
+            freeCb  = *reinterpret_cast<const UInt64*>(IF + 0x20);
         }
         // `addr = base + *(int*)(h+0x5C + idx*4)`；`idx` 实测恒为 0（实施文档 §6.4），
         //  但按公式算，避免把"表项非 0"误读成地址错。
         const UInt32 addr = static_cast<UInt32>(base) +
             static_cast<UInt32>(*reinterpret_cast<const SInt32*>(H + 0x5C + idx * 4));
-        static char line[192];
+        static char line[224];
         const int n = snprintf(line, sizeof(line),
                                "[pspsub] fn=4c664 base=%x idx=%u addr=%x val=%x flag=%x "
-                               "wcb=%llx rcb=%llx\n",
+                               "wcb=%llx rcb=%llx alloc=%llx free=%llx\n",
                                static_cast<unsigned>(base), static_cast<unsigned>(idx),
                                static_cast<unsigned>(addr), static_cast<unsigned>(value),
                                static_cast<unsigned>(flag),
                                static_cast<unsigned long long>(wcb),
-                               static_cast<unsigned long long>(rcb));
+                               static_cast<unsigned long long>(rcb),
+                               static_cast<unsigned long long>(allocCb),
+                               static_cast<unsigned long long>(freeCb));
         if (n > 0) { nredTraceLine(line, n); }
         (void)ctx;
     }

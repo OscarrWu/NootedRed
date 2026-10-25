@@ -118,12 +118,6 @@ struct NredSyslogMuteGuard {
 //  `RegSinkKernel` 无拷贝但可默认构造 + `setCallbacks()` ⇒ 不再在 hook 栈上构造（省 ~100 B）。
 static fw::SmnCallbacks gBringupCb;
 static fw::RegSinkKernel gBringupSink;
-// A′（-NRedPspRingReuse）：暴露 bringup 的 RegSinkKernel，供 HWLibs.cpp 的
-//  `nredPspRingVerify` 读 C2PMSG_69/70/71（+64 的 bit31）做真实校验。
-//  ⚠ `gBringupSink` 是 static（本头文件仅被 HWLibs.cpp 包含）⇒ 用 inline 访问器暴露，
-//    避免把 sink 本身改成非 static（它带回调上下文，语义上不应外泄）。
-//  ⚠ 调用前必须确认 bringup 已跑过（`gBringupStep != 0`）；否则 `cb_` 为空 ⇒ read 会解引用空指针。
-inline RegSinkKernel& bringupSink() { return gBringupSink; }
 // ⚠ 必须是**命名空间作用域**而不是函数内 static：带 NSDMI 的类型（BringupCtx）在函数内
 //   会要求 guard variable（内核不支持，CI run456 已证）⇒ 一律放在这里；进入时显式重置。
 static fw::RingState   gBringupRing;
