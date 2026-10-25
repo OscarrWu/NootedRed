@@ -401,6 +401,12 @@ static void nredBringupBody()
     if (rc != 0) {
         NRED_TRACE("bringup: phase1 failed step=%u error=%d loadToc_resp=0x%X",
                    static_cast<unsigned>(ctx.last_step), rc, gBringupLoadToc);
+        // ⚠ 失败路径会释放 ringDesc ⇒ `gBringupRingVa` 成悬垂指针。
+        //   必须清掉导出的 ring 信息，否则 A′（`gBringupRingMc != 0` 即触发）会 memset 已释放内存。
+        gBringupRingMc   = 0;
+        gBringupRingSize = 0;
+        gBringupRingVa   = 0;
+        gBringupRingWptr = 0;
         ringDesc->complete(); ringDesc->release();
         cmdDesc->complete(); cmdDesc->release();
         fenceDesc->complete(); fenceDesc->release();
@@ -439,6 +445,11 @@ static void nredBringupBody()
         NRED_TRACE("tmr-alloc: fail rc=%d", (tmrDesc == nullptr) ? 0 : 1);
         NRED_TRACE("bringup: tmr alloc failed size=0x%X", ctx.tmr_size);
         if (tmrDesc) { tmrDesc->complete(); tmrDesc->release(); }
+        // ⚠ 同 phase1 失败路径：释放 ringDesc 后必须清掉导出的 ring 信息（防 A′ 悬垂 memset）。
+        gBringupRingMc   = 0;
+        gBringupRingSize = 0;
+        gBringupRingVa   = 0;
+        gBringupRingWptr = 0;
         ringDesc->complete(); ringDesc->release();
         cmdDesc->complete(); cmdDesc->release();
         fenceDesc->complete(); fenceDesc->release();
@@ -621,12 +632,15 @@ static void nredBringupBody()
 
     // D3: TMR 缓冲保留至卸载（对齐 Linux"保留至卸载"契约，防提前释放）。
     // 此处不释放 tmrDesc，保留至 kext 卸载（static 持有）。
-    // 释放（引导期单次执行；结束后释放，避免长期占用）。
-    ringDesc->complete(); ringDesc->release();
+    // ⚠ **ring 缓冲也必须保留**（A′ 需要）：`gBringupRingMc`／`gBringupRingVa` 会被
+    //   `HWLibs.cpp` 的 A′ 写进苹果的 `h+0x2C0` 并**清零**（`memset(gBringupRingVa, …)`）。
+    //   若此处 `release()`，`gBringupRingVa` 即成悬垂指针 ⇒ A′ 的 memset 是 use-after-free，
+    //   且苹果随后会 DMA 到已释放内存。代价 4 KB（`kRingSizeBytes`），可接受。
+    //   （原实现四个描述符全释放；`cmdDesc`／`fenceDesc`／`fwPriDesc` 仍释放——A′ 不引用它们。）
     cmdDesc->complete(); cmdDesc->release();
     fenceDesc->complete(); fenceDesc->release();
     fwPriDesc->complete(); fwPriDesc->release();
-    // tmrDesc 故意不释放：保留至卸载（D3）
+    // ringDesc 与 tmrDesc 一样故意不释放：保留至卸载
 }
 
 }  // namespace fw
