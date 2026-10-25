@@ -502,17 +502,6 @@ static const UInt8 kPspTmrLoadRealPattern[] = {
 static const UInt8 kPspAsdLoadPattern[] = {
     0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48,
     0x81, 0xEC, 0x80, 0x03, 0x00, 0x00, 0x49, 0x89, 0xFE, 0x48, 0x8B, 0x05};
-// 0x4cb4f 前 15 B（批次 psptmrreuse v14：X5000 HWLibs 的 **ring enable interrupt**；`resolveProbe` 用）。
-//  取自 `com.apple.kext.AMDRadeonX5000HWLibs.macho` `__text`（VMA 0x4cb4f，file off 0x4db4f；
-//  file off = VMA + 0x1000）。函数体 `0x4cb4f`–`0x4cb89`（`0x4cb89` = `c3`）。
-//  ⚠ 15 B 已**唯一**（实测 count=1；20/24/28 B 也都是 1）⇒ 按任务卡取 15 B。
-//  ⚠ 函数入口确认：`0x4cb4e` = `c3`（上一条 `ret`）⇒ `0x4cb4f` 是干净入口。
-//  ⚠ 原件只读 `%rdi`（h）⇒ **1 参数**（`%rsi` 在 `0x4cb73` 才被写）。
-//  ⚠ 失败点：`0x4cb59: call *0x7da8(%rdi)`（= `*(h+32168)`）返回非 0 ⇒
-//    `0x4cb73: movl $0x4010020F,%esi` 上报；成功则 `0x4cb64: je 0x4cb82` 直接返回。
-static const UInt8 kPspRingIrqPattern[] = {
-    0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48, 0x89, 0xFB, 0xFF, 0x97,
-    0xA8, 0x7D, 0x00};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -3754,29 +3743,6 @@ static int wrapPspAsdLoad(void* const h)
     }
     if (gOrgPspAsdLoad == 0) { return -1; }
     return FunctionCast(wrapPspAsdLoad, gOrgPspAsdLoad)(h);
-}
-
-// ─── 批次 psptmrreuse v14：`0x4cb4f`（ring enable interrupt）入口拦截 ─────────────────────
-//  r334 观测：fence 跳过后 `0x140401`/`0x4010020e` 消失，但新出现 `0x4010020f`
-//  （`psp_ring_enable_interrupt: failed`）⇒ 下一道门是 ring 中断使能。
-//  反汇编确认：`0x4cb59: call *0x7da8(%rdi)`（= `*(h+32168)`）返回非 0 ⇒
-//  `0x4cb73: movl $0x4010020F,%esi` 上报；成功则 `0x4cb64: je 0x4cb82` 直接返回。
-//  ⚠ 中断使能是**可选功能**（ring 提交不依赖中断）；A 方案没建立中断路径 ⇒ 入口跳过。
-//  ⚠ 原件只读 `%rdi`（h）⇒ 1 参数；跳过时不触碰 `h` ⇒ 无需指针校验。
-//  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
-static mach_vm_address_t gOrgPspRingIrq = 0;
-
-static int wrapPspRingIrq(void* const h)
-{
-    if (gPspTmrReuse && gBringupStep >= 11) {
-        static char line[96];
-        const int n = snprintf(line, sizeof(line), "[psptmr] skip ring-irq step=%u\n",
-                               static_cast<unsigned>(gBringupStep));
-        if (n > 0) { nredTraceLine(line, n); }
-        return 0;
-    }
-    if (gOrgPspRingIrq == 0) { return -1; }
-    return FunctionCast(wrapPspRingIrq, gOrgPspRingIrq)(h);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
@@ -10153,29 +10119,6 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                         static_cast<unsigned long long>(fromAsd),
                                         static_cast<unsigned long long>(gOrgPspAsdLoad));
                 if (nH > 0) { nredTraceLine(asdHookLine, nH); }
-            }
-        }
-        // 批次 psptmrreuse v14（`-NRedPspTmrReuse`，默认关）：`0x4cb4f`（ring enable interrupt）拦截。
-        //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
-        if (gPspTmrReuse) {
-            const auto fromRingIrq = resolveProbe("psp-ring-irq", kPspRingIrqPattern, nullptr,
-                                                  arrsize(kPspRingIrqPattern), 0x4CB4F);
-            bool okRingIrq = false;
-            if (fromRingIrq != 0) {
-                okRingIrq = hookProbe(fromRingIrq,
-                                      KernelPatcher::RouteRequest{nullptr, wrapPspRingIrq,
-                                                                  gOrgPspRingIrq},
-                                      "psp-ring-irq");
-            }
-            {
-                static char ringIrqHookLine[96];
-                const int nH = snprintf(ringIrqHookLine, sizeof(ringIrqHookLine),
-                                        "[psptmr] ring-irq-hook=%s at=%llx org=%llx\n",
-                                        (fromRingIrq == 0) ? "resolve-failed"
-                                                           : (okRingIrq ? "installed" : "route-failed"),
-                                        static_cast<unsigned long long>(fromRingIrq),
-                                        static_cast<unsigned long long>(gOrgPspRingIrq));
-                if (nH > 0) { nredTraceLine(ringIrqHookLine, nH); }
             }
         }
         // 批次 C3（观测装置一次性方案 §4）：平台自检模式（`-NRedTraceSelfTest`，默认关）。
