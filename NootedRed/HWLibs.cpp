@@ -3680,26 +3680,29 @@ static int wrapPspFenceWait(void* const h, const void* const idx)
         }
         if (gPspFenceDiag < 4) {
             ++gPspFenceDiag;
-            // 批次 psptmrreuse v7（取证）：打印两级返回地址，用于确定 `0x4d6d0` 的**实际调用者**
-            //   （`0x4d3ca`／`0x4d9fb`／`0x4db25` 三选一）。
-            //   ⚠ clang 对使用 `__builtin_return_address(1)` 的函数**自动保留帧指针**
-            //     （本地实测 `-O3` 下生成 `push %rbp; mov %rsp,%rbp`），故 `ra1` 的读取是
-            //     `[ [rbp] + 8 ]` —— 两级都是**栈上**读取，不会野指针。
-            //   ⚠ `ra0` 指向 Lilu 跳板（同一 hook ⇒ 三个调用者共用 ⇒ 可能相同）；
-            //     `ra1` 才是原调用者（跳板多一层）。两者都打印，供下一轮判定。
+            // 批次 psptmrreuse v8（取证）：打印三级返回地址。
+            //   r327 判读：`ra0 - slide = 0x4d3cf`（= `0x4d3ca + 5`）⇒ `0x4d6d0` ← `0x4d2c4`；
+            //   `ra1` 落在**内核**地址范围（`0xffffff80…`，非 kext 的 `0xffffff7f…`）⇒ 跳板层。
+            //   ⇒ 需 `ra2` 才能定位 `0x4d2c4` 的调用者。
+            //   ⚠ clang 对使用 `__builtin_return_address(N>0)` 的函数**自动保留帧指针**
+            //     （本地实测 `-O3` 下生成 `push %rbp; mov %rsp,%rbp`）。
+            //   ⚠ `ra1` 已在 r327 成功读出（内核地址）⇒ 帧链至少 2 层有效；xnu 内核保留帧指针
+            //     ⇒ `ra2` 的第三层读也是**栈上**读取。
             const UInt64 ra0 = reinterpret_cast<UInt64>(__builtin_return_address(0));
             const UInt64 ra1 = reinterpret_cast<UInt64>(__builtin_return_address(1));
+            const UInt64 ra2 = reinterpret_cast<UInt64>(__builtin_return_address(2));
             static char dLine[192];
             const int nd = snprintf(dLine, sizeof(dLine),
                                     "[psptmr] fence h=%llx hOk=%u buf=%llx bufOk=%u cmd=%x "
-                                    "ra0=%llx ra1=%llx\n",
+                                    "ra0=%llx ra1=%llx ra2=%llx\n",
                                     static_cast<unsigned long long>(reinterpret_cast<UInt64>(h)),
                                     hOk ? 1U : 0U,
                                     static_cast<unsigned long long>(buf),
                                     bufOk ? 1U : 0U,
                                     static_cast<unsigned>(cmdId),
                                     static_cast<unsigned long long>(ra0),
-                                    static_cast<unsigned long long>(ra1));
+                                    static_cast<unsigned long long>(ra1),
+                                    static_cast<unsigned long long>(ra2));
             if (nd > 0) { nredTraceLine(dLine, nd); }
         }
         if (bufOk && cmdId == 5U) {
