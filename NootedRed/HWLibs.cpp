@@ -1002,6 +1002,15 @@ void nredTraceLine(char* const buf, const int n)
     gTraceRing.push(buf, n);
 }
 
+// R2-②（实施文档 §6.2）：`[tick]` 活性标记的门控访问器。
+//  `NvMsgBuf.hpp` 不包含 `HWLibs.hpp`（会带入静态缓冲）⇒ 它只能前向声明本函数；
+//  定义放在这里（`gPspEdxOn` 是文件作用域 static，见 `:590`）。
+//  ⚠ 零新增 bootarg：与 `-NRedPspEdx` 同源 ⇒ 关态（不带该开关）`[tick]` 一行都不写（H-5）。
+bool nredPspEdxOn()
+{
+    return gPspEdxOn;
+}
+
 // A4（2026-10-13）：探针解引用的"合法内核指针门"——非空 且 高位形如内核指针（0xFFFF）。
 //  口径沿用 wrapMode9e505 的既有判定（`(sv >> 48) == 0xFFFF`，A4 前唯一先例）；防"表内容
 //  残留的低位垃圾值"被当指针解引用（B50/B51 实证：base28/base30/t28_0 等字段确实可能为

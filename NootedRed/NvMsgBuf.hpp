@@ -101,6 +101,11 @@ bool nredFailResetService();
 //  `nredTraceLine` 定义在 HWLibs.cpp（声明在 HWLibs.hpp）；本头文件不包含 HWLibs.hpp
 //  （会带入静态缓冲），故在此**前向声明**同一签名。
 void nredTraceLine(char* const buf, const int n);
+// R2-②（实施文档 §6.2）：`[tick]` 的门控——返回 `-NRedPspEdx` 的开关状态。
+//  定义在 HWLibs.cpp（`gPspEdxOn` 是文件作用域 static，见 `:590`）。
+//  ⚠ 零新增 bootarg；关态（不带该开关）⇒ `[tick]` 一行都不写（H-5／约束 A）。
+bool nredPspEdxOn();
+
 
 namespace NvMsgBuf {
 	static constexpr int kMagic   = 0x063061;
@@ -493,8 +498,9 @@ namespace NvMsgBuf {
 			//  ⚠ `-NRedPspState` **不能**替代：环空时 `pspStateEmit` 早退（HWLibs.cpp:1845），
 			//    且采样在 `:1944-1946` 之后才发生 ⇒ 环空时零输出。
 			//  ⚠ 纯内存（`nredTraceLine` 不刷盘）⇒ 规则 4 合规；`static` 缓冲不占栈。
-			//  ⚠ 关态零行为：本行只在 tick 计数到达时写，且不改变任何控制流。
-			if ((tick % 10) == 0) {
+			//  ⚠ **关态零行为（H-5）**：门控 `nredPspEdxOn()`（＝`-NRedPspEdx`）⇒
+			//    不带该开关时 `[tick]` **一行都不写**，环内容与改动前逐字一致。
+			if (nredPspEdxOn() && (tick % 10) == 0) {
 				static char tickLine[48];
 				const int nt = snprintf(tickLine, sizeof(tickLine), "[tick] n=%d\n", tick);
 				if (nt > 0) { nredTraceLine(tickLine, nt); }
