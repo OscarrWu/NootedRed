@@ -459,16 +459,6 @@ static const UInt8 kPspSub56fffPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 
 //   入口 `48 85 ff` = `test %rdi,%rdi` ⇒ rdi = h；`89 f0` = `mov %esi,%eax` ⇒ **esi = selector**。）
 static const UInt8 kPspSelectorPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48,
                                             0x85, 0xFF, 0x74, 0x36, 0x49, 0x89, 0xFE};
-// 0x4bafd 前 25 B（批次 psptmrreuse v3：X6000 HWLibs 的 TMR 加载函数；`resolveProbe` 用）。
-//  取自 `com.apple.kext.AMDRadeonX6000HWLibs.macho` `__text`（VMA 0x4bafd，file off 0x4cafd；
-//  该 macho 的 `__text` addr=0x1470 / fileoff=0x2470 ⇒ **file off = VMA + 0x1000**，与 X5000 同）。
-//  ⚠ 用 **25 B** 而非 15 B：15 B 前缀（`55 48 89 e5 41 57 41 56 53 50 49 89 fe 48 8b`）在该 macho
-//    内出现 **58 次**（不唯一）；25 B 版本（含 `48 8b 9f d0 36 00 00 48 85 db 74 43`）**唯一**（实测 count=1）。
-//  ⚠ 函数入口确认：`0x4bafc` = `c3`（上一条 `ret`）⇒ `0x4bafd` 是干净入口。
-//    `0x4bb28` **不是**入口（它是 `movl $5,(%rbx)`，函数中段）；`0x4bb0a` 也不是（函数内第 13 B）。
-static const UInt8 kPspTmrLoadX6Pattern[] = {
-    0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x50, 0x49, 0x89, 0xFE, 0x48,
-    0x8B, 0x9F, 0xD0, 0x36, 0x00, 0x00, 0x48, 0x85, 0xDB, 0x74, 0x43};
 // 260（`-NRedStage1`）：守卫首个失败步号（仅供判读；不影响守卫返回）。
 static UInt32 gSt1GfClient = 0xFFFFFFFFU;   // 0xFFFFFFFF＝尚无失败
 static UInt32 gSt1GfStep = 0;
@@ -630,10 +620,6 @@ static bool gPspRingReuse = false;   // `-NRedPspRingReuse`
 //  ⇒ 苹果的 SETUP_TMR 是冗余命令，直接返回 0（不构造、不提交、不设 fence、不等 fence）。
 //  ⚠ 关态 ⇒ 本块不执行，行为与改动前逐字一致。
 static bool gPspTmrReuse = false;   // `-NRedPspTmrReuse`
-// 批次 psptmrreuse v3（取证）：`0x4a988` 的无条件调用计数（前 8 次各写一行 `[psptmr] enter=n`）。
-static UInt32 gPspSelEnter = 0;
-// 批次 psptmrreuse v3（修复）：X6000 HWLibs 的 TMR 加载函数（`0x4bafd`）调用计数。
-static UInt32 gPspX6Enter = 0;
 // 252（`-NRedSt1B`，默认关）：`[st1b]` 原始 `(b,c)` 调次（前 8 次，不论取值）。
 struct NRedSt1BRec { UInt32 b; UInt32 c; UInt32 seq; };
 // 270（`-NRedP7Hold`，默认关）：client7 一级对象 P7 的窗口化保活。
@@ -3578,17 +3564,6 @@ static mach_vm_address_t gOrgPspSelector = 0;   // `0x4a988` 的原件跳板（�
 static int wrapPspSelector(void* const h, const UInt32 selector,
                            const UInt64 a3, const UInt64 a4)
 {
-    // 批次 psptmrreuse v3（取证）：**无条件调用计数**——区分"`0x4a988` 没被调用"与
-    //   "被调用但 selector != 5"。前 8 次各写一行（限流，避免刷屏）。
-    if (gPspTmrReuse) {
-        ++gPspSelEnter;
-        if (gPspSelEnter <= 8) {
-            static char entLine[64];
-            const int ne = snprintf(entLine, sizeof(entLine), "[psptmr] enter=%u\n",
-                                    static_cast<unsigned>(gPspSelEnter));
-            if (ne > 0) { nredTraceLine(entLine, ne); }
-        }
-    }
     // 批次 psptmrreuse v2（-NRedPspTmrReuse，默认关）：
     //   在 selector 分派器（0x4a988）入口拦截 selector 5（SETUP_TMR）。
     //   为什么改：0x4bae9 的 esi 是"命令序号"，不是 cmd_id；用它拦截会误伤其他命令。
@@ -3601,38 +3576,6 @@ static int wrapPspSelector(void* const h, const UInt32 selector,
     }
     if (gOrgPspSelector == 0) { return -1; }
     return FunctionCast(wrapPspSelector, gOrgPspSelector)(h, selector, a3, a4);
-}
-
-
-// ─── 批次 psptmrreuse v3：X6000 HWLibs 的 TMR 加载（`0x4bafd`）拦截 ──────────────────────
-//  为什么加这一侧：r320 证明 X5000 的 selector 5 没被调用（`[psptmr] hook=installed` 但
-//  `skip selector` 0 命中）⇒ TMR 很可能走 X6000 HWLibs（技术经理 R-PSP-TMR-真实调用者，推断·中）。
-//  ⚠ 函数入口是 `0x4bafd`（不是 `0x4bb28`／`0x4bb0a`，二者都在函数中段）。
-//  ⚠ 原件只读 `%rdi`（h）与 `%rsi`（ptr）；`%rdx`／`%rcx` 在函数内先写后读 ⇒ **2 参数**。
-//  ⚠ 关态（未带开关）⇒ 本块不执行，行为与改动前逐字一致。
-static mach_vm_address_t gOrgPspTmrLoadX6 = 0;   // `0x4bafd` 的原件跳板
-
-static int wrapPspTmrLoadX6(void* const h, void* const a2)
-{
-    // 批次 psptmrreuse v3（取证）：无条件调用计数（前 8 次各写一行）。
-    if (gPspTmrReuse) {
-        ++gPspX6Enter;
-        if (gPspX6Enter <= 8) {
-            static char x6Line[64];
-            const int nx = snprintf(x6Line, sizeof(x6Line), "[psptmr] x6-enter=%u\n",
-                                    static_cast<unsigned>(gPspX6Enter));
-            if (nx > 0) { nredTraceLine(x6Line, nx); }
-        }
-    }
-    if (gPspTmrReuse && gBringupStep >= 11 /* TmrLoad */) {
-        static char line[96];
-        const int n = snprintf(line, sizeof(line), "[psptmr] skip x6-load step=%u\n",
-                               static_cast<unsigned>(gBringupStep));
-        if (n > 0) { nredTraceLine(line, n); }
-        return 0;
-    }
-    if (gOrgPspTmrLoadX6 == 0) { return -1; }
-    return FunctionCast(wrapPspTmrLoadX6, gOrgPspTmrLoadX6)(h, a2);
 }
 
 // ─── 批次 PSP-edx：`0x4cb8a`（PSP ring create 的类型化包装）只读 hook ────────────────────
@@ -9297,41 +9240,6 @@ SInt32 X5000HWLibs::wrapMode6430f(void* const in, void* const out)
 
 void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
-    // 批次 psptmrreuse v3：X6000 HWLibs 的 TMR 加载 hook（`0x4bafd`）。
-    //  ⚠ 放在 X5000 早退**之前**：两者是不同 kext，各自独立处理。
-    //  ⚠ 关态（`-NRedPspTmrReuse` 未带）⇒ 不注册 hook ⇒ 零影响。
-    if (kextRadeonX6000HWLibs.loadIndex == id) {
-        if (gPspTmrReuse) {
-            // ⚠ `resolveProbe` 是本函数**后面**才定义的 lambda（且绑定 X5000 的 slide/size）
-            //   ⇒ 此处按它的 ① 路径（**预期偏移逐字节校验**）内联实现，不做全 kext 扫描。
-            //   pattern 25 B 在 X6000 macho 内唯一，且偏移来自反汇编 ⇒ 校验通过即可信。
-            const auto* const atX6 = reinterpret_cast<const UInt8*>(slide + 0x4BAFD);
-            bool exactX6 = true;
-            for (size_t k = 0; k < arrsize(kPspTmrLoadX6Pattern); ++k) {
-                if (atX6[k] != kPspTmrLoadX6Pattern[k]) { exactX6 = false; break; }
-            }
-            const mach_vm_address_t fromX6 = exactX6 ? (slide + 0x4BAFD) : 0;
-            // ⚠ `hookProbe` 也是本函数后面才定义的 lambda（且累加 `nHooks`）⇒ 此处直接调
-            //   `patcher.routeMultiple`（与 `hookProbe` 内部同一调用）。代价：X6000 hook
-            //   **不计入** `nHooks`（身份自证计数）—— 已在交付报告上报。
-            bool okX6 = false;
-            if (fromX6 != 0) {
-                KernelPatcher::RouteRequest reqX6{nullptr, wrapPspTmrLoadX6, gOrgPspTmrLoadX6};
-                reqX6.from = fromX6;
-                okX6 = patcher.routeMultiple(id, &reqX6, 1, slide, size);
-            }
-            {
-                static char x6HookLine[96];
-                const int nH = snprintf(x6HookLine, sizeof(x6HookLine),
-                                        "[psptmr] x6-hook=%s at=%llx org=%llx\n",
-                                        (fromX6 == 0) ? "resolve-failed" : (okX6 ? "installed" : "route-failed"),
-                                        static_cast<unsigned long long>(fromX6),
-                                        static_cast<unsigned long long>(gOrgPspTmrLoadX6));
-                if (nH > 0) { nredTraceLine(x6HookLine, nH); }
-            }
-        }
-        return;
-    }
     if (kextRadeonX5000HWLibs.loadIndex != id) { return; }
 
     // 超时-L1（有界准入）门控：默认闸启用；-NRedSmuGateOff 存在则关闭闸（对照轮用）。
