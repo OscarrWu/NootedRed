@@ -4521,26 +4521,37 @@ static int wrapPspFenceWait(void* const h, UInt32* const slot)
     if (gOrgPspFenceWait == 0) { return 1; }
     const bool logIt = gPspBaseFixOn && gPspFenceN < 8 && nredKernelPtrOk(h)
                        && slot != nullptr && *slot < 0x10U;
-    UInt32 fence = 0xFFFFFFFFU, expect = 0xFFFFFFFFU, slotVal = 0;
+    UInt32 fence0 = 0xFFFFFFFFU, fence1 = 0xFFFFFFFFU, expect = 0xFFFFFFFFU, slotVal = 0;
+    const void* fenceVa = nullptr;
     if (logIt) {
         ++gPspFenceN;
         slotVal = *slot;
         const UInt8* const H = static_cast<const UInt8*>(h);
-        const UInt64 fenceVa = *reinterpret_cast<const UInt64*>(H + 0xAE0);
+        fenceVa = reinterpret_cast<const void*>(*reinterpret_cast<const UInt64*>(H + 0xAE0));
         expect = *reinterpret_cast<const UInt32*>(H + 0x770 + static_cast<size_t>(slotVal) * 0x38);
-        if (nredKernelPtrOk(reinterpret_cast<const void*>(fenceVa))) {
-            fence = *reinterpret_cast<const UInt32*>(reinterpret_cast<const void*>(fenceVa));
+        if (nredKernelPtrOk(fenceVa)) {
+            fence0 = *reinterpret_cast<const UInt32*>(fenceVa);   // 等待前
         }
     }
     const int ret = FunctionCast(wrapPspFenceWait, gOrgPspFenceWait)(h, slot);
     if (logIt) {
-        static char lf[128];
+        if (nredKernelPtrOk(fenceVa)) {
+            fence1 = *reinterpret_cast<const UInt32*>(fenceVa);   // 等待后（判据用这个）
+        }
+        static char lf[160];
         const int nf = snprintf(lf, sizeof(lf),
-                                "[pspfence] slot=%u fence=%x expect=%x ret=%d\n",
+                                "[pspfence] slot=%u fence0=%x fence1=%x expect=%x ret=%d\n",
                                 static_cast<unsigned>(slotVal),
-                                static_cast<unsigned>(fence),
+                                static_cast<unsigned>(fence0),
+                                static_cast<unsigned>(fence1),
                                 static_cast<unsigned>(expect), ret);
         if (nf > 0) { nredTraceLine(lf, nf); }
+        // 阶段 2b（N12）：等待返回后主动 flush —— 仅首次与失败时（限流，避免每次提交都写盘）。
+        //  ⚠ 关态（`gPspBaseFixOn` 关）⇒ 整块不执行。
+        if (gPspBaseFixOn && (gPspFenceN <= 1U || ret != 0)) {
+            gPspFlushBusy = NvMsgBuf::stFlushBusy();
+            gPspFlushRet  = nredTraceFlush(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs);
+        }
     }
     return ret;
 }
