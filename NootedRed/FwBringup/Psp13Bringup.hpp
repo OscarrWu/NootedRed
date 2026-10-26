@@ -93,7 +93,7 @@ enum class BringupStep : uint32_t {
 static bool sGPspSkipRing = false;
 // P1（`-NRedPspStep`，默认关）：step 8/9/10 之后各读一次 `C2PMSG_81` 的开关与行计数。
 static bool   gPspStepOn = false;
-static UInt32 gPspStepN  = 0;   // 已输出行数（≤3）
+static UInt32 gPspStepN  = 0;   // 已输出行数（≤4：8/9/10/10a）
 inline void pspSetSkipRing(const bool v) { sGPspSkipRing = v; }
 // P1：`-NRedPspStep` 的解析入口（bringup 内不调 checkKernelArgument）。
 inline void pspSetStepOn(const bool v) { gPspStepOn = v; }
@@ -453,8 +453,8 @@ inline int loadToc(display::RegSink& sink,
 //    `smnAddr(kC2PMSG81)` 是 SEG1（`0x090FF244`），本机全超时。
 //  ⚠ 3 次单发、无循环、无重试；每次读后计时，累计 > 1 ms ⇒ 记 `slow=1`（不中断挂起）。
 //  ⚠ 关态（不带 `-NRedPspStep`）⇒ 整块不执行（零 MMIO、零日志）。
-inline void pspStepRead(const UInt32 step) {
-    if (!gPspStepOn || gPspStepN >= 3) { return; }
+inline void pspStepRead(const char* const step) {
+    if (!gPspStepOn || gPspStepN >= 4) { return; }
     ++gPspStepN;
     const UInt64 t0 = mach_absolute_time();
     const UInt32 c2p81 = NRed::singleton().readReg32Ext(
@@ -463,8 +463,8 @@ inline void pspStepRead(const UInt32 step) {
     const UInt32 slow = (us > 1000ULL) ? 1U : 0U;
     static char line[96];
     const int n = snprintf(line, sizeof(line),
-                           "[pspstep] step=%u c2p81=%x us=%llu slow=%u\n",
-                           static_cast<unsigned>(step),
+                           "[pspstep] step=%s c2p81=%x us=%llu slow=%u\n",
+                           step,
                            static_cast<unsigned>(c2p81),
                            static_cast<unsigned long long>(us),
                            static_cast<unsigned>(slow));
@@ -931,13 +931,13 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
         ctx->last_error = ringCreate(sink, ring_mc_addr, kRingSizeBytes, PSP_RING_TYPE__KM);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-    pspStepRead(8);   // P1：ring create 之后
+    pspStepRead("8");   // P1：ring create 之后
 
     // ========== Step 3: Update fw reservation ==========
     ctx->last_step = BringupStep::UpdateFwReserve;
     ctx->last_error = updateFwReservation(0);
     if (ctx->last_error != 0) return ctx->last_error;
-    pspStepRead(9);   // P1：fw reservation 之后
+    pspStepRead("9");   // P1：fw reservation 之后
 
     // ========== Step 4: TMR init ==========
     if (!boot_time_tmr || autoload_supported) {
@@ -952,7 +952,7 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
                                   &ctx->last_resp_status);
         if (ctx->last_error != 0) return ctx->last_error;
     }
-    pspStepRead(10);   // P1：TMR init 之后
+    pspStepRead("10");   // P1：TMR init 之后
 
     ctx->last_step = BringupStep::TmrInit;
     return 0;

@@ -84,6 +84,13 @@ UInt32 gBringupRingWptr = 0;   // 当前 wptr
 //  ⚠ 开 ⇒ 我方 `ctx.last_step` 停在 `TmrInit`(10)；A′ 前置（`>=8`）仍满足，
 //    `-NRedPspTmrReuse` 的跳过条件（`>=11`）不满足 ⇒ 苹果 SETUP_TMR 正常执行。
 static bool gTmrApple = false;
+// `-NRedIpFwApple`（默认关）：LOAD_IP_FW 归苹果——跳过**我方**的 SMU 发帧。
+//  为什么：`LOAD_IP_FW`（`cmd_id=6` × `fw_type=18`）在 Linux 是 `psp_execute_ip_fw_load`；
+//  苹果的 PSP 链会自己做（我方 bringup 里的 SMU 发帧是重复的）。
+//  ⚠ 不是「跳过」：LOAD_IP_FW 仍被真实加载，只是换了一个主人。
+//  ⚠ 用 `checkKernelArgument`（不能用 `nredExactBootArg`——它是 `HWLibs.cpp` 的 static，
+//    本头文件在 `:25` 就 include，看不到）。
+static bool gIpFwApple = false;
 
 // 232：本头文件内的 NRED_TRACE 改走 fwTrace（单份 static 行缓冲 + nredTraceLine，零 SYSLOG 栈）；
 //  push/pop 限定作用域 ⇒ HWLibs.cpp 其余区域仍用全局 NRED_TRACE。
@@ -267,6 +274,7 @@ static void nredBringupBody()
     //    而实施文档 §1.2 建议的「与 `-NRedTmrAddrReadout` 同处」（`:476`）**晚于**这两处
     //    ⇒ 在那里解析会读到默认值 `false`，开关失效。故提前到入口。
     gTmrApple = checkKernelArgument("-NRedTmrApple");
+    gIpFwApple = checkKernelArgument("-NRedIpFwApple");
 
     // A-2：固件资产完整性校验（大小=编译期 sizeof；哈希=运行期 fnv1a64）。
     // 缺失/损坏 ⇒ trace 并跳过装载（可判失败，不静默通过）。
@@ -557,7 +565,7 @@ static void nredBringupBody()
     //     不必要的行为变更）⇒ 本段保持原样，仅按第 1 项在其后补门控真值行。
     //   ⚠️ 零 SMN 读（不碰 0x3010028）；零新门控；零白名单改动；零新增 SYSLOG。
 
-    if (rc == 0) {
+    if (rc == 0 && !gIpFwApple) {
         if (!fw::fwAssetVerify(kFwSmuAsset)) {
             NRED_TRACE("fw: load-ip-fw smu asset-invalid, skipped");
         } else {
@@ -604,6 +612,13 @@ static void nredBringupBody()
             }
         }
     }
+    if (gIpFwApple) {
+        // LOAD_IP_FW 归苹果：我方不发 SMU 帧；苹果的 PSP 链会自己做。
+        NRED_TRACE("ip-fw-apple: skip own load-ip-fw");
+    }
+    // P0：两个独立 `if (rc == 0)` 块之间的读数点——**不受 `rc` 门控**。
+    //  目的：区分「LOAD_IP_FW 之后 PSP 是否还活着」与「load-asd 之后」。
+    fw::pspStepRead("10a");
     if (rc == 0) {
         if (!fw::fwAssetVerify(kFwTaAsset)) {
             NRED_TRACE("fw: load-asd asset-invalid, skipped");
