@@ -3843,6 +3843,35 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     gPspRingDumps  = 0;       // 批次 pspring：每轮 ring create 只允许 dump 一次
     const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
     gPspInRingCreate = false;
+    // ─── 批次 pspbasefix：O2 ring create 后的 SMN 回读（`-NRedPspBaseFix`，默认关）────────
+    //  目的：区分三种情形——①四次写未落地（基址修正未生效）②落地但 PSP 未处理（G2）
+    //  ③落地且 PSP 响应（bit31=1，status 另记）。
+    //  ⚠ 纯读（`readReg32Ext`：加锁＋有界自旋＋永久停读）；关态零行为。
+    //  ⚠ `C2PMSG_64` 的写入值是 `type<<16`（bits[15:0] 恒 0）⇒ 回读的 bits[15:0] 就是 PSP 的 status。
+    if (gPspBaseFixOn && type == 2 && nredKernelPtrOk(h)) {
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt64 ringMc = *reinterpret_cast<const UInt64*>(H + 0x2C0 + 0x18);
+        const UInt64 ringSz = *reinterpret_cast<const UInt64*>(H + 0x2C0 + 0x08);
+        const UInt32 c69 = NRed::singleton().readReg32Ext(
+            fw::smnAddrWithBase(fw::kMpSeg0Base, fw::kC2PMSG69));
+        const UInt32 c70 = NRed::singleton().readReg32Ext(
+            fw::smnAddrWithBase(fw::kMpSeg0Base, fw::kC2PMSG70));
+        const UInt32 c71 = NRed::singleton().readReg32Ext(
+            fw::smnAddrWithBase(fw::kMpSeg0Base, fw::kC2PMSG71));
+        const UInt32 c64 = NRed::singleton().readReg32Ext(
+            fw::smnAddrWithBase(fw::kMpSeg0Base, fw::kC2PMSG64));
+        static char rgLine[192];
+        const int nr = snprintf(rgLine, sizeof(rgLine),
+                                "[pspring] ret=%d mc=%llx size=%llx c69=%x c70=%x c71=%x c64=%x bit31=%u st=%x\n",
+                                ret,
+                                static_cast<unsigned long long>(ringMc),
+                                static_cast<unsigned long long>(ringSz),
+                                static_cast<unsigned>(c69), static_cast<unsigned>(c70),
+                                static_cast<unsigned>(c71), static_cast<unsigned>(c64),
+                                static_cast<unsigned>((c64 >> 31) & 1U),
+                                static_cast<unsigned>(c64 & 0xFFFFU));
+        if (nr > 0) { nredTraceLine(rgLine, nr); }
+    }
     if (gPspEdxOn) {
         // 方案 A：**入口无条件计数**（不受 `ret != 0` 限制）⇒ 区分"未触发"与"触发但未读"。
         if (gPspEdxEnter < 255) { ++gPspEdxEnter; }
