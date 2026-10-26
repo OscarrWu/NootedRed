@@ -36,6 +36,7 @@
 #include "FwUcodeHeader.hpp"
 #ifndef FW_NO_NRED_TRACE
 #include "../HWLibs.hpp"          // NRED_TRACE（D-3 追加：tmrInit 子步 trace）
+#include "../NRed.hpp"            // P1：readReg32Ext（已有 gSmnLock + 有界自旋）
 #else
 // 测试环境：NRED_TRACE 空实现（离线不落盘；kext 构建由 HWLibs.hpp 提供真宏）
 #define NRED_TRACE(fmt, ...) ((void)0)
@@ -90,7 +91,12 @@ enum class BringupStep : uint32_t {
 //  ⚠ header 内 static：与上方计数器同一约定（仅 HWLibs.cpp TU 调用本链 ⇒ 运行期一份）。
 //    由 HWLibs.cpp 的 boot-arg 解析处调用 `pspSetSkipRing` 置位（不在 bringup 内解析）。
 static bool sGPspSkipRing = false;
+// P1（`-NRedPspStep`，默认关）：step 8/9/10 之后各读一次 `C2PMSG_81` 的开关与行计数。
+static bool   gPspStepOn = false;
+static UInt32 gPspStepN  = 0;   // 已输出行数（≤3）
 inline void pspSetSkipRing(const bool v) { sGPspSkipRing = v; }
+// P1：`-NRedPspStep` 的解析入口（bringup 内不调 checkKernelArgument）。
+inline void pspSetStepOn(const bool v) { gPspStepOn = v; }
 
 // =============================================================================
 // 带回溯的寄存器序列记录接口
@@ -436,6 +442,34 @@ inline int loadToc(display::RegSink& sink,
 }
 
 // ---------- 5. TMR init ----------
+
+// ─── P1（`-NRedPspStep`，默认关）：step 8/9/10 之后各读一次 `C2PMSG_81` ────────────────
+//  目的：切分 PSP 死亡窗口——ring create 后 / fw reserve 后 / TMR init 后，PSP 是否还活着。
+//  ⚠ **不能用苹果读回调**：bringup 里拿不到 `h`（`BringupCtx` 无 `h` 字段；
+//    `nredFwBringupHook` 的 `appleCtx` 参数被注释掉；调用方传的是 SMU 上下文）。
+//  ⚠ 用 `NRed::readReg32Ext`：已有 `gSmnLock` 原子锁 + 有界自旋（1000 次）+ `gSmnDead` 保护
+//    ⇒ 满足硬规则 1（加锁 + 有界）。
+//  ⚠ 地址必须用 **SEG0**（`smnAddrWithBase(kMpSeg0Base, kC2PMSG81)` = `0x58244`）；
+//    `smnAddr(kC2PMSG81)` 是 SEG1（`0x090FF244`），本机全超时。
+//  ⚠ 3 次单发、无循环、无重试；每次读后计时，累计 > 1 ms ⇒ 记 `slow=1`（不中断挂起）。
+//  ⚠ 关态（不带 `-NRedPspStep`）⇒ 整块不执行（零 MMIO、零日志）。
+inline void pspStepRead(const UInt32 step) {
+    if (!gPspStepOn || gPspStepN >= 3) { return; }
+    ++gPspStepN;
+    const UInt64 t0 = mach_absolute_time();
+    const UInt32 c2p81 = NRed::singleton().readReg32Ext(
+        fw::smnAddrWithBase(fw::kMpSeg0Base, fw::kC2PMSG81));
+    const UInt64 us = (mach_absolute_time() - t0) / 1000;
+    const UInt32 slow = (us > 1000ULL) ? 1U : 0U;
+    static char line[96];
+    const int n = snprintf(line, sizeof(line),
+                           "[pspstep] step=%u c2p81=%x us=%llu slow=%u\n",
+                           static_cast<unsigned>(step),
+                           static_cast<unsigned>(c2p81),
+                           static_cast<unsigned long long>(us),
+                           static_cast<unsigned>(slow));
+    if (n > 0) { nredTraceLine(line, n); }
+}
 
 /// 等 Linux psp_skip_tmr (amdgpu_psp.c:925-933)
 /// 13.0.4: boot_time_tmr = false ⇒ !boot_time_tmr = true ⇒ skip_tmr 返回 false ⇒ 不跳过
@@ -897,11 +931,13 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
         ctx->last_error = ringCreate(sink, ring_mc_addr, kRingSizeBytes, PSP_RING_TYPE__KM);
         if (ctx->last_error != 0) return ctx->last_error;
     }
+    pspStepRead(8);   // P1：ring create 之后
 
     // ========== Step 3: Update fw reservation ==========
     ctx->last_step = BringupStep::UpdateFwReserve;
     ctx->last_error = updateFwReservation(0);
     if (ctx->last_error != 0) return ctx->last_error;
+    pspStepRead(9);   // P1：fw reservation 之后
 
     // ========== Step 4: TMR init ==========
     if (!boot_time_tmr || autoload_supported) {
@@ -916,6 +952,7 @@ inline int bringupRunToTmrInit(BringupCtx* ctx,
                                   &ctx->last_resp_status);
         if (ctx->last_error != 0) return ctx->last_error;
     }
+    pspStepRead(10);   // P1：TMR init 之后
 
     ctx->last_step = BringupStep::TmrInit;
     return 0;

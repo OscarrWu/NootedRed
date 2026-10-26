@@ -468,6 +468,13 @@ static const UInt8 kPspSub4c664Pattern[] = {0x55, 0x48, 0x89, 0xE5, 0x48, 0x8B, 
 //    最后清 `+0`／`+0x238`。
 //  `0x570b5`：同形，但调 `0x56fff` 且**无条件**调 `0x4c4bf`。
 //  ⚠ 两者入口均干净（前一字节 = `c3`）；15 B 分别命中 3／4 次，20 B **唯一**（count=1）。
+// P2：`0x495ec`（`psp_hw_init`）前 24 B。签名 `int(long h, long, long)` ⇒ 第一个参数就是 `h`
+//  ⇒ 可以用苹果读回调（与 bringup 不同）。函数体 `0x495ec`–`0x49a8d`。
+//  ⚠ 15 B 命中 13 次、20 B 5 次；24 B **唯一**（count=1）。
+//  ⚠ 入口确认：`0x495eb` = `ff`（上一条 `call` 的末字节）⇒ `0x495ec` 是干净入口。
+static const UInt8 kPspHwInitPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                                          0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0xC7, 0x45,
+                                          0xD4, 0x00, 0x00, 0x00, 0x00, 0x41, 0xBF, 0x01};
 static const UInt8 kPspRingDestroyAPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
                                                 0x53, 0x50, 0x49, 0x89, 0xFE, 0x83, 0xFE, 0x01,
                                                 0x74, 0x14, 0x41, 0xBF};
@@ -1851,6 +1858,13 @@ static void pspStateSample(UInt32 t);
 static int nredTraceFlushImpl(const int secTag, const bool force, const bool headerOnly = false)
 {
     if (rootvnode == nullptr) { return 0; }              // 落盘前提（force 也不放宽）
+    // P0（2026-10-26）：`pspStateSample` 的调用**移到环空早退之前**。
+    //  为什么：原位置在环正文遍历之后（`:1966`），而环空时 `:1866` 会早退 ⇒ 采样永远不执行
+    //  ⇒ `[pspstate]` 0 命中。它已是**纯内存**（R2 后零 MMIO、零解引用）⇒ 移动安全。
+    //  ⚠ 关态（`-NRedPspState` 未带）⇒ 不输出（`pspStateSample` 首行 return）。
+    if (gPspStateOn && (secTag == 20 || secTag == 27 || secTag == 32)) {
+        pspStateSample(static_cast<UInt32>(secTag));
+    }
     // 批次 挂起修复（R-挂起修复 §1.2／§1.5-3）：**force（panic/挂起路径）不写盘**。
     //  原因：存储栈挂起时写盘会阻塞 ⇒ 整机挂起（301/310 实测）。数据留在内存环，
     //  由下一次**正常上下文**（L2 拍）的 flush 带出；接受"panic 时丢现场"。
@@ -1952,12 +1966,8 @@ static int nredTraceFlushImpl(const int secTag, const bool force, const bool hea
                                   static_cast<unsigned>(gPspEdxSev));
         if (nPsp > 0) { off += (static_cast<size_t>(nPsp) < capPsp) ? static_cast<size_t>(nPsp) : capPsp; }
     }
-    // 批次 SOS 采样（R-SOS采样 §1）：复用周期 flush 的 `secTag`，在 20/27/32 s 各读一次 C2PMSG_81。
-    //  ⚠ 采样行经 `nredTraceLine` 进环；本函数的环遍历在头部区**之后** ⇒ 同一拍必带出。
-    //  ⚠ 关态（`-NRedPspState` 未带）⇒ 不读、不输出。
-    if (gPspStateOn && (secTag == 20 || secTag == 27 || secTag == 32)) {
-        pspStateSample(static_cast<UInt32>(secTag));
-    }
+    // 批次 SOS 采样：调用点已**前移**到本函数入口（P0，见 `rootvnode` 判据之后）——
+    //  原位置在环正文遍历之后，环空时早退 ⇒ 采样永远不执行。
     // P7f 包E″：`[ttlchain4]` 头部戳记（判别读数 v4，与 [bringup]／[ttlchain] 并列）。
     //  ab＝allocB 返回值（由既有 wrapTtlAllocB 写入）；n＝`0x929ac` 调用总计数；
     //  k=RA/sub/al＝第 k 次调用的三值（三槽按到达顺序、不覆盖；第 4 次起只计数）。
@@ -4200,6 +4210,9 @@ static void wrapPspSub4c664(void* const h, const int base, const UInt32 idx,
 //  ⇒ 两个 destroy 都补一条「句柄 != 0 才 free」的配对判据；其余清理（停 ring、清 `+0`／`+0x238`）原样保留。
 //  ⚠ 这是**配对**而非跳过：我们没分配，就不该释放（核心原则「适配，不是骗过」）。
 //  ⚠ 关态（未带 `-NRedPspRingReuse`）⇒ 直接透传原件，行为逐字不变。
+// P2：`0x495ec`（`psp_hw_init`）入口读数——1 个 hook + 1 次读。
+static mach_vm_address_t gOrgPspHwInit = 0;
+static UInt32 gPsp495N = 0;   // 已输出行数（≤1）
 static mach_vm_address_t gOrgPspRingDestroyA = 0;   // `0x55ecb`
 static mach_vm_address_t gOrgPspRingDestroyB = 0;   // `0x570b5`
 
@@ -4241,6 +4254,49 @@ static UInt32 nredPspRingDestroyCommon(void* const h, const UInt32 type,
     *reinterpret_cast<UInt32*>(base + 0) = 0;
     *reinterpret_cast<UInt64*>(base + 0x238) = 0;
     return rc;
+}
+
+// ─── P2（`-NRedPspEdx`）：`0x495ec`（`psp_hw_init`）入口读一次 `C2PMSG_81` ────────────────
+//  为什么这里能用苹果读回调：`FUN_000495ec(long h, long, long)` 的**第一个参数就是 `h`**
+//  （与 bringup 不同——那里拿不到 `h`）。
+//  ⚠ 1 次单发、无循环、无重试；读后计时 > 1 ms ⇒ 记 `slow=1`。
+//  ⚠ 关态（不带 `-NRedPspEdx`）⇒ 整块不执行。
+static int wrapPspHwInit(void* const h, void* const a2, void* const a3)
+{
+    if (gOrgPspHwInit == 0) { return -1; }
+    if (gPspEdxOn && gPsp495N < 1 && nredKernelPtrOk(h)) {
+        ++gPsp495N;
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
+        UInt64 readReg = 0, ctx = 0;
+        const bool ifaceOk = nredKernelPtrOk(reinterpret_cast<const void*>(iface));
+        if (ifaceOk) {
+            const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
+            readReg = *reinterpret_cast<const UInt64*>(IF + 0x40);
+            ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
+        }
+        static char line[96];
+        if (readReg == 0) {
+            const int ns = snprintf(line, sizeof(line), "[psp495] skip=%u\n",
+                                    ifaceOk ? 2U : 1U);
+            if (ns > 0) { nredTraceLine(line, ns); }
+        } else {
+            using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
+            const auto fn = reinterpret_cast<PspReadReg>(readReg);
+            const UInt32 base = *reinterpret_cast<const UInt32*>(H + 92);
+            const UInt64 t0 = mach_absolute_time();
+            const UInt32 c2p81 = fn(ctx, base + 0x91U, 75U);   // C2PMSG_81
+            const UInt64 us = (mach_absolute_time() - t0) / 1000;
+            const UInt32 slow = (us > 1000ULL) ? 1U : 0U;
+            const int n = snprintf(line, sizeof(line),
+                                   "[psp495] c2p81=%x us=%llu slow=%u\n",
+                                   static_cast<unsigned>(c2p81),
+                                   static_cast<unsigned long long>(us),
+                                   static_cast<unsigned>(slow));
+            if (n > 0) { nredTraceLine(line, n); }
+        }
+    }
+    return FunctionCast(wrapPspHwInit, gOrgPspHwInit)(h, a2, a3);
 }
 
 static UInt32 wrapPspRingDestroyA(void* const h, const UInt32 type)
@@ -9647,6 +9703,9 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     //  让苹果 PSP 驱动成为 KM ring 的正当所有者（M5-1 §7.2）。精确 token，避免前缀误开。
     //  ⚠ 解析一次存标量（bringup 内不调 checkKernelArgument）；关态 ⇒ Step 2 逐字不变。
     fw::pspSetSkipRing(nredExactBootArg("-NRedPspSkipRing"));
+    // P1（**默认关**）：step 8/9/10 之后各读一次 `C2PMSG_81`（SEG0，走 readReg32Ext）。
+    //  目的：切分 PSP 死亡窗口。精确 token，避免前缀误开。
+    fw::pspSetStepOn(nredExactBootArg("-NRedPspStep"));
     // D-3 只读仪表门控（默认关）：SEG0/SEG1 双段读数、C2PMSG_91/83 直读、PB 状态位读数。
     // 解析一次存标量，仅观测、不写、不发送。
     singleton().smu13SegReadoutEnabled = checkKernelArgument("-NRedSegReadout");
@@ -10162,6 +10221,29 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                         static_cast<unsigned long long>(fromSel),
                                         static_cast<unsigned long long>(gOrgPspSelector));
                 if (nH > 0) { nredTraceLine(selHookLine, nH); }
+            }
+        }
+        // P2（`-NRedPspEdx`，默认关）：`0x495ec`（`psp_hw_init`）入口读一次 `C2PMSG_81`。
+        //  判据：`c2p81 != 0` ⇒ 苹果 PSP 链入口时 PSP alive（死亡在苹果链内部）；
+        //        `c2p81 == 0` ⇒ 入口时已死（死亡在我方 bringup 之后、苹果链之前）。
+        if (gPspEdxOn) {
+            const auto f495 = resolveProbe("psp-hwinit", kPspHwInitPattern, nullptr,
+                                           arrsize(kPspHwInitPattern), 0x495EC);
+            bool ok495 = false;
+            if (f495 != 0) {
+                ok495 = hookProbe(f495,
+                                  KernelPatcher::RouteRequest{nullptr, wrapPspHwInit,
+                                                              gOrgPspHwInit},
+                                  "psp-hwinit");
+            }
+            {
+                static char l495[96];
+                const int n495 = snprintf(l495, sizeof(l495),
+                                          "[psp495] hook=%s at=%llx\n",
+                                          (f495 == 0) ? "resolve-failed"
+                                                      : (ok495 ? "installed" : "route-failed"),
+                                          static_cast<unsigned long long>(f495));
+                if (n495 > 0) { nredTraceLine(l495, n495); }
             }
         }
         // R6（`-NRedPspRingReuse`，默认关）：两个 ring destroy 的 free 配对。
