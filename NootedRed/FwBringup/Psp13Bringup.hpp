@@ -499,25 +499,32 @@ inline int tmrInit(display::RegSink& sink,
 ///     故本卡重跑 β-1：`buf` 直填 Linux 同机实测的 PSP TMR MC 地址（固件 carve-out），
 ///     `system_phy_addr` 保持该缓冲的 CPU 物理地址（`tmr_mc_addr`）。
 ///     有 `tmrLoad: frame buf=... sys=...` 自证行 ⇒ 本轮必然可判读。
-/// kPspTmrBorrowedMcAddr ＝ kFirmwareCarveOutBase(0x8000000000) + 0xF8000000
-///    【外部·高／本机未实测】，仅 β-1 重跑单变量实验用。
+/// ⚠ R1（2026-10-26）：原 `kPspTmrBorrowedMcAddr`（0x80f8000000，借用值）**已删除**；
+///   `buf_phy_addr` 与 `system_phy_addr` 现在**同源**（同一个 TMR BO 的 MC 地址）。
 /// 注：上一版 `buf_iova`（Path B DMA 映射返回值）参数已整体移除；DMA 映射路径
 ///   `nredMapTmrForDma()` 保留在 NRedFwBringupHook.hpp 但不再参与帧构造（见该处注释）。
 inline void prepTmrCmd(GfxCmdResp* cmd,
                        uint64_t tmr_mc_addr,
                        uint32_t tmr_size) {
-    constexpr uint64_t kPspTmrBorrowedMcAddr = 0x80f8000000ULL; // β-1 重跑借用值
     cmd->buf_size        = kCmdBufSize;
     cmd->buf_version     = 1;
     cmd->cmd_id          = GFX_CMD_ID_SETUP_TMR;
-    // buf_phy_addr_lo/hi —— β-1 重跑：借用 Linux 同机实测 PSP TMR 的 MC 地址（单变量实验）
-    cmd->cmd_payload[0]  = static_cast<uint32_t>(kPspTmrBorrowedMcAddr & 0xFFFFFFFF);
-    cmd->cmd_payload[1]  = static_cast<uint32_t>((kPspTmrBorrowedMcAddr >> 32) & 0xFFFFFFFF);
+    // buf_phy_addr_lo/hi 与 system_phy_addr_lo/hi **同源**：同一个 TMR BO 的 MC 地址。
+    //  ⚠ R1（2026-10-26）：原实现把 buf_phy_addr 硬编码成 0x80f8000000（"借用值"，
+    //    【外部·高／本机未实测】）⇒ 提交给 PSP 的是一个**不属于本机**的 MC 地址
+    //    （P3 轮实测 `tmrLoad: frame buf=0x80F8000000 sys=0x23200000`）。
+    //    这违反核心原则「不填假指针」与约束 B「不硬编码」。
+    //  ⚠ 与 Linux `psp_prep_tmr_cmd_buf`（amdgpu_psp.c:820-843）一致：`buf_phy_addr`
+    //    取 MC 地址、`system_phy_addr` 取物理地址；**APU（UMA）上两者相同** ⇒ 两个字段相等。
+    //    （独显非 UMA 场景需分别取 MC／PA——本机不涉及。）
+    //  ⇒ 这是「本机真实事实的如实描述」，不是「对苹果的迁就」。
+    cmd->cmd_payload[0]  = static_cast<uint32_t>(tmr_mc_addr & 0xFFFFFFFF);
+    cmd->cmd_payload[1]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
     // buf_size
     cmd->cmd_payload[2]  = tmr_size;
     // flags: virt_phy_addr = 1
     cmd->cmd_payload[3]  = 0x00000002;
-    // system_phy_addr_lo/hi —— CPU 物理地址（保持现状，与 buf 不同值）
+    // system_phy_addr_lo/hi —— 同一个 TMR BO 的地址（APU 上与 buf 相同）
     cmd->cmd_payload[4]  = static_cast<uint32_t>(tmr_mc_addr & 0xFFFFFFFF);
     cmd->cmd_payload[5]  = static_cast<uint32_t>((tmr_mc_addr >> 32) & 0xFFFFFFFF);
 }

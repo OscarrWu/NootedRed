@@ -631,7 +631,10 @@ static bool gTraceSelfTest = false;
 static bool   gPspStateOn = false;
 static UInt32 gPspStateN  = 0;   // 已输出行数（≤2）
 // 批次 SOS 采样（R-SOS采样 §2）：`h` 在 `wrapPspRingCreate` 入口保存（~18 s），20/27/32 s 各采一次。
-static void*  gPspCtx     = nullptr;   // PSP 上下文（首次 ring create 时保存；带 KPtr 失效保护）
+// R2（2026-10-26）：原 `static void* gPspCtx`（跨调用缓存苹果 `h`）已删除——
+//  它让 `pspStateSample` 在 flush 线程解引用苹果对象（P3 轮页错误已证 `h` 可能失效），
+//  且违反硬规则 4（禁止在 flush 线程做 MMIO 读）。改为**只记布尔**，不存指针。
+static bool   gPspCtxSeen = false;    // 是否曾在 ring create 入口拿到过 h（只记布尔）
 static UInt32 gPspSampleN = 0;         // 采样行计数（≤3；独立于 `gPspStateN`）
 // 批次 pspring（G3 §C，`-NRedPspRing`，默认关）：PSP 事件环**全量** dump（32 条）。
 //  为什么：`[pspedx]` 只带最后一条，无法判断"何时死、死前有哪些事件"。
@@ -3665,16 +3668,23 @@ static bool nredPspRingVerify(void* const h, UInt32* const lo, UInt32* const hi,
     *size = fn(ctx, base + 0x87U, 75U);   // C2PMSG_71（大小）
     if ((mach_absolute_time() - t0) / 1000 > 1000ULL) { *err = 9; return false; }   // > 1 ms
 
-    const UInt64 addr = static_cast<UInt64>(*lo) | (static_cast<UInt64>(*hi) << 32);
-    if (addr != gBringupRingMc) { *err = 5; return false; }
-    if (*size != gBringupRingSize) { *err = 6; return false; }
-
     // A′-7b：`C2PMSG_64` 的 bit31＝PSP 响应位。只有它为 1 才能证明 PSP 真的处理了 ring create，
     //  否则 69/70/71 只是"我方写入的值"，不能证明"PSP 接受"。
+    //
+    //  ⚠ **R3（2026-10-26）：bit31 检查必须排在地址/大小检查之前。**
+    //    PSP 死时 `C2PMSG_69/70/71` 读回全 0 ⇒ `addr = 0 ≠ gBringupRingMc` ⇒ 原顺序下
+    //    `err=5` 先触发，`err=8` 永远轮不到（P3 轮实测 `err=5`，而 `[pspentry] c2p81=0`
+    //    证明 PSP 已死）。提前后：`err=8` 只在"PSP 未响应"时给出，
+    //    `err=5/6` 只在 PSP alive 时触发 ⇒ 两者判据不再混淆。
+    //  ⚠ 读次数不变（仍 4 次：69/70/71/64）。
     const UInt64 t1 = mach_absolute_time();
     const UInt32 ctrl = fn(ctx, base + 128U, 75U);   // C2PMSG_64
     if ((mach_absolute_time() - t1) / 1000 > 1000ULL) { *err = 9; return false; }
     if ((ctrl & fw::kMboxTosRespFlag) == 0) { *err = 8; return false; }
+
+    const UInt64 addr = static_cast<UInt64>(*lo) | (static_cast<UInt64>(*hi) << 32);
+    if (addr != gBringupRingMc) { *err = 5; return false; }
+    if (*size != gBringupRingSize) { *err = 6; return false; }
 
     return true;
 }
@@ -3731,7 +3741,7 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     //  为什么：原位置在 A′ 之后；A′ 命中时 `return 0` ⇒ 不执行 ⇒ `gPspCtx` 永远 nullptr
     //  ⇒ `pspStateSample` 走 `invalid` 分支 ⇒ `[pspstate]` 永远 invalid。
     //  ⚠ 纯内存赋值、`gPspStateOn` 门控、关态零行为。
-    if (gPspStateOn && gPspCtx == nullptr && nredKernelPtrOk(h)) { gPspCtx = h; }
+    if (gPspStateOn && !gPspCtxSeen && nredKernelPtrOk(h)) { gPspCtxSeen = true; }
     // ─── A′（-NRedPspRingReuse，默认关）：用我方 bringup 建的 KM ring 替代苹果的 ring create ──
     //  与 A 方案的差别（实施文档 §1.1）：
     //    · 删 `0x4AB34` 调用（它是 HDCP 初始化，不是 ring 初始化）；
@@ -3974,34 +3984,19 @@ static void pspStateEmit(void* const h, const char* const where)
 //  ⚠ 失效保护：`gPspCtx` 非内核指针／接口非法／读回调为空 ⇒ 输出一行 `invalid` 后返回。
 static void pspStateSample(const UInt32 t)
 {
+    // R2（2026-10-26）：**纯内存**——零 MMIO、零解引用。
+    //  原实现从 `gPspCtx` 取苹果 `h` → 解引用 `h+8` → `iface+0x40` → MMIO 读 `C2PMSG_81`，
+    //  全部发生在 `nredTraceFlushImpl`（flush 线程）⇒ 违反硬规则 4，且 P3 轮已证 `h` 可能失效。
+    //  PSP alive 的判据改由 `[pspentry]`（`0x4cb8a` 入口，安全上下文）承担。
     if (!gPspStateOn || gPspSampleN >= 3) { return; }
-    static char smLine[96];
-    void* const h = gPspCtx;
-    UInt64 readReg = 0;
-    UInt64 ctx = 0;
-    if (nredKernelPtrOk(h)) {
-        const UInt8* const H = static_cast<const UInt8*>(h);
-        const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
-        if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
-            const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
-            readReg = *reinterpret_cast<const UInt64*>(IF + 64);
-            ctx     = *reinterpret_cast<const UInt64*>(IF + 8);
-        }
-    }
     ++gPspSampleN;
-    if (readReg == 0) {
-        const int nI = snprintf(smLine, sizeof(smLine), "[pspstate] t=%u invalid\n",
-                                static_cast<unsigned>(t));
-        if (nI > 0) { nredTraceLine(smLine, nI); }
-        return;
-    }
-    using PspReadReg = UInt32 (*)(UInt64, UInt32, UInt32);
-    const auto fn = reinterpret_cast<PspReadReg>(readReg);
-    const UInt32 base  = *reinterpret_cast<const UInt32*>(static_cast<const UInt8*>(h) + 92);
-    const UInt32 c2p81 = fn(ctx, base + 145U, 75U);   // C2PMSG_81
-    const int nS = snprintf(smLine, sizeof(smLine), "[pspstate] t=%u alive=%x c2p81=%x\n",
-                            static_cast<unsigned>(t), (c2p81 != 0) ? 1U : 0U, c2p81);
-    if (nS > 0) { nredTraceLine(smLine, nS); }
+    static char smLine[96];
+    const int n = snprintf(smLine, sizeof(smLine),
+                           "[pspstate] t=%u ctx=%u n=%u\n",
+                           static_cast<unsigned>(t),
+                           gPspCtxSeen ? 1U : 0U,
+                           static_cast<unsigned>(gPspSampleN));
+    if (n > 0) { nredTraceLine(smLine, n); }
 }
 static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const int ret,
                        const UInt64 us, const void* const desc = nullptr,
