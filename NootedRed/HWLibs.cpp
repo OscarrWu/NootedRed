@@ -588,6 +588,8 @@ static UInt32     gGc7xSeen = 0;
 //  条目 `h+0x3938+i*0x110`（+0 事件 ID u32／+4 严重度 u32／+8 返回码 edx u64）＋文本 256 B。
 //  ⚠ 零写、零寄存器访问、不改返回值；关态不安装 hook、不读环、不输出。
 static bool   gPspEdxOn  = false;             // `-NRedPspEdx`
+// 批次 P3（`-NRedPspEdx`）：`0x4cb8a` 入口读数的已输出行数（≤4，跨 ring create 累积不重置）。
+static UInt32 gPspEntryN     = 0;
 //  （条目索引 `i` 不再单独存：头部行的 `idx=`＋`wrap=` 即可推出 `i`。）
 // 批次 pspedx-诊断（R-pspedx轮判读 §5.2 方案 A＋C）：区分"未触发"与"触发但未读"。
 //  ⚠ 全部只在 `-NRedPspEdx` 开时写；关态零行为。
@@ -3684,6 +3686,52 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
         if (gPspEdxOn) { if (gPspEdxEnter < 255) { ++gPspEdxEnter; } gPspEdxSkip = 3; }
         return -1;
     }
+    // ─── 批次 P3（-NRedPspEdx）：`0x4cb8a` **入口读数**，定位 PSP 死亡时刻 ────────────────
+    //  为什么放在 A′ 之前：A′ 命中时 `return 0`（下方），原件不跑；若放在 A′ 之后，
+    //  A′ 生效时就读不到 ⇒ 放在之前，A′ 开/关两种情形都能拿到入口读数。
+    //  ⚠ 纯读、**2 次单发、无循环、无重试**；读间计时 > 1 ms ⇒ 记 `slow=1`（不中断挂起，只记录）。
+    //  ⚠ 关态（未带 `-NRedPspEdx`）⇒ 整块不执行（零 MMIO、零日志）。
+    if (gPspEdxOn && type == 2 && gPspEntryN < 4 && nredKernelPtrOk(h)) {
+        ++gPspEntryN;
+        const UInt8* const HE = static_cast<const UInt8*>(h);
+        const UInt64 ifaceE = *reinterpret_cast<const UInt64*>(HE + 8);
+        UInt64 readRegE = 0, ctxE = 0;
+        const bool ifaceOk = nredKernelPtrOk(reinterpret_cast<const void*>(ifaceE));
+        if (ifaceOk) {
+            const UInt8* const IFE = reinterpret_cast<const UInt8*>(ifaceE);
+            readRegE = *reinterpret_cast<const UInt64*>(IFE + 0x40);
+            ctxE     = *reinterpret_cast<const UInt64*>(IFE + 8);
+        }
+        static char entryLine[128];
+        if (readRegE == 0) {
+            const int ns = snprintf(entryLine, sizeof(entryLine),
+                                    "[pspentry] type=%u skip=%u\n",
+                                    static_cast<unsigned>(type), ifaceOk ? 2U : 1U);
+            if (ns > 0) { nredTraceLine(entryLine, ns); }
+        } else {
+            using PspReadRegE = UInt32 (*)(UInt64, UInt32, UInt32);
+            const auto fnE = reinterpret_cast<PspReadRegE>(readRegE);
+            const UInt32 baseE = *reinterpret_cast<const UInt32*>(HE + 92);
+            const UInt64 t0E = mach_absolute_time();
+            const UInt32 c2p81E = fnE(ctxE, baseE + 0x91U, 75U);   // C2PMSG_81
+            const UInt32 c2p64E = fnE(ctxE, baseE + 0x80U, 75U);   // C2PMSG_64
+            const UInt64 usE = (mach_absolute_time() - t0E) / 1000;
+            const UInt32 slowE = (usE > 1000ULL) ? 1U : 0U;
+            const int ne = snprintf(entryLine, sizeof(entryLine),
+                                    "[pspentry] type=%u c2p81=%x c2p64=%x us=%llu slow=%u\n",
+                                    static_cast<unsigned>(type),
+                                    static_cast<unsigned>(c2p81E),
+                                    static_cast<unsigned>(c2p64E),
+                                    static_cast<unsigned long long>(usE),
+                                    static_cast<unsigned>(slowE));
+            if (ne > 0) { nredTraceLine(entryLine, ne); }
+        }
+    }
+    // ─── P3 §1.2b：`gPspCtx` 保存点**前移**到入口（A′ 分支之前）────────────────────────
+    //  为什么：原位置在 A′ 之后；A′ 命中时 `return 0` ⇒ 不执行 ⇒ `gPspCtx` 永远 nullptr
+    //  ⇒ `pspStateSample` 走 `invalid` 分支 ⇒ `[pspstate]` 永远 invalid。
+    //  ⚠ 纯内存赋值、`gPspStateOn` 门控、关态零行为。
+    if (gPspStateOn && gPspCtx == nullptr && nredKernelPtrOk(h)) { gPspCtx = h; }
     // ─── A′（-NRedPspRingReuse，默认关）：用我方 bringup 建的 KM ring 替代苹果的 ring create ──
     //  与 A 方案的差别（实施文档 §1.1）：
     //    · 删 `0x4AB34` 调用（它是 HDCP 初始化，不是 ring 初始化）；
@@ -3759,9 +3807,9 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     //  为什么需要：`0x4c05b` 全库有 **30 处**调用（通用 poll 助手），不限域会让 2 行配额
     //  被无关调用吃掉 ⇒ 看不到 PSP ring create 路径上的真实读数。
     gPspInRingCreate = true;
-    // 批次 SOS 采样（R-SOS采样 §2.1）：入口保存 `h`（首次调用 ~18 s），供 20/27/32 s 采样使用。
-    //  ⚠ 关态（`-NRedPspState` 未带）⇒ 不保存。
-    if (gPspStateOn && gPspCtx == nullptr && nredKernelPtrOk(h)) { gPspCtx = h; }
+    // 批次 SOS 采样（R-SOS采样 §2.1）：`gPspCtx` 的保存点已**前移**到本函数入口
+    //  （P3 §1.2b）——原位置在 A′ 之后，A′ 命中时 `return 0` ⇒ 永远不执行 ⇒
+    //  `[pspstate]` 永远 `invalid`。此处不再重复保存。
     gPspSubFlushed = false;   // 批次 S4：每轮 ring create 只允许失败点强制 flush 一次
     gPspRingDumps  = 0;       // 批次 pspring：每轮 ring create 只允许 dump 一次
     const int ret = FunctionCast(wrapPspRingCreate, gOrgPspRingCreate)(h, type);
@@ -3852,10 +3900,12 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
 // 批次 U8：`desc` 非空时追加 `base/mask/exp`（`0x4c05b` 的 descriptor 已在手，零额外风险）。
 //  用途：解决 r316 的"POLL1 成功行缺失"异常——`mask` 能区分是 POLL1（`80000000`）还是
 //  POLL2（`8000ffff`）失败。descriptor 布局：`+0x08 base`／`+0x14 mask`／`+0x18 expected`。
+// 批次 P3：`val` 非 `0xFFFFFFFF` 时追加 `val=%x`（`4ccae` 用——它的返回值是
+//  `2*(raw == 0xffffffff)`，原始 `C2PMSG_64` 值已丢失，需单独补）。
 static void pspSubLine(const char* const fn, const UInt32 n, const int ret, const UInt64 us,
-                       const void* const desc = nullptr)
+                       const void* const desc = nullptr, const UInt32 val = 0xFFFFFFFFU)
 {
-    static char line[160];
+    static char line[192];
     int k;
     if (desc != nullptr) {
         const UInt8* const D = static_cast<const UInt8*>(desc);
@@ -3866,6 +3916,10 @@ static void pspSubLine(const char* const fn, const UInt32 n, const int ret, cons
                      static_cast<unsigned>(*reinterpret_cast<const UInt32*>(D + 0x08)),
                      static_cast<unsigned>(*reinterpret_cast<const UInt32*>(D + 0x14)),
                      static_cast<unsigned>(*reinterpret_cast<const UInt32*>(D + 0x18)));
+    } else if (val != 0xFFFFFFFFU) {
+        k = snprintf(line, sizeof(line), "[pspsub] fn=%s n=%u ret=%x us=%llu val=%x\n",
+                     fn, static_cast<unsigned>(n), static_cast<unsigned>(ret),
+                     static_cast<unsigned long long>(us), static_cast<unsigned>(val));
     } else {
         k = snprintf(line, sizeof(line), "[pspsub] fn=%s n=%u ret=%x us=%llu\n",
                      fn, static_cast<unsigned>(n), static_cast<unsigned>(ret),
@@ -3950,7 +4004,8 @@ static void pspStateSample(const UInt32 t)
     if (nS > 0) { nredTraceLine(smLine, nS); }
 }
 static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const int ret,
-                       const UInt64 us, const void* const desc = nullptr)
+                       const UInt64 us, const void* const desc = nullptr,
+                       const UInt32 val = 0xFFFFFFFFU)
 {
     // 批次 pspring（G3 §C 入口版）：PSP 事件环全量 dump（32 条），纯内存、零 MMIO。
     //  为什么放入口：r313/r314 两轮 `4ccae ret=0`（成功）⇒ 失败分支的块不执行。
@@ -4000,7 +4055,7 @@ static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const
     if (ret != 0) {
         if (gPspSubFailN < 8) {
             ++gPspSubFailN;
-            pspSubLine(fn, gPspSubFailN, ret, us, desc);
+            pspSubLine(fn, gPspSubFailN, ret, us, desc, val);
         }
         // 批次 pspstate v2：**先读状态并写行**，再 flush ⇒ force 片必含两行。
         pspStateEmit(h, fn);
@@ -4013,7 +4068,7 @@ static void pspSubEmit(void* const h, const char* const fn, UInt32& perFn, const
         }
     } else if (perFn < 2) {
         ++perFn;
-        pspSubLine(fn, perFn, ret, us, desc);
+        pspSubLine(fn, perFn, ret, us, desc, val);
     }
 }
 
@@ -4041,7 +4096,27 @@ static int wrapPspSub4ccae(void* const h, const UInt32 a, const UInt32 b)
     const UInt64 t0 = mach_absolute_time();
     const int ret = FunctionCast(wrapPspSub4ccae, gOrgPspSub4ccae)(h, a, b);
     if (gPspEdxOn && gPspInRingCreate) {
-        pspSubEmit(h, "4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000);
+        // 批次 P3：补 `val=`——`4ccae` 的返回值是 `2*(raw == 0xffffffff)`，原始
+        //  `C2PMSG_64` 值已丢失。这里**再读一次**（1 次单发、无循环）补上。
+        //  ⚠ 只在前 2 行读（`gPspSub4ccae < 2`，与 per-fn 配额一致）⇒ 不增加 MMIO 次数。
+        UInt32 val = 0xFFFFFFFFU;
+        if (gPspSub4ccae < 2 && nredKernelPtrOk(h)) {
+            const UInt8* const H4 = static_cast<const UInt8*>(h);
+            const UInt64 iface4 = *reinterpret_cast<const UInt64*>(H4 + 8);
+            if (nredKernelPtrOk(reinterpret_cast<const void*>(iface4))) {
+                const UInt8* const IF4 = reinterpret_cast<const UInt8*>(iface4);
+                const UInt64 rr = *reinterpret_cast<const UInt64*>(IF4 + 0x40);
+                const UInt64 cx = *reinterpret_cast<const UInt64*>(IF4 + 8);
+                if (rr != 0) {
+                    using PspReadReg4 = UInt32 (*)(UInt64, UInt32, UInt32);
+                    const auto fn4 = reinterpret_cast<PspReadReg4>(rr);
+                    const UInt32 base4 = *reinterpret_cast<const UInt32*>(H4 + 92);
+                    val = fn4(cx, base4 + 0x80U, 75U);   // C2PMSG_64
+                }
+            }
+        }
+        pspSubEmit(h, "4ccae", gPspSub4ccae, ret, (mach_absolute_time() - t0) / 1000,
+                   nullptr, val);
     }
     return ret;
 }
