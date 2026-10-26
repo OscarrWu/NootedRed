@@ -4010,6 +4010,36 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
             }
         }
     }
+    // ─── 阶段 2b（`-NRedPspBaseFix`，诊断用）：ring create 返回后**主动 flush** ────────────
+    //  为什么：r345 的 tick 线程在真实 ≈33 s 停止，而 ring create 在 36.34 s 才返回
+    //  ⇒ 依赖周期拍的观测（`[pspring]`／`[pspedx] enter=1`／`[pspsub] fn=4c05b`）全部丢失。
+    //  ⚠ 用**非 force** 入口（`nredTraceFlush`）：`dumpNowForce` 是空操作（`nredTraceFlushForce` 直接 return 0）。
+    //  ⚠ 正常上下文（panic 前约 7 s，存储栈正常）⇒ 不违反"挂起修复"（该规则针对 panic/挂起路径）。
+    //  ⚠ 时序扰动（N18）：若 `ret == 0`，本次 flush 会把 fence 复位／TMR 推迟 flush 耗时；
+    //     若 `ret != 0`（r345 的形态），链已中止，无下游影响。
+    //  ⚠ 关态 ⇒ 不 flush、不输出（零行为）。
+    if (gPspBaseFixOn) {
+        gPspFlushBusy = NvMsgBuf::stFlushBusy();          // flush 前的互斥快照（区分"CAS 失败"与"写盘失败"）
+        {
+            static char preLine[64];
+            const int np = snprintf(preLine, sizeof(preLine), "[pspflush] pre busy=%u\n",
+                                    static_cast<unsigned>(gPspFlushBusy));
+            if (np > 0) { nredTraceLine(preLine, np); }   // ← 这一行会被下面的 flush 带出
+        }
+        gPspFlushRet = nredTraceFlush(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs);
+        {
+            static char postLine[64];
+            const int nq = snprintf(postLine, sizeof(postLine), "[pspflush] ret=%d\n", gPspFlushRet);
+            if (nq > 0) { nredTraceLine(postLine, nq); }  // ← 留给下一次 flush（或头部戳记）
+        }
+        // 阶段 2b（方案 §6.4 ②）：headerOnly 一次——**环空也写**、不 reset 环、payload ≤6 KB。
+        //  先例：`wrapPpHelperPowerUp`（`X6000FB.cpp:1339`）在正常上下文调 `nredTraceFlushHeader`。
+        //  ⚠ 冗余说明：①（完整 flush）成功后，头部戳记已在 ① 的文件里；② 的价值只有两点：
+        //     (a) 若 ① 的文件写失败（`ret==0`），② 可能成功（不同 seq）；
+        //     (b) ② 的 payload 小（≤6 KB），即使正文区被截断也能带出戳记。
+        //  ⚠ 若 ① 因 `stFlushBusy` 被占而失败，② 也会失败（同一互斥）——② 不解决 CAS 竞争。
+        (void)nredTraceFlushHeader(NvMsgBuf::stTick() * NvMsgBuf::kTickSecs);
+    }
     return ret;
 }
 
