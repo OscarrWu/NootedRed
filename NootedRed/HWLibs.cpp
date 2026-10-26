@@ -625,7 +625,25 @@ static UInt32 gPspRingC70  = 0;
 static UInt32 gPspRingC71  = 0;
 static UInt32 gPspRingC64  = 0;
 static int    gPspFlushRet  = 0x7FFFFFFF;   // 0x7FFFFFFF＝主动 flush 尚未执行
+static UInt32 gPspFlushTried = 0;   // 0＝主动 flush（C）尚未尝试；1＝已尝试（在 flush 之前置位）
 static UInt32 gPspFlushBusy = 0;            // flush 前的 stFlushBusy 快照
+
+// 阶段 2b 补充：BSS 快照（纯内存读；panic 路径可调）。
+void nredPspDiagSnapshot(NredPspDiag* const out)
+{
+    if (out == nullptr) { return; }
+    out->seen      = gPspRingSeen;
+    out->tried     = gPspFlushTried;
+    out->ret       = gPspRingRet;
+    out->flushRet  = static_cast<UInt32>(gPspFlushRet);
+    out->flushBusy = gPspFlushBusy;
+    out->c69       = gPspRingC69;
+    out->c70       = gPspRingC70;
+    out->c71       = gPspRingC71;
+    out->c64       = gPspRingC64;
+    out->mc        = gPspRingMc;
+    out->sz        = gPspRingSz;
+}
 // 批次 P3（`-NRedPspEdx`）：`0x4cb8a` 入口读数的已输出行数（≤4，跨 ring create 累积不重置）。
 static UInt32 gPspEntryN     = 0;
 //  （条目索引 `i` 不再单独存：头部行的 `idx=`＋`wrap=` 即可推出 `i`。）
@@ -4019,6 +4037,7 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
     //     若 `ret != 0`（r345 的形态），链已中止，无下游影响。
     //  ⚠ 关态 ⇒ 不 flush、不输出（零行为）。
     if (gPspBaseFixOn) {
+        gPspFlushTried = 1;                               // ← 先置"已尝试"，再快照 busy
         gPspFlushBusy = NvMsgBuf::stFlushBusy();          // flush 前的互斥快照（区分"CAS 失败"与"写盘失败"）
         {
             static char preLine[64];

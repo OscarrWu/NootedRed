@@ -28,6 +28,21 @@ void nredTraceLine(char* const buf, const int n);
 int nredTraceFlush();
 // A-28：秒级标签版本（由 L2 周期拍 `dumpTick` 在 stBusy 保护区内调用；文件名与首行带 `sec=`）
 int nredTraceFlush(int secTag);
+// 阶段 2b 补充（`-NRedPspBaseFix`，诊断用）：把 O2／主动 flush 的关键值交给 **panic 文本通道**。
+//  为什么需要：r346 证明"ring create 返回后没有任何 flush"（归档只有 seq=0/1/2）
+//  ⇒ 头部戳记依赖"之后还有一次 flush"⇒ 永不落盘；panic 文本必落 NVRAM，不依赖 flush。
+//  ⚠ 只在 panic 路径**只读**：不调 boot-arg 解析、不加锁、不分配、不写盘。
+struct NredPspDiag {
+    UInt32 seen;       // 0＝O2 尚未执行
+    UInt32 tried;      // 0＝主动 flush（C）尚未尝试；1＝已尝试
+    UInt32 ret;        // ring create 返回值
+    UInt32 flushRet;   // 0x7FFFFFFF＝C 未返回；0＝未写；>0＝成功（环行数）
+    UInt32 flushBusy;  // C 的 flush 前 `stFlushBusy` 快照
+    UInt32 c69, c70, c71, c64;
+    UInt64 mc;         // 苹果环 MC（`h+0x2C0+0x18`）
+    UInt64 sz;         // 苹果环大小（`h+0x2C0+0x08`）
+};
+void nredPspDiagSnapshot(NredPspDiag* out);
 // 失败收容（-NRedFailReset，默认关）：失败点只留内存证据（零 I/O、零复位）。
 //  批次 F 起与安全点解耦：Mark（失败点）→ Service（L2 拍：落盘 → 刷环 → PEHaltRestart(1)）。
 void nredFailResetMark(const char* where, int code, UInt64 a, UInt64 b);
