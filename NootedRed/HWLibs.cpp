@@ -4273,6 +4273,81 @@ static UInt32 nredPspRingDestroyCommon(void* const h, const UInt32 type,
 static int wrapPspHwInit(void* const h, void* const a2, void* const a3)
 {
     if (gOrgPspHwInit == 0) { return -1; }
+    // ─── 批次 pspbasefix（`-NRedPspBaseFix`，默认关）：修正 `h+0x5C` 的段索引 ─────────────
+    //  ⚠ 取值**不硬编码**：按 BASE_IDX=1 语义取同一数组的第 1 段 `*(u32*)(h+0x60)`。
+    //  ⚠ fail-closed：自校验不过 ⇒ 不写、只记日志（绝不猜）。
+    //  ⚠ 关态 ⇒ 整块不执行（零读、零写、零日志）。
+    if (gPspBaseFixOn && nredKernelPtrOk(h)) {
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt32 seg0 = *reinterpret_cast<const UInt32*>(H + 0x5C);
+        const UInt32 seg1 = *reinterpret_cast<const UInt32*>(H + 0x60);
+        const UInt32 seg2 = *reinterpret_cast<const UInt32*>(H + 0x64);
+        const UInt32 seg3 = *reinterpret_cast<const UInt32*>(H + 0x68);
+        const UInt32 seg4 = *reinterpret_cast<const UInt32*>(H + 0x6C);
+        const UInt32 seg5 = *reinterpret_cast<const UInt32*>(H + 0x70);
+
+        // O1b：**修正前**转储六段（＝config+0x30..0x44），供离线与 IPD 数组逐字比对。
+        if (gPspBaseFixN < 1) {
+            static char cfgLine[128];
+            const int nc = snprintf(cfgLine, sizeof(cfgLine),
+                                    "[pspcfg] seg=%x,%x,%x,%x,%x,%x\n",
+                                    static_cast<unsigned>(seg0), static_cast<unsigned>(seg1),
+                                    static_cast<unsigned>(seg2), static_cast<unsigned>(seg3),
+                                    static_cast<unsigned>(seg4), static_cast<unsigned>(seg5));
+            if (nc > 0) { nredTraceLine(cfgLine, nc); }
+        }
+
+        // 自校验（fail-closed）：①六段非零 ②六段互异 ③原值必须是已知的 IPD[0]（0x4000）
+        //   ④新值在合理范围（dword 单位 < 64 MB 的 SMN 空间）。
+        //  ⚠ 0x4000 是**校验用的已知原值**（r339／r344 实测），不是修复值；修复值来自数组第 1 段。
+        //  ⚠ 已修正过（seg0 == seg1）⇒ 互异检查失败 ⇒ 跳过（幂等）。
+        const bool nonzero = (seg0 != 0U && seg1 != 0U && seg2 != 0U && seg3 != 0U &&
+                              seg4 != 0U && seg5 != 0U);
+        const bool distinct = (seg0 != seg1 && seg0 != seg2 && seg0 != seg3 && seg0 != seg4 &&
+                               seg0 != seg5 && seg1 != seg2 && seg1 != seg3 && seg1 != seg4 &&
+                               seg1 != seg5 && seg2 != seg3 && seg2 != seg4 && seg2 != seg5 &&
+                               seg3 != seg4 && seg3 != seg5 && seg4 != seg5);
+        const bool ok = nonzero && distinct && (seg0 == 0x4000U) && (seg1 < 0x01000000U);
+
+        if (ok) {
+            if (gPspBaseFixN < 1) {
+                static char fixLine[96];
+                const int nf = snprintf(fixLine, sizeof(fixLine),
+                                        "[pspbase] fix bidx=%x -> %x\n",
+                                        static_cast<unsigned>(seg0), static_cast<unsigned>(seg1));
+                if (nf > 0) { nredTraceLine(fixLine, nf); }
+            }
+        } else if (gPspBaseFixN < 1) {
+            static char skipLine[96];
+            const int ns = snprintf(skipLine, sizeof(skipLine),
+                                    "[pspbase] skip self-check seg0=%x seg1=%x\n",
+                                    static_cast<unsigned>(seg0), static_cast<unsigned>(seg1));
+            if (ns > 0) { nredTraceLine(skipLine, ns); }
+        }
+
+        // O1：**修正后**转储 iface／ctx／base／bidx（纯内存，三处指针先过 nredKernelPtrOk）。
+        if (gPspBaseFixN < 1) {
+            ++gPspBaseFixN;
+            const UInt64 iface = *reinterpret_cast<const UInt64*>(H + 8);
+            UInt64 ctx = 0, base = 0;
+            if (nredKernelPtrOk(reinterpret_cast<const void*>(iface))) {
+                const UInt8* const IF = reinterpret_cast<const UInt8*>(iface);
+                ctx = *reinterpret_cast<const UInt64*>(IF + 8);
+                if (nredKernelPtrOk(reinterpret_cast<const void*>(ctx))) {
+                    base = *reinterpret_cast<const UInt64*>(
+                        reinterpret_cast<const UInt8*>(ctx) + 8);
+                }
+            }
+            static char baseLine[160];
+            const int nb = snprintf(baseLine, sizeof(baseLine),
+                                    "[pspbase] iface=%llx ctx=%llx base=%llx bidx=%x\n",
+                                    static_cast<unsigned long long>(iface),
+                                    static_cast<unsigned long long>(ctx),
+                                    static_cast<unsigned long long>(base),
+                                    static_cast<unsigned>(*reinterpret_cast<const UInt32*>(H + 0x5C)));
+            if (nb > 0) { nredTraceLine(baseLine, nb); }
+        }
+    }
     if (gPspEdxOn && gPsp495N < 1 && nredKernelPtrOk(h)) {
         ++gPsp495N;
         const UInt8* const H = static_cast<const UInt8*>(h);
