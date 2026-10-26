@@ -2997,6 +2997,40 @@ UInt32 X6000FB::wrapHandleCriticalError(void* self, const char* fmt1, const char
     //  ⚠ 只在探针开关打开时执行 ⇒ 其它轮次的 panic 行为逐字不变。
     if (sWantPspEdxFlush) { NvMsgBuf::dumpNowForce(); }
 
+    // ─── 阶段 2b 补充（`-NRedPspBaseFix`，诊断用）：把 O2／主动 flush 的关键值追加到 panic 文本 ───
+    //  为什么走 panic 文本：r346 证明 ring create 返回后**没有任何 flush**（归档只有 seq=0/1/2）
+    //  ⇒ 头部戳记永不落盘；panic 文本必落 NVRAM，不依赖 flush、零 FS I/O。
+    //  ⚠ 门控 `sWantPspBaseFix` 由 `armPanicGateValues()`（正常上下文）预存；panic 路径**只读**。
+    //  ⚠ `fmt1` 是 `doGPUPanic(const char* fmt, ...)` 的格式串（反汇编：变参函数）⇒
+    //    用 `%s` 复制会**保留**其 `%` 说明符，`fmt2/fmt3` 的消费顺序不变 ⇒ 安全。
+    //  ⚠ 关态 ⇒ 不追加、不读快照 ⇒ panic 文本逐字不变。
+    if (sWantPspBaseFix) {
+        static char pspFmt[2048];
+        NredPspDiag d{};
+        nredPspDiagSnapshot(&d);
+        const char* const base = (fmt1 != nullptr) ? fmt1 : "(null)";
+        // 预留 320 B 给 `[pspdiag]` 尾巴：若 fmt1 过长，先截断 fmt1，保证尾巴不被挤掉。
+        constexpr size_t kTail = 320;
+        size_t baseLen = strlen(base);
+        if (baseLen > sizeof(pspFmt) - kTail) { baseLen = sizeof(pspFmt) - kTail; }
+        const int np = snprintf(pspFmt, sizeof(pspFmt),
+                                "%.*s [pspdiag] seen=%u ret=%d busy=%u c69=%x c70=%x c71=%x c64=%x"
+                                " tried=%u fret=%u fmc=%llx fsz=%llx",
+                                static_cast<int>(baseLen), base,
+                                static_cast<unsigned>(d.seen),
+                                static_cast<int>(static_cast<SInt32>(d.ret)),
+                                static_cast<unsigned>(d.flushBusy),
+                                static_cast<unsigned>(d.c69), static_cast<unsigned>(d.c70),
+                                static_cast<unsigned>(d.c71), static_cast<unsigned>(d.c64),
+                                static_cast<unsigned>(d.tried),
+                                static_cast<unsigned>(d.flushRet),
+                                static_cast<unsigned long long>(d.mc),
+                                static_cast<unsigned long long>(d.sz));
+        if (np > 0) {
+            return FunctionCast(wrapHandleCriticalError, singleton().orgHandleCriticalError)(
+                self, pspFmt, fmt2, fmt3);
+        }
+    }
     return FunctionCast(wrapHandleCriticalError, singleton().orgHandleCriticalError)(self, fmt1, fmt2, fmt3);
 }
 
