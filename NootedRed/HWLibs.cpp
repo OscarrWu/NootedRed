@@ -614,6 +614,18 @@ static bool   gPspBaseFixOn = false;   // `-NRedPspBaseFix`
 static UInt32 gPspBaseFixN  = 0;       // 修正/转储已输出次数（≤1，跨调用累积）
 static UInt32 gPspFenceN    = 0;       // `[pspfence]` 已输出行数（≤8）
 static mach_vm_address_t gOrgPspFenceWait = 0;   // `0x4d6d0`（psp_cmd_km_fence_wait）
+// 阶段 2b（`-NRedPspBaseFix`，诊断用）：O2 关键值的 BSS 镜像，供头部戳记读取。
+//  ⚠ 关态 ⇒ 永不写入、头部永不输出（零行为）。
+static UInt32 gPspRingSeen = 0;      // 0＝O2 尚未执行
+static UInt32 gPspRingRet  = 0;      // ring create 的返回值
+static UInt64 gPspRingMc   = 0;      // 苹果环 MC（h+0x2C0+0x18）
+static UInt64 gPspRingSz   = 0;      // 苹果环大小（h+0x2C0+0x08）
+static UInt32 gPspRingC69  = 0;
+static UInt32 gPspRingC70  = 0;
+static UInt32 gPspRingC71  = 0;
+static UInt32 gPspRingC64  = 0;
+static int    gPspFlushRet  = 0x7FFFFFFF;   // 0x7FFFFFFF＝主动 flush 尚未执行
+static UInt32 gPspFlushBusy = 0;            // flush 前的 stFlushBusy 快照
 // 批次 P3（`-NRedPspEdx`）：`0x4cb8a` 入口读数的已输出行数（≤4，跨 ring create 累积不重置）。
 static UInt32 gPspEntryN     = 0;
 //  （条目索引 `i` 不再单独存：头部行的 `idx=`＋`wrap=` 即可推出 `i`。）
@@ -1984,6 +1996,38 @@ static int nredTraceFlushImpl(const int secTag, const bool force, const bool hea
                                   static_cast<unsigned>(gPspEdxEv),
                                   static_cast<unsigned>(gPspEdxSev));
         if (nPsp > 0) { off += (static_cast<size_t>(nPsp) < capPsp) ? static_cast<size_t>(nPsp) : capPsp; }
+    }
+    // 阶段 2b（`-NRedPspBaseFix`，诊断用）：O2 关键值 + 主动 flush 结果的头部戳记。
+    //  ⚠ 关态 ⇒ 一字不输出（零行为）。
+    //  ⚠ 语义：`seen=0` ⇒ O2 尚未执行（ring create 还没返回）；`seen=1` ⇒ 下面是 O2 的真实读数。
+    if (gPspBaseFixOn && off < sizeof(body)) {
+        const size_t capR = sizeof(body) - off;
+        int nR;
+        if (gPspRingSeen == 0U) {
+            nR = snprintf(body + off, capR, "[pspring] seen=0\n");
+        } else {
+            nR = snprintf(body + off, capR,
+                          "[pspring] ret=%x mc=%llx size=%llx c69=%x c70=%x c71=%x c64=%x bit31=%u st=%x\n",
+                          static_cast<unsigned>(gPspRingRet),
+                          static_cast<unsigned long long>(gPspRingMc),
+                          static_cast<unsigned long long>(gPspRingSz),
+                          static_cast<unsigned>(gPspRingC69),
+                          static_cast<unsigned>(gPspRingC70),
+                          static_cast<unsigned>(gPspRingC71),
+                          static_cast<unsigned>(gPspRingC64),
+                          static_cast<unsigned>((gPspRingC64 >> 31) & 1U),
+                          static_cast<unsigned>(gPspRingC64 & 0xFFFFU));
+        }
+        if (nR > 0) { off += (static_cast<size_t>(nR) < capR) ? static_cast<size_t>(nR) : capR; }
+    }
+    // 阶段 2b：主动 flush 的结果。**返回值语义（源码·确凿，`HWLibs.cpp:2416-2419`）**：
+    //   `> 0` ＝ 成功（写入字节数）；`0` ＝ 未写（四道门未过 或 写盘失败）。
+    //   初值 `0x7FFFFFFF` ＝ 尚未执行。
+    if (gPspBaseFixOn && off < sizeof(body)) {
+        const size_t capF = sizeof(body) - off;
+        const int nF = snprintf(body + off, capF, "[pspflush] ret=%d busy=%u\n",
+                                gPspFlushRet, static_cast<unsigned>(gPspFlushBusy));
+        if (nF > 0) { off += (static_cast<size_t>(nF) < capF) ? static_cast<size_t>(nF) : capF; }
     }
     // 批次 SOS 采样：调用点已**前移**到本函数入口（P0，见 `rootvnode` 判据之后）——
     //  原位置在环正文遍历之后，环空时早退 ⇒ 采样永远不执行。
@@ -3881,6 +3925,15 @@ static int wrapPspRingCreate(void* const h, const UInt32 type)
                                 static_cast<unsigned>((c64 >> 31) & 1U),
                                 static_cast<unsigned>(c64 & 0xFFFFU));
         if (nr > 0) { nredTraceLine(rgLine, nr); }
+        // 阶段 2b：镜像到 BSS（供头部戳记；纯内存）
+        gPspRingSeen = 1;
+        gPspRingRet  = static_cast<UInt32>(ret);
+        gPspRingMc   = ringMc;
+        gPspRingSz   = ringSz;
+        gPspRingC69  = c69;
+        gPspRingC70  = c70;
+        gPspRingC71  = c71;
+        gPspRingC64  = c64;
     }
     if (gPspEdxOn) {
         // 方案 A：**入口无条件计数**（不受 `ret != 0` 限制）⇒ 区分"未触发"与"触发但未读"。
