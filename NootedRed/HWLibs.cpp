@@ -4310,6 +4310,8 @@ static int wrapPspHwInit(void* const h, void* const a2, void* const a3)
         const bool ok = nonzero && distinct && (seg0 == 0x4000U) && (seg1 < 0x01000000U);
 
         if (ok) {
+            // ⚠ `H` 是 const 视图（读用）；写必须走可变指针，否则 reinterpret_cast 会 cast away qualifiers。
+            *reinterpret_cast<UInt32*>(static_cast<UInt8*>(h) + 0x5C) = seg1;   // ← 唯一的一处写
             if (gPspBaseFixN < 1) {
                 static char fixLine[96];
                 const int nf = snprintf(fixLine, sizeof(fixLine),
