@@ -3978,10 +3978,11 @@ static void pspStateEmit(void* const h, const char* const where)
 }
 
 
-// 批次 SOS 采样（R-SOS采样 §3）：在 20/27/32 s 各读一次 `C2PMSG_81`，定位 SOS 死亡窗口。
-//  ⚠ 复用 `pspStateEmit` 的读路径（`*(*(h+8)+64)`）；单次读、无循环、无写。
+// 批次 SOS 采样（R-SOS采样 §3）：在 20/27/32 s 各写一行 `[pspstate]`，标记采样时点。
+//  ⚠ R2（2026-10-26）：**已改为纯内存**——不再读 `C2PMSG_81`（原实现违反硬规则 4：
+//    在 `nredTraceFlushImpl` 的 flush 线程做 MMIO 读，且跨调用缓存苹果 `h`）。
+//    PSP alive 的判据改由 `[pspentry]`（`0x4cb8a` 入口，安全上下文）承担。
 //  ⚠ 独立计数 `gPspSampleN`（≤3），不与 `pspStateEmit` 的 `gPspStateN`（≤2）共用。
-//  ⚠ 失效保护：`gPspCtx` 非内核指针／接口非法／读回调为空 ⇒ 输出一行 `invalid` 后返回。
 static void pspStateSample(const UInt32 t)
 {
     // R2（2026-10-26）：**纯内存**——零 MMIO、零解引用。
