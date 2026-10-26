@@ -595,6 +595,15 @@ static UInt32     gGc7xSeen = 0;
 //  条目 `h+0x3938+i*0x110`（+0 事件 ID u32／+4 严重度 u32／+8 返回码 edx u64）＋文本 256 B。
 //  ⚠ 零写、零寄存器访问、不改返回值；关态不安装 hook、不读环、不输出。
 static bool   gPspEdxOn  = false;             // `-NRedPspEdx`
+// 批次 pspbasefix（`-NRedPspBaseFix`，默认关）：修正 `h+0x5C` 的段索引（IPD MP0 base_address[1]）。
+//  为什么：苹果用 `h+0x5C`（= config+0x30 = IPD base_address[0] = 0x4000）作 C2PMSG 基址，
+//  而 C2PMSG 的 BASE_IDX=1 ⇒ 应在 base_address[1]（C2PMSG 窗口段，见方案 §2.2）。三条访问路径
+//  （`0x4c63c` 读／`0x4c664` 写／`0x4c835` 轮询读）全部经 `h+0x5C` ⇒ 改一处全修。
+//  ⚠ 关态 ⇒ 零读、零写、零日志、不装 hook。
+static bool   gPspBaseFixOn = false;   // `-NRedPspBaseFix`
+static UInt32 gPspBaseFixN  = 0;       // 修正/转储已输出次数（≤1，跨调用累积）
+static UInt32 gPspFenceN    = 0;       // `[pspfence]` 已输出行数（≤8）
+static mach_vm_address_t gOrgPspFenceWait = 0;   // `0x4d6d0`（psp_cmd_km_fence_wait）
 // 批次 P3（`-NRedPspEdx`）：`0x4cb8a` 入口读数的已输出行数（≤4，跨 ring create 累积不重置）。
 static UInt32 gPspEntryN     = 0;
 //  （条目索引 `i` 不再单独存：头部行的 `idx=`＋`wrap=` 即可推出 `i`。）
@@ -9685,6 +9694,8 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
     gSmu20On = nredExactBootArg("-NRedSmu20");
     // 批次 PSP-edx（**默认关**）：苹果 PSP 事件环只读探针（hook `0x4cb8a`）。精确 token。
     gPspEdxOn = nredExactBootArg("-NRedPspEdx");
+    // 批次 pspbasefix（**默认关**）：修正 `h+0x5C` 的段索引。精确 token，与相邻行同款。
+    gPspBaseFixOn = nredExactBootArg("-NRedPspBaseFix");
     // 批次 pspring（**默认关**）：PSP 事件环全量 dump（32 条）。精确 token，与相邻行同款。
     //  ⚠ 任务卡给的是 `PE_parse_boot_argn("-NRedPspRing", nullptr, 0)`；此处改用
     //    `nredExactBootArg` —— 同一位置既有约定（见上一行），且 `PE_parse_boot_argn` 是
@@ -10226,7 +10237,7 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
         // P2（`-NRedPspEdx`，默认关）：`0x495ec`（`psp_hw_init`）入口读一次 `C2PMSG_81`。
         //  判据：`c2p81 != 0` ⇒ 苹果 PSP 链入口时 PSP alive（死亡在苹果链内部）；
         //        `c2p81 == 0` ⇒ 入口时已死（死亡在我方 bringup 之后、苹果链之前）。
-        if (gPspEdxOn) {
+        if (gPspEdxOn || gPspBaseFixOn) {
             const auto f495 = resolveProbe("psp-hwinit", kPspHwInitPattern, nullptr,
                                            arrsize(kPspHwInitPattern), 0x495EC);
             bool ok495 = false;
