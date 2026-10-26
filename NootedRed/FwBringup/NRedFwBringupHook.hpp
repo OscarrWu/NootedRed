@@ -77,6 +77,13 @@ UInt64 gBringupRingMc   = 0;   // ring 物理/总线地址（bringup 成功后�
 UInt32 gBringupRingSize = 0;   // ring 大小（kRingSizeBytes）
 UInt64 gBringupRingVa   = 0;   // ring 缓冲虚拟地址
 UInt32 gBringupRingWptr = 0;   // 当前 wptr
+// `-NRedTmrApple`（默认关）：TMR 归苹果——跳过**我方**的 TMR BO 分配与加载。
+//  为什么：`SETUP_TMR` 要求地址在 FB aperture 内；我方 bringup 只能给低 DRAM ⇒
+//  PSP 以 `0xFFFF0006` 拒绝。苹果 GMM 天然在 carve-out 内 ⇒ 交给苹果（`0x4db96` 分配 +
+//  `0x4dd8c` 提交）。**不是「跳过」**：TMR 仍被真实加载，只是换了一个主人。
+//  ⚠ 开 ⇒ 我方 `ctx.last_step` 停在 `TmrInit`(10)；A′ 前置（`>=8`）仍满足，
+//    `-NRedPspTmrReuse` 的跳过条件（`>=11`）不满足 ⇒ 苹果 SETUP_TMR 正常执行。
+static bool gTmrApple = false;
 
 // 232：本头文件内的 NRED_TRACE 改走 fwTrace（单份 static 行缓冲 + nredTraceLine，零 SYSLOG 栈）；
 //  push/pop 限定作用域 ⇒ HWLibs.cpp 其余区域仍用全局 NRED_TRACE。
@@ -255,6 +262,12 @@ inline void nredFwBringupHook(void* const /*appleCtx*/)
 __attribute__((noinline))
 static void nredBringupBody()
 {
+    // `-NRedTmrApple`（默认关）：TMR 归苹果。
+    //  ⚠ **必须在本函数入口解析**：`tmr-alloc` 块在 `:417`、加载调用在 `:492`，
+    //    而实施文档 §1.2 建议的「与 `-NRedTmrAddrReadout` 同处」（`:476`）**晚于**这两处
+    //    ⇒ 在那里解析会读到默认值 `false`，开关失效。故提前到入口。
+    gTmrApple = checkKernelArgument("-NRedTmrApple");
+
     // A-2：固件资产完整性校验（大小=编译期 sizeof；哈希=运行期 fnv1a64）。
     // 缺失/损坏 ⇒ trace 并跳过装载（可判失败，不静默通过）。
     if (!fw::fwAssetVerify(kFwTocAsset)) {
@@ -414,12 +427,16 @@ static void nredBringupBody()
     // 依据：Linux psp_tmr_init (amdgpu_psp.c:881-923) 先 loadToc 取 tmr_size，再分配 TMR。
     // 分配失败 ⇒ trace 并跳过（可判、不静默）。
     // B39 三层入口标记 ③-a：`tmr-alloc: enter`（进入分配段，早于任何分配/判据）。
-    NRED_TRACE("tmr-alloc: enter");
+    //  ⚠ `-NRedTmrApple` 开 ⇒ 整段跳过（不分配 64 MB；苹果 `0x4db96` 用 GMM carve-out 分配）。
     constexpr UInt32 kTmrAlign = 0x100000;
     IOBufferMemoryDescriptor* tmrDesc = nullptr;
     addr64_t tmrPhys = 0;
     uint8_t* tmrVa = nullptr;
     bool tmrOk = false;
+    if (gTmrApple) {
+        NRED_TRACE("tmr-apple: skip own tmr-alloc (apple 0x4db96 will allocate)");
+    } else {
+    NRED_TRACE("tmr-alloc: enter");
     if (ctx.tmr_size > 0) {
         tmrDesc = IOBufferMemoryDescriptor::withOptions(
             kIOMemoryPhysicallyContiguous | kIODirectionInOut, ctx.tmr_size, kTmrAlign);
@@ -453,6 +470,7 @@ static void nredBringupBody()
     ctx.tmr_buf = tmrVa;
     // B39 三层入口标记 ③-b：`tmr-alloc: ok size=0x%X`（分配成功；纯观测，不改控制流）
     NRED_TRACE("tmr-alloc: ok size=0x%X", ctx.tmr_size);
+    }   // end if (!gTmrApple)
 
     // ── β-1 重跑：buf_phy_addr 已改填借用 MC 常量（prepTmrCmd 内），此处**不再**调用
     //   `nredMapTmrForDma()`（B40 实证 DMA 映射退化为恒等 IOVA==CPU PA，未测到 GPU 可寻址域）。
@@ -489,12 +507,19 @@ static void nredBringupBody()
     //   但该提交实际连带删除了本 Phase 2 块与末行结构化 trace。而 A-13 的 D1′、
     //   kb/技术草案/PAeqMC与SETUP_TMR字段语义.md:333（以 bringupRunTmrLoad 前为坐标）以及
     //   ROADMAP 的 B 轮三出口判据（`tmrLoad: ok` / `step=12`）均以本块存在为前提 ⇒ 判为回归，予以恢复。
+    if (gTmrApple) {
+        // TMR 归苹果：我方 bringup 只做到 TMR 之前（step 停在 10）。
+        // ⚠ 不是"跳过"：TMR 由苹果的 `0x4db96`（GMM 分配）+ `0x4dd8c`（SETUP_TMR）真实加载。
+        NRED_TRACE("tmr-apple: skip own tmrLoad (step stays 10)");
+        rc = 0;
+    } else {
     rc = fw::bringupRunTmrLoad(&ctx,
                                false,      // boot_time_tmr
                                false,      // autoload_supported
                                tmrPhys,
                                cmdBufMc,
                                fenceMc);
+    }
     // 探针可靠性：phase2 结束即快照（成功/失败都要），并取该阶段最后一帧的响应状态。
     gBringupStep      = static_cast<UInt32>(ctx.last_step);
     gBringupLastError = ctx.last_error;
