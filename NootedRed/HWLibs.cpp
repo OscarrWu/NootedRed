@@ -481,6 +481,16 @@ static const UInt8 kPspRingDestroyAPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x
 static const UInt8 kPspRingDestroyBPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
                                                 0x53, 0x50, 0x49, 0x89, 0xFF, 0x83, 0xFE, 0x01,
                                                 0x74, 0x13, 0xB8, 0x01};
+// 批次 pspbasefix（`-NRedPspBaseFix`）：`0x4d6d0`（`psp_cmd_km_fence_wait`）前 30 B。
+//  取自 macho `__text`（VMA 0x4d6d0，file off 0x4e6d0；md5 37c28087831254df3bd0cc0048a16926）。
+//  反汇编：push rbp; mov rbp,rsp; push r15/r14/r12/rbx; sub rsp,0x10; xor eax,eax;
+//          mov [rbp-0x28],rax; mov [rbp-0x30],rax; mov ebx,1
+//  ⚠ 唯一性实测：24 B 命中 3 次（0x2114／0x4d6d0／0x92125）；**28/30 B 唯一（count=1）**。
+//  ⚠ 入口确认：0x4d6cf 前一字节 = 0xff（上一条 call 末字节）。
+static const UInt8 kPspFenceWaitPattern[] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56,
+                                             0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x10, 0x31,
+                                             0xC0, 0x48, 0x89, 0x45, 0xD8, 0x48, 0x89, 0x45,
+                                             0xD0, 0xBB, 0x01, 0x00, 0x00, 0x00};
 
 // 0x4a988 前 15 B（批次 psptmrreuse v2：苹果 PSP selector 分派器；`resolveProbe` 的 expected-offset 校验用）。
 //  取自 macho `__text`（VMA 0x4a988，file off 0x4b988）：55 48 89 e5 41 56 53 48 85 ff 74 36 49 89 fe
@@ -4412,6 +4422,40 @@ static int wrapPspHwInit(void* const h, void* const a2, void* const a3)
         }
     }
     return FunctionCast(wrapPspHwInit, gOrgPspHwInit)(h, a2, a3);
+}
+
+// `0x4d6d0`（`psp_cmd_km_fence_wait`）的**只读** hook：打印 fence 实际值／期望值／返回值。
+//  签名：`int FUN_0004d6d0(long h, uint *slot)`（fn/4d6d0.c）。
+//  ⚠ 零写、零寄存器访问、不改返回值；关态不装 hook。
+//  ⚠ 限流 ≤8 行（`0x4d6d0` 每次提交都调，stage-1 会调很多次）。
+//  ⚠ `h+0xAE0` 是 fence 缓冲 VA（`0x4ce88` 分配）；未分配时为 0 ⇒ 记 0xFFFFFFFF。
+static int wrapPspFenceWait(void* const h, UInt32* const slot)
+{
+    if (gOrgPspFenceWait == 0) { return 1; }
+    const bool logIt = gPspBaseFixOn && gPspFenceN < 8 && nredKernelPtrOk(h)
+                       && slot != nullptr && *slot < 0x10U;
+    UInt32 fence = 0xFFFFFFFFU, expect = 0xFFFFFFFFU, slotVal = 0;
+    if (logIt) {
+        ++gPspFenceN;
+        slotVal = *slot;
+        const UInt8* const H = static_cast<const UInt8*>(h);
+        const UInt64 fenceVa = *reinterpret_cast<const UInt64*>(H + 0xAE0);
+        expect = *reinterpret_cast<const UInt32*>(H + 0x770 + static_cast<size_t>(slotVal) * 0x38);
+        if (nredKernelPtrOk(reinterpret_cast<const void*>(fenceVa))) {
+            fence = *reinterpret_cast<const UInt32*>(reinterpret_cast<const void*>(fenceVa));
+        }
+    }
+    const int ret = FunctionCast(wrapPspFenceWait, gOrgPspFenceWait)(h, slot);
+    if (logIt) {
+        static char lf[128];
+        const int nf = snprintf(lf, sizeof(lf),
+                                "[pspfence] slot=%u fence=%x expect=%x ret=%d\n",
+                                static_cast<unsigned>(slotVal),
+                                static_cast<unsigned>(fence),
+                                static_cast<unsigned>(expect), ret);
+        if (nf > 0) { nredTraceLine(lf, nf); }
+    }
+    return ret;
 }
 
 static UInt32 wrapPspRingDestroyA(void* const h, const UInt32 type)
@@ -10362,6 +10406,25 @@ void X5000HWLibs::processKext(KernelPatcher& patcher, const size_t id, const mac
                                           static_cast<unsigned long long>(f495));
                 if (n495 > 0) { nredTraceLine(l495, n495); }
             }
+        }
+        // 批次 pspbasefix（`-NRedPspBaseFix`，默认关）：`0x4d6d0`（fence 等待）只读 hook。
+        //  ⚠ 关态 ⇒ 不注册 hook ⇒ 原件逐字不变。
+        if (gPspBaseFixOn) {
+            const auto f4d6 = resolveProbe("psp-fence", kPspFenceWaitPattern, nullptr,
+                                           arrsize(kPspFenceWaitPattern), 0x4D6D0);
+            bool ok4d6 = false;
+            if (f4d6 != 0) {
+                ok4d6 = hookProbe(f4d6,
+                                  KernelPatcher::RouteRequest{nullptr, wrapPspFenceWait,
+                                                              gOrgPspFenceWait},
+                                  "psp-fence");
+            }
+            static char lf6[96];
+            const int nf6 = snprintf(lf6, sizeof(lf6), "[pspfence] hook=%s at=%llx\n",
+                                     (f4d6 == 0) ? "resolve-failed"
+                                                 : (ok4d6 ? "installed" : "route-failed"),
+                                     static_cast<unsigned long long>(f4d6));
+            if (nf6 > 0) { nredTraceLine(lf6, nf6); }
         }
         // R6（`-NRedPspRingReuse`，默认关）：两个 ring destroy 的 free 配对。
         //  ⚠ 关态 ⇒ 本块不成立 ⇒ 不注册 hook ⇒ 原件逐字不变。
