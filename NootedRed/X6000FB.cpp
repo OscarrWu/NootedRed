@@ -188,6 +188,8 @@ static bool sWantProbePPLIB  = false;   // -NRedProbePPLIB
 //  `-NRedStagePanic6`／`-NRedRegisterHwSvc`／`-NRedAccelProbe`／`-NRedAccelLog` 时安装
 //  ⇒ 探针轮的 boot-args 不含这些 ⇒ 该块不执行 ⇒ panic 时**没有任何 flush**。
 static bool sWantPspEdxFlush = false;   // -NRedPspEdx（正常上下文预存；panic 路径只读）
+// 阶段 2b 补充（`-NRedPspBaseFix`）：panic 文本通道门控（正常上下文预存；panic 路径只读）。
+static bool sWantPspBaseFix = false;
 
 static void armPanicGateValues()
 {
@@ -199,6 +201,7 @@ static void armPanicGateValues()
     sWantProbePanic  = checkKernelArgument("-NRedProbePanic");
     sWantProbePPLIB  = checkKernelArgument("-NRedProbePPLIB");
     sWantPspEdxFlush = checkKernelArgument("-NRedPspEdx");
+    sWantPspBaseFix  = checkKernelArgument("-NRedPspBaseFix");
 }
 // ─── P3P14 复读通道（乙线 R1，S1；与 P5 的 panic 文本通道**同形但独立**）────────────
 //  立论与 P5 相同：PP 时刻（≈45–50 s）**写文件通道历代零命中**（151 归档）；
