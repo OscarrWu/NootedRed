@@ -4337,7 +4337,10 @@ static int wrapPspHwInit(void* const h, void* const a2, void* const a3)
         }
 
         // 自校验（fail-closed）：①六段非零 ②六段互异 ③原值必须是已知的 IPD[0]（0x4000）
-        //   ④新值在合理范围（dword 单位 < 64 MB 的 SMN 空间）。
+        //   ④新值必须**等于**已知的 SEG0 段基址（`fw::kMpSeg0Base`）——与方案 §5.2 的互证条件一致。
+        //      ⚠ 为什么必须是等值而不是"范围"：`0xDC0000` 等其它段同样满足"< 64 MB"，
+        //      若 `h+0x60` 不是 SEG0，写下去会把苹果 PSP 的读写整体改到**未证段**的 MMIO
+        //      （可能挂起／写错块），且写发生在 O1b 判读之前 ⇒ 必须在写之前用等值条件拦住。
         //  ⚠ 0x4000 是**校验用的已知原值**（r339／r344 实测），不是修复值；修复值来自数组第 1 段。
         //  ⚠ 已修正过（seg0 == seg1）⇒ 互异检查失败 ⇒ 跳过（幂等）。
         const bool nonzero = (seg0 != 0U && seg1 != 0U && seg2 != 0U && seg3 != 0U &&
@@ -4346,7 +4349,7 @@ static int wrapPspHwInit(void* const h, void* const a2, void* const a3)
                                seg0 != seg5 && seg1 != seg2 && seg1 != seg3 && seg1 != seg4 &&
                                seg1 != seg5 && seg2 != seg3 && seg2 != seg4 && seg2 != seg5 &&
                                seg3 != seg4 && seg3 != seg5 && seg4 != seg5);
-        const bool ok = nonzero && distinct && (seg0 == 0x4000U) && (seg1 < 0x01000000U);
+        const bool ok = nonzero && distinct && (seg0 == 0x4000U) && (seg1 == fw::kMpSeg0Base);
 
         if (ok) {
             // ⚠ `H` 是 const 视图（读用）；写必须走可变指针，否则 reinterpret_cast 会 cast away qualifiers。
@@ -4361,8 +4364,9 @@ static int wrapPspHwInit(void* const h, void* const a2, void* const a3)
         } else if (gPspBaseFixN < 1) {
             static char skipLine[96];
             const int ns = snprintf(skipLine, sizeof(skipLine),
-                                    "[pspbase] skip self-check seg0=%x seg1=%x\n",
-                                    static_cast<unsigned>(seg0), static_cast<unsigned>(seg1));
+                                    "[pspbase] skip self-check seg0=%x seg1=%x want=%x\n",
+                                    static_cast<unsigned>(seg0), static_cast<unsigned>(seg1),
+                                    static_cast<unsigned>(fw::kMpSeg0Base));
             if (ns > 0) { nredTraceLine(skipLine, ns); }
         }
 
